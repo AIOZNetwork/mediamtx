@@ -137,6 +137,7 @@ type Server struct {
 	chAPIDeleteStreamKey chan serverAPIDeleteStreamKeyReq
 
 	streamFileMutex sync.RWMutex
+	streamOpMutex   sync.Mutex
 }
 
 // Initialize initializes the server.
@@ -277,20 +278,30 @@ outer:
 			req.res <- serverAPIConnsKickRes{}
 
 		case req := <-s.chAPICreateStreamKey:
+			s.streamOpMutex.Lock()
+
 			var streams []StreamInfo
 			if err := s.readJSONFile(filename, &streams); err != nil {
 				if !os.IsNotExist(err) {
 					req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("read file: %w", err)}
+					s.streamOpMutex.Unlock()
 					continue
 				}
 				streams = []StreamInfo{}
 			}
 
+			streamExists := false
 			for _, stream := range streams {
 				if stream.StreamID == req.streamId.String() {
-					req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("stream id already exists")}
-					continue outer
+					streamExists = true
+					break
 				}
+			}
+
+			if streamExists {
+				req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("stream id already exists")}
+				s.streamOpMutex.Unlock()
+				continue
 			}
 
 			newStream := StreamInfo{
@@ -303,19 +314,25 @@ outer:
 
 			if err := s.writeJSONFile(filename, streams); err != nil {
 				req.res <- serverAPICreateStreamKeyRes{err: err}
+				s.streamOpMutex.Unlock()
 				continue
 			}
 
 			req.res <- serverAPICreateStreamKeyRes{err: nil}
+			s.streamOpMutex.Unlock()
 
 		case req := <-s.chAPIDeleteStreamId:
+			s.streamOpMutex.Lock()
+
 			var streams []StreamInfo
 			if err := s.readJSONFile(filename, &streams); err != nil {
 				if os.IsNotExist(err) {
 					req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("file not found")}
+					s.streamOpMutex.Unlock()
 					continue
 				}
 				req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("read file: %w", err)}
+				s.streamOpMutex.Unlock()
 				continue
 			}
 
@@ -331,24 +348,31 @@ outer:
 
 			if !found {
 				req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("stream not found")}
+				s.streamOpMutex.Unlock()
 				continue
 			}
 
 			if err := s.writeJSONFile(filename, newStreams); err != nil {
 				req.res <- serverAPIDeleteStreamIdRes{err: err}
+				s.streamOpMutex.Unlock()
 				continue
 			}
 
 			req.res <- serverAPIDeleteStreamIdRes{err: nil}
+			s.streamOpMutex.Unlock()
 
 		case req := <-s.chAPIDeleteStreamKey:
+			s.streamOpMutex.Lock()
+
 			var streams []StreamInfo
 			if err := s.readJSONFile(filename, &streams); err != nil {
 				if os.IsNotExist(err) {
 					req.res <- serverAPIDeleteStreamKeyRes{err: nil}
+					s.streamOpMutex.Unlock()
 					continue
 				}
 				req.res <- serverAPIDeleteStreamKeyRes{err: fmt.Errorf("read file: %w", err)}
+				s.streamOpMutex.Unlock()
 				continue
 			}
 
@@ -364,15 +388,18 @@ outer:
 
 			if !found {
 				req.res <- serverAPIDeleteStreamKeyRes{err: nil}
+				s.streamOpMutex.Unlock()
 				continue
 			}
 
 			if err := s.writeJSONFile(filename, newStreams); err != nil {
 				req.res <- serverAPIDeleteStreamKeyRes{err: err}
+				s.streamOpMutex.Unlock()
 				continue
 			}
 
 			req.res <- serverAPIDeleteStreamKeyRes{err: nil}
+			s.streamOpMutex.Unlock()
 
 		case <-s.ctx.Done():
 			break outer
