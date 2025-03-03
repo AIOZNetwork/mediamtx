@@ -136,8 +136,7 @@ type Server struct {
 	chAPIDeleteStreamId  chan serverAPIDeleteStreamIdReq
 	chAPIDeleteStreamKey chan serverAPIDeleteStreamKeyReq
 
-	streamFileMutex sync.RWMutex
-	streamOpMutex   sync.Mutex
+	streamOpMutex sync.Mutex
 }
 
 // Initialize initializes the server.
@@ -278,128 +277,123 @@ outer:
 			req.res <- serverAPIConnsKickRes{}
 
 		case req := <-s.chAPICreateStreamKey:
-			s.streamOpMutex.Lock()
+			func() {
+				s.streamOpMutex.Lock()
+				defer s.streamOpMutex.Unlock()
 
-			var streams []StreamInfo
-			if err := s.readJSONFile(filename, &streams); err != nil {
-				if !os.IsNotExist(err) {
-					req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("read file: %w", err)}
-					s.streamOpMutex.Unlock()
-					continue
+				var streams []StreamInfo
+				if err := s.readJSONFile(filename, &streams); err != nil {
+					if !os.IsNotExist(err) {
+						req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("read file: %w", err)}
+						return
+					}
+					streams = []StreamInfo{}
 				}
-				streams = []StreamInfo{}
-			}
 
-			streamExists := false
-			for _, stream := range streams {
-				if stream.StreamID == req.streamId.String() {
-					streamExists = true
-					break
+				streamExists := false
+				for _, stream := range streams {
+					if stream.StreamID == req.streamId.String() {
+						streamExists = true
+						break
+					}
 				}
-			}
 
-			if streamExists {
-				req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("stream id already exists")}
-				s.streamOpMutex.Unlock()
-				continue
-			}
+				if streamExists {
+					req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("stream id already exists")}
+					return
+				}
 
-			newStream := StreamInfo{
-				StreamKey: req.streamKey.String(),
-				StreamID:  req.streamId.String(),
-				Available: req.available,
-				CreatedAt: time.Now().Format(time.RFC3339),
-			}
-			streams = append(streams, newStream)
+				newStream := StreamInfo{
+					StreamKey: req.streamKey.String(),
+					StreamID:  req.streamId.String(),
+					Available: req.available,
+					CreatedAt: time.Now().Format(time.RFC3339),
+				}
+				streams = append(streams, newStream)
 
-			if err := s.writeJSONFile(filename, streams); err != nil {
-				req.res <- serverAPICreateStreamKeyRes{err: err}
-				s.streamOpMutex.Unlock()
-				continue
-			}
+				if err := s.writeJSONFile(filename, streams); err != nil {
+					req.res <- serverAPICreateStreamKeyRes{err: err}
+					return
+				}
 
-			req.res <- serverAPICreateStreamKeyRes{err: nil}
-			s.streamOpMutex.Unlock()
+				req.res <- serverAPICreateStreamKeyRes{err: nil}
+			}()
 
 		case req := <-s.chAPIDeleteStreamId:
-			s.streamOpMutex.Lock()
+			func() {
+				s.streamOpMutex.Lock()
+				defer s.streamOpMutex.Unlock()
 
-			var streams []StreamInfo
-			if err := s.readJSONFile(filename, &streams); err != nil {
-				if os.IsNotExist(err) {
-					req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("file not found")}
-					s.streamOpMutex.Unlock()
-					continue
+				var streams []StreamInfo
+				if err := s.readJSONFile(filename, &streams); err != nil {
+					if os.IsNotExist(err) {
+						req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("file not found")}
+						return
+					}
+					req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("read file: %w", err)}
+					return
 				}
-				req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("read file: %w", err)}
-				s.streamOpMutex.Unlock()
-				continue
-			}
 
-			found := false
-			newStreams := []StreamInfo{}
-			for _, stream := range streams {
-				if stream.StreamKey == req.streamKey.String() && stream.StreamID == req.streamId.String() {
-					found = true
-					continue
+				found := false
+				newStreams := []StreamInfo{}
+				for _, stream := range streams {
+					if stream.StreamKey == req.streamKey.String() && stream.StreamID == req.streamId.String() {
+						found = true
+						continue
+					}
+					newStreams = append(newStreams, stream)
 				}
-				newStreams = append(newStreams, stream)
-			}
 
-			if !found {
-				req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("stream not found")}
-				s.streamOpMutex.Unlock()
-				continue
-			}
+				if !found {
+					req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("stream not found")}
+					return
+				}
 
-			if err := s.writeJSONFile(filename, newStreams); err != nil {
-				req.res <- serverAPIDeleteStreamIdRes{err: err}
-				s.streamOpMutex.Unlock()
-				continue
-			}
+				if err := s.writeJSONFile(filename, newStreams); err != nil {
+					req.res <- serverAPIDeleteStreamIdRes{err: err}
+					return
+				}
 
-			req.res <- serverAPIDeleteStreamIdRes{err: nil}
-			s.streamOpMutex.Unlock()
+				req.res <- serverAPIDeleteStreamIdRes{err: nil}
+			}()
 
 		case req := <-s.chAPIDeleteStreamKey:
-			s.streamOpMutex.Lock()
+			func() {
+				s.streamOpMutex.Lock()
+				defer s.streamOpMutex.Unlock()
 
-			var streams []StreamInfo
-			if err := s.readJSONFile(filename, &streams); err != nil {
-				if os.IsNotExist(err) {
+				var streams []StreamInfo
+				if err := s.readJSONFile(filename, &streams); err != nil {
+					if os.IsNotExist(err) {
+						req.res <- serverAPIDeleteStreamKeyRes{err: nil}
+						return
+					}
+					req.res <- serverAPIDeleteStreamKeyRes{err: fmt.Errorf("read file: %w", err)}
+					return
+				}
+
+				found := false
+				newStreams := []StreamInfo{}
+				for _, stream := range streams {
+					if stream.StreamKey == req.streamKey.String() {
+						found = true
+						continue
+					}
+					newStreams = append(newStreams, stream)
+				}
+
+				if !found {
 					req.res <- serverAPIDeleteStreamKeyRes{err: nil}
-					s.streamOpMutex.Unlock()
-					continue
+					return
 				}
-				req.res <- serverAPIDeleteStreamKeyRes{err: fmt.Errorf("read file: %w", err)}
-				s.streamOpMutex.Unlock()
-				continue
-			}
 
-			found := false
-			newStreams := []StreamInfo{}
-			for _, stream := range streams {
-				if stream.StreamKey == req.streamKey.String() {
-					found = true
-					continue
+				if err := s.writeJSONFile(filename, newStreams); err != nil {
+					req.res <- serverAPIDeleteStreamKeyRes{err: err}
+					return
 				}
-				newStreams = append(newStreams, stream)
-			}
 
-			if !found {
 				req.res <- serverAPIDeleteStreamKeyRes{err: nil}
-				s.streamOpMutex.Unlock()
-				continue
-			}
-
-			if err := s.writeJSONFile(filename, newStreams); err != nil {
-				req.res <- serverAPIDeleteStreamKeyRes{err: err}
-				s.streamOpMutex.Unlock()
-				continue
-			}
-
-			req.res <- serverAPIDeleteStreamKeyRes{err: nil}
-			s.streamOpMutex.Unlock()
+			}()
 
 		case <-s.ctx.Done():
 			break outer
@@ -551,9 +545,6 @@ func (s *Server) APIDeleteStreamKey(streamKey uuid.UUID) error {
 }
 
 func (s *Server) readJSONFile(filename string, streams *[]StreamInfo) error {
-	s.streamFileMutex.RLock()
-	defer s.streamFileMutex.RUnlock()
-
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -565,9 +556,6 @@ func (s *Server) readJSONFile(filename string, streams *[]StreamInfo) error {
 }
 
 func (s *Server) writeJSONFile(filename string, streams []StreamInfo) error {
-	s.streamFileMutex.Lock()
-	defer s.streamFileMutex.Unlock()
-
 	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
 		return fmt.Errorf("create directory: %w", err)
 	}
