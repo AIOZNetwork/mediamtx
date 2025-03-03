@@ -265,7 +265,7 @@ func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
 		},
 	})
 	if err != nil {
-		var terr *auth.Error
+		var terr auth.Error
 		if errors.As(err, &terr) {
 			// wait some seconds to mitigate brute force attacks
 			<-time.After(auth.PauseAfterError)
@@ -335,7 +335,7 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
 		},
 	})
 	if err != nil {
-		var terr *auth.Error
+		var terr auth.Error
 		if errors.As(err, &terr) {
 			// wait some seconds to mitigate brute force attacks
 			<-time.After(auth.PauseAfterError)

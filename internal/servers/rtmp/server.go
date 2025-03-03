@@ -135,6 +135,8 @@ type Server struct {
 	chAPICreateStreamKey chan serverAPICreateStreamKeyReq
 	chAPIDeleteStreamId  chan serverAPIDeleteStreamIdReq
 	chAPIDeleteStreamKey chan serverAPIDeleteStreamKeyReq
+
+	streamFileMutex sync.RWMutex
 }
 
 // Initialize initializes the server.
@@ -276,19 +278,12 @@ outer:
 
 		case req := <-s.chAPICreateStreamKey:
 			var streams []StreamInfo
-
-			data, err := os.ReadFile(filename)
-			if err != nil {
+			if err := s.readJSONFile(filename, &streams); err != nil {
 				if !os.IsNotExist(err) {
 					req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("read file: %w", err)}
 					continue
 				}
 				streams = []StreamInfo{}
-			} else {
-				if err := json.Unmarshal(data, &streams); err != nil {
-					req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("unmarshal streams: %w", err)}
-					continue
-				}
 			}
 
 			for _, stream := range streams {
@@ -306,38 +301,21 @@ outer:
 			}
 			streams = append(streams, newStream)
 
-			if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
-				req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("create directory: %w", err)}
-				continue
-			}
-
-			updatedData, err := json.MarshalIndent(streams, "", "  ")
-			if err != nil {
-				req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("marshal streams: %w", err)}
-				continue
-			}
-
-			if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-				req.res <- serverAPICreateStreamKeyRes{err: fmt.Errorf("write file: %w", err)}
+			if err := s.writeJSONFile(filename, streams); err != nil {
+				req.res <- serverAPICreateStreamKeyRes{err: err}
 				continue
 			}
 
 			req.res <- serverAPICreateStreamKeyRes{err: nil}
+
 		case req := <-s.chAPIDeleteStreamId:
 			var streams []StreamInfo
-
-			data, err := os.ReadFile(filename)
-			if err != nil {
+			if err := s.readJSONFile(filename, &streams); err != nil {
 				if os.IsNotExist(err) {
 					req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("file not found")}
 					continue
 				}
 				req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("read file: %w", err)}
-				continue
-			}
-
-			if err := json.Unmarshal(data, &streams); err != nil {
-				req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("unmarshal streams: %w", err)}
 				continue
 			}
 
@@ -356,14 +334,8 @@ outer:
 				continue
 			}
 
-			updatedData, err := json.MarshalIndent(newStreams, "", "  ")
-			if err != nil {
-				req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("marshal streams: %w", err)}
-				continue
-			}
-
-			if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-				req.res <- serverAPIDeleteStreamIdRes{err: fmt.Errorf("write file: %w", err)}
+			if err := s.writeJSONFile(filename, newStreams); err != nil {
+				req.res <- serverAPIDeleteStreamIdRes{err: err}
 				continue
 			}
 
@@ -371,19 +343,12 @@ outer:
 
 		case req := <-s.chAPIDeleteStreamKey:
 			var streams []StreamInfo
-
-			data, err := os.ReadFile(filename)
-			if err != nil {
+			if err := s.readJSONFile(filename, &streams); err != nil {
 				if os.IsNotExist(err) {
 					req.res <- serverAPIDeleteStreamKeyRes{err: nil}
 					continue
 				}
 				req.res <- serverAPIDeleteStreamKeyRes{err: fmt.Errorf("read file: %w", err)}
-				continue
-			}
-
-			if err := json.Unmarshal(data, &streams); err != nil {
-				req.res <- serverAPIDeleteStreamKeyRes{err: fmt.Errorf("unmarshal streams: %w", err)}
 				continue
 			}
 
@@ -402,18 +367,13 @@ outer:
 				continue
 			}
 
-			updatedData, err := json.MarshalIndent(newStreams, "", "  ")
-			if err != nil {
-				req.res <- serverAPIDeleteStreamKeyRes{err: fmt.Errorf("marshal streams: %w", err)}
-				continue
-			}
-
-			if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-				req.res <- serverAPIDeleteStreamKeyRes{err: fmt.Errorf("write file: %w", err)}
+			if err := s.writeJSONFile(filename, newStreams); err != nil {
+				req.res <- serverAPIDeleteStreamKeyRes{err: err}
 				continue
 			}
 
 			req.res <- serverAPIDeleteStreamKeyRes{err: nil}
+
 		case <-s.ctx.Done():
 			break outer
 		}
@@ -561,4 +521,38 @@ func (s *Server) APIDeleteStreamKey(streamKey uuid.UUID) error {
 	case <-s.ctx.Done():
 		return fmt.Errorf("terminated")
 	}
+}
+
+func (s *Server) readJSONFile(filename string, streams *[]StreamInfo) error {
+	s.streamFileMutex.RLock()
+	defer s.streamFileMutex.RUnlock()
+
+	file, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	return decoder.Decode(streams)
+}
+
+func (s *Server) writeJSONFile(filename string, streams []StreamInfo) error {
+	s.streamFileMutex.Lock()
+	defer s.streamFileMutex.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+
+	updatedData, err := json.MarshalIndent(streams, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal streams: %w", err)
+	}
+
+	if err := os.WriteFile(filename, updatedData, 0644); err != nil {
+		return fmt.Errorf("write file: %w", err)
+	}
+
+	return nil
 }

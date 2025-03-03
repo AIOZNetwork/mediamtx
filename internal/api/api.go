@@ -2,7 +2,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/conf/jsonwrapper"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
@@ -273,11 +273,9 @@ func (a *API) writeError(ctx *gin.Context, status int, err error) {
 	a.Log(logger.Error, err.Error())
 
 	// add error to response
-	ctx.JSON(
-		status, &defs.APIError{
-			Error: err.Error(),
-		},
-	)
+	ctx.JSON(status, &defs.APIError{
+		Error: err.Error(),
+	})
 }
 
 func (a *API) middlewareOrigin(ctx *gin.Context) {
@@ -303,7 +301,7 @@ func (a *API) middlewareAuth(ctx *gin.Context) {
 
 	err := a.AuthManager.Authenticate(req)
 	if err != nil {
-		if err.(*auth.Error).AskCredentials { //nolint:errorlint
+		if err.(auth.Error).AskCredentials { //nolint:errorlint
 			ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
 			ctx.AbortWithStatus(http.StatusUnauthorized)
 			return
@@ -327,7 +325,7 @@ func (a *API) onConfigGlobalGet(ctx *gin.Context) {
 
 func (a *API) onConfigGlobalPatch(ctx *gin.Context) {
 	var c conf.OptionalGlobal
-	err := json.NewDecoder(ctx.Request.Body).Decode(&c)
+	err := jsonwrapper.Decode(ctx.Request.Body, &c)
 	if err != nil {
 		a.writeError(ctx, http.StatusBadRequest, err)
 		return
@@ -365,7 +363,7 @@ func (a *API) onConfigPathDefaultsGet(ctx *gin.Context) {
 
 func (a *API) onConfigPathDefaultsPatch(ctx *gin.Context) {
 	var p conf.OptionalPath
-	err := json.NewDecoder(ctx.Request.Body).Decode(&p)
+	err := jsonwrapper.Decode(ctx.Request.Body, &p)
 	if err != nil {
 		a.writeError(ctx, http.StatusBadRequest, err)
 		return
@@ -442,7 +440,7 @@ func (a *API) onConfigPathsAdd(ctx *gin.Context) { //nolint:dupl
 	}
 
 	var p conf.OptionalPath
-	err := json.NewDecoder(ctx.Request.Body).Decode(&p)
+	err := jsonwrapper.Decode(ctx.Request.Body, &p)
 	if err != nil {
 		a.writeError(ctx, http.StatusBadRequest, err)
 		return
@@ -479,7 +477,7 @@ func (a *API) onConfigPathsPatch(ctx *gin.Context) { //nolint:dupl
 	}
 
 	var p conf.OptionalPath
-	err := json.NewDecoder(ctx.Request.Body).Decode(&p)
+	err := jsonwrapper.Decode(ctx.Request.Body, &p)
 	if err != nil {
 		a.writeError(ctx, http.StatusBadRequest, err)
 		return
@@ -520,7 +518,7 @@ func (a *API) onConfigPathsReplace(ctx *gin.Context) { //nolint:dupl
 	}
 
 	var p conf.OptionalPath
-	err := json.NewDecoder(ctx.Request.Body).Decode(&p)
+	err := jsonwrapper.Decode(ctx.Request.Body, &p)
 	if err != nil {
 		a.writeError(ctx, http.StatusBadRequest, err)
 		return
