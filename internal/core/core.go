@@ -40,11 +40,12 @@ import (
 var version []byte
 
 var defaultConfPaths = []string{
-	"rtsp-simple-server.yml",
-	"mediamtx.yml",
-	"/usr/local/etc/mediamtx.yml",
-	"/usr/etc/mediamtx.yml",
-	"/etc/mediamtx/mediamtx.yml",
+	// Local development paths
+	"aioz-live.yml",
+	"../aioz-live.yml",
+
+	// Docker container path
+	"/app/aioz-live.yml",
 }
 
 var cli struct {
@@ -95,7 +96,6 @@ type Core struct {
 // New allocates a Core.
 func New(args []string) (*Core, bool) {
 	parser, err := kong.New(&cli,
-		kong.Description("MediaMTX "+string(version)),
 		kong.UsageOnError(),
 		kong.ValueFormatter(func(value *kong.Value) string {
 			switch value.Name {
@@ -236,7 +236,6 @@ func (p *Core) createResources(initial bool) error {
 	}
 
 	if initial {
-		p.Log(logger.Info, "MediaMTX %s", version)
 
 		if p.confPath != "" {
 			a, _ := filepath.Abs(p.confPath)
