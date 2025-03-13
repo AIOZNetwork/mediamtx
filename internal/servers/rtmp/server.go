@@ -82,10 +82,12 @@ type serverAPIConnsKickRes struct {
 }
 
 type StreamInfo struct {
-	StreamKey string `json:"streamKey"`
-	StreamID  string `json:"streamId"`
-	Available bool   `json:"available"`
-	CreatedAt string `json:"createdAt"`
+	ConnID       string `json:"connId"`
+	StreamKey    string `json:"streamKey"`
+	StreamID     string `json:"streamId"`
+	Available    bool   `json:"available"`
+	CreatedAt    string `json:"createdAt"`
+	DirectStream bool   `json:"directStream"`
 }
 
 type serverAPIConnsKickReq struct {
@@ -263,7 +265,69 @@ outer:
 				continue
 			}
 
-			req.res <- serverAPIConnsGetRes{data: c.apiItem()}
+			item := c.apiItem()
+
+			isDirectStream := false
+			streamID := c.pathName
+
+			filename := "/app/streamId/streamId.json"
+			data, err := os.ReadFile(filename)
+			if err == nil {
+				var streams []StreamInfo
+				if err := json.Unmarshal(data, &streams); err == nil {
+					for _, stream := range streams {
+						if stream.StreamID == streamID {
+							isDirectStream = stream.DirectStream
+							break
+						}
+					}
+				}
+			}
+
+			if isDirectStream {
+				var parsedStreamKey uuid.UUID
+				maxRetries := 5
+				retryDelay := 500 * time.Millisecond
+				success := false
+
+				for i := 0; i < maxRetries; i++ {
+					fmt.Println("c.pathName", c.pathName)
+					streamKey := findStreamKeyByStreamID(c.pathName)
+
+					if streamKey == "" {
+						c.Log(logger.Error, "Stream key is empty (attempt %d/%d), retrying...", i+1, maxRetries)
+						time.Sleep(retryDelay)
+						continue
+					}
+
+					var err error
+					parsedStreamKey, err = uuid.Parse(streamKey)
+					if err != nil {
+						c.Log(logger.Error, "Error parsing stream key (attempt %d/%d): %v", i+1, maxRetries, err)
+						if i < maxRetries-1 {
+							time.Sleep(retryDelay)
+						}
+						continue
+					}
+
+					if parsedStreamKey != uuid.Nil {
+						success = true
+						break
+					}
+
+					c.Log(logger.Error, "Parsed stream key is nil (attempt %d/%d), retrying...", i+1, maxRetries)
+					if i < maxRetries-1 {
+						time.Sleep(retryDelay)
+					}
+				}
+
+				if !success {
+					c.Log(logger.Error, "Failed to get valid stream key after %d attempts", maxRetries)
+				}
+				item.StreamKeyId = parsedStreamKey
+			}
+
+			req.res <- serverAPIConnsGetRes{data: item}
 
 		case req := <-s.chAPIConnsKick:
 			c := s.findConnByUUID(req.uuid)
@@ -309,6 +373,7 @@ outer:
 					Available: req.available,
 					CreatedAt: time.Now().Format(time.RFC3339),
 				}
+
 				streams = append(streams, newStream)
 
 				if err := s.writeJSONFile(filename, streams); err != nil {
@@ -570,4 +635,26 @@ func (s *Server) writeJSONFile(filename string, streams []StreamInfo) error {
 	}
 
 	return nil
+}
+
+func findStreamKeyByStreamID(streamID string) string {
+	filename := "/app/streamId/streamId.json"
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return ""
+	}
+
+	var streams []StreamInfo
+	if err := json.Unmarshal(data, &streams); err != nil {
+		fmt.Println("Error unmarshalling data: ", err)
+		return ""
+	}
+
+	for _, stream := range streams {
+		if stream.StreamID == streamID {
+			return stream.StreamKey
+		}
+	}
+
+	return ""
 }
