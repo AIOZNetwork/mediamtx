@@ -38,80 +38,33 @@ func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
 	}
 
 	filename := "/app/streamId/streamId.json"
-
-	streamOpMutex.Lock()
-	defer streamOpMutex.Unlock()
-
-	_, err := os.Stat(filename)
-	if os.IsNotExist(err) {
-		if err := os.MkdirAll("/app/streamId", 0755); err != nil {
-			return "", nil, "", fmt.Errorf("failed to create directory: %v", err)
-		}
-
-		newStreamID := generateStreamID()
-		newStream := []StreamInfo{
-			{
-				StreamKey:    pathName,
-				StreamID:     newStreamID,
-				Available:    false,
-				CreatedAt:    time.Now().Format(time.RFC3339),
-				DirectStream: true,
-			},
-		}
-
-		newData, err := json.MarshalIndent(newStream, "", "  ")
-		if err != nil {
-			return "", nil, "", errors.New("failed to create stream file")
-		}
-
-		if err := os.WriteFile(filename, newData, 0644); err != nil {
-			return "", nil, "", errors.New("failed to save stream file")
-		}
-
-		return newStreamID, ur.Query(), ur.RawQuery, nil
-	} else if err != nil {
-		return "", nil, "", fmt.Errorf("error checking stream file: %v", err)
-	}
-
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("error reading stream file: %v", err)
+		return "", nil, "", fmt.Errorf("stream key file not found: %v", err)
 	}
 
 	var streams []StreamInfo
 	if err := json.Unmarshal(data, &streams); err != nil {
-		return "", nil, "", errors.New("invalid stream file format")
+		return "", nil, "", errors.New("invalid stream key file")
 	}
 
-	var samePathStreams []StreamInfo
+	var validStreams []StreamInfo
 	for _, stream := range streams {
-		if stream.StreamKey == pathName {
-			samePathStreams = append(samePathStreams, stream)
+		if stream.StreamKey == pathName && stream.Available {
+			validStreams = append(validStreams, stream)
 		}
 	}
 
-	var apiStreams []StreamInfo
-	for _, stream := range samePathStreams {
-		if stream.Available && !stream.DirectStream {
-			apiStreams = append(apiStreams, stream)
+	if len(validStreams) == 0 {
+		newStreamID := generateStreamID()
+		newStream := StreamInfo{
+			StreamID:  newStreamID,
+			StreamKey: pathName,
+			Available: false,
+			CreatedAt: time.Now().Format(time.RFC3339),
 		}
-	}
 
-	if len(apiStreams) > 0 {
-		sort.Slice(apiStreams, func(i, j int) bool {
-			timeI, _ := time.Parse(time.RFC3339, apiStreams[i].CreatedAt)
-			timeJ, _ := time.Parse(time.RFC3339, apiStreams[j].CreatedAt)
-			return timeI.Before(timeJ)
-		})
-
-		selectedStream := apiStreams[0]
-
-		for i := range streams {
-			if streams[i].StreamID == selectedStream.StreamID {
-				streams[i].Available = false
-				break
-			}
-		}
+		streams = append(streams, newStream)
 
 		updatedData, err := json.MarshalIndent(streams, "", "  ")
 		if err != nil {
@@ -122,54 +75,23 @@ func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
 			return "", nil, "", errors.New("failed to save stream file")
 		}
 
-		return selectedStream.StreamID, ur.Query(), ur.RawQuery, nil
+		return newStreamID, ur.Query(), ur.RawQuery, nil
 	}
 
-	var directStreams []StreamInfo
-	for _, stream := range samePathStreams {
-		if stream.Available && stream.DirectStream {
-			directStreams = append(directStreams, stream)
+	sort.Slice(validStreams, func(i, j int) bool {
+		timeI, _ := time.Parse(time.RFC3339, validStreams[i].CreatedAt)
+		timeJ, _ := time.Parse(time.RFC3339, validStreams[j].CreatedAt)
+		return timeI.Before(timeJ)
+	})
+
+	selectedStream := validStreams[0]
+
+	for i := range streams {
+		if streams[i].StreamID == selectedStream.StreamID {
+			streams[i].Available = false
+			break
 		}
 	}
-
-	if len(directStreams) > 0 {
-		sort.Slice(directStreams, func(i, j int) bool {
-			timeI, _ := time.Parse(time.RFC3339, directStreams[i].CreatedAt)
-			timeJ, _ := time.Parse(time.RFC3339, directStreams[j].CreatedAt)
-			return timeI.Before(timeJ)
-		})
-
-		selectedStream := directStreams[0]
-
-		for i := range streams {
-			if streams[i].StreamID == selectedStream.StreamID {
-				streams[i].Available = false
-				break
-			}
-		}
-
-		updatedData, err := json.MarshalIndent(streams, "", "  ")
-		if err != nil {
-			return "", nil, "", errors.New("failed to update stream file")
-		}
-
-		if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-			return "", nil, "", errors.New("failed to save stream file")
-		}
-
-		return selectedStream.StreamID, ur.Query(), ur.RawQuery, nil
-	}
-
-	newStreamID := generateStreamID()
-	newStream := StreamInfo{
-		StreamKey:    pathName,
-		StreamID:     newStreamID,
-		Available:    false,
-		CreatedAt:    time.Now().Format(time.RFC3339),
-		DirectStream: true,
-	}
-
-	streams = append(streams, newStream)
 
 	updatedData, err := json.MarshalIndent(streams, "", "  ")
 	if err != nil {
@@ -180,7 +102,7 @@ func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
 		return "", nil, "", errors.New("failed to save stream file")
 	}
 
-	return newStreamID, ur.Query(), ur.RawQuery, nil
+	return selectedStream.StreamID, ur.Query(), ur.RawQuery, nil
 }
 
 func deleteStreamByID(streamID string) error {
