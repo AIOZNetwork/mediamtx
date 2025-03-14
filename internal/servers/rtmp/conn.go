@@ -143,11 +143,6 @@ func deleteStreamByID(streamID string) error {
 	return nil
 }
 
-func generateStreamID() string {
-	id := uuid.New()
-	return id.String()
-}
-
 type connState int
 
 const (
@@ -458,4 +453,9 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		BytesReceived: bytesReceived,
 		BytesSent:     bytesSent,
 	}
+}
+
+func generateStreamID() string {
+	id := uuid.New()
+	return id.String()
 }
