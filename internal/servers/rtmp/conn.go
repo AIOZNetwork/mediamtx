@@ -239,7 +239,6 @@ func (c *conn) runInner() error {
 	go func() {
 		readerErr <- c.runReader()
 	}()
-	// TODO: log more detail what key is terminated
 	select {
 	case err := <-readerErr:
 		c.nconn.Close()

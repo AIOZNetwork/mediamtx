@@ -81,7 +81,6 @@ type APIRTMPConn struct {
 	Query         string           `json:"query"`
 	BytesReceived uint64           `json:"bytesReceived"`
 	BytesSent     uint64           `json:"bytesSent"`
-	StreamKeyId   uuid.UUID        `json:"streamKeyId"`
 }
 
 // APIRTMPConnList is a list of RTMP connections.

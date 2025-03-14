@@ -267,10 +267,17 @@ outer:
 
 			streamID := c.pathName
 
+			if streamID == "" {
+				c.Log(logger.Error, "Cannot find stream key: streamID is empty")
+				req.res <- serverAPIConnsGetRes{data: item}
+				continue
+			}
+
 			var parsedStreamKey uuid.UUID
 			maxRetries := 5
 			retryDelay := 500 * time.Millisecond
 			success := false
+
 			for i := 0; i < maxRetries; i++ {
 				streamKey := findStreamKeyByStreamID(streamID)
 				if streamKey == "" {
@@ -295,11 +302,14 @@ outer:
 				}
 
 				success = true
+				c.Log(logger.Info, "Successfully found stream key for streamID: %s (attempt %d/%d)",
+					streamID, i+1, maxRetries)
 				break
 			}
 
 			if success {
 				item.StreamKeyId = parsedStreamKey
+				c.Log(logger.Info, "Set StreamKeyId to %s for connection", parsedStreamKey.String())
 			} else {
 				c.Log(logger.Error, "Failed to get valid stream key after %d attempts", maxRetries)
 			}
@@ -615,15 +625,21 @@ func (s *Server) writeJSONFile(filename string, streams []StreamInfo) error {
 }
 
 func findStreamKeyByStreamID(streamID string) string {
+	if streamID == "" {
+		fmt.Println("Warning: Empty streamID provided to findStreamKeyByStreamID")
+		return ""
+	}
+
 	filename := "/app/streamId/streamId.json"
 	data, err := os.ReadFile(filename)
 	if err != nil {
+		fmt.Printf("Error reading stream file: %v\n", err)
 		return ""
 	}
 
 	var streams []StreamInfo
 	if err := json.Unmarshal(data, &streams); err != nil {
-		fmt.Println("Error unmarshalling data: ", err)
+		fmt.Printf("Error unmarshalling stream data: %v\n", err)
 		return ""
 	}
 
@@ -633,5 +649,6 @@ func findStreamKeyByStreamID(streamID string) string {
 		}
 	}
 
+	fmt.Printf("No stream found with ID: %s\n", streamID)
 	return ""
 }
