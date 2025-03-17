@@ -26,8 +26,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
-var streamOpMutex sync.Mutex
-
 func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
 	tmp := strings.TrimRight(inURL.String(), "/")
 	ur, _ := url.Parse(tmp)
