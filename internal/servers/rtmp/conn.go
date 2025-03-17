@@ -54,7 +54,26 @@ func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
 	}
 
 	if len(validStreams) == 0 {
-		return "", nil, "", errors.New("no available stream found")
+		newStreamID := generateStreamID()
+		newStream := StreamInfo{
+			StreamID:  newStreamID,
+			StreamKey: pathName,
+			Available: false,
+			CreatedAt: time.Now().Format(time.RFC3339),
+		}
+
+		streams = append(streams, newStream)
+
+		updatedData, err := json.MarshalIndent(streams, "", "  ")
+		if err != nil {
+			return "", nil, "", errors.New("failed to update stream file")
+		}
+
+		if err := os.WriteFile(filename, updatedData, 0644); err != nil {
+			return "", nil, "", errors.New("failed to save stream file")
+		}
+
+		return newStreamID, ur.Query(), ur.RawQuery, nil
 	}
 
 	sort.Slice(validStreams, func(i, j int) bool {
@@ -86,7 +105,6 @@ func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
 
 func deleteStreamByID(streamID string) error {
 	filename := "/app/streamId/streamId.json"
-
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return fmt.Errorf("stream key file not found: %v", err)
@@ -187,7 +205,6 @@ func (c *conn) ip() net.IP {
 
 func (c *conn) run() { //nolint:dupl
 	defer c.wg.Done()
-
 	onDisconnectHook := hooks.OnConnect(hooks.OnConnectParams{
 		Logger:              c,
 		ExternalCmdPool:     c.externalCmdPool,
@@ -215,7 +232,6 @@ func (c *conn) runInner() error {
 	go func() {
 		readerErr <- c.runReader()
 	}()
-
 	select {
 	case err := <-readerErr:
 		c.nconn.Close()
@@ -398,7 +414,6 @@ func (c *conn) APIReaderDescribe() defs.APIPathSourceOrReader {
 	}
 }
 
-// APISourceDescribe implements source.
 func (c *conn) APISourceDescribe() defs.APIPathSourceOrReader {
 	return c.APIReaderDescribe()
 }
@@ -436,4 +451,9 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		BytesReceived: bytesReceived,
 		BytesSent:     bytesSent,
 	}
+}
+
+func generateStreamID() string {
+	id := uuid.New()
+	return id.String()
 }
