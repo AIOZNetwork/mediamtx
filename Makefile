@@ -13,6 +13,7 @@ REMOTE_USER=root
 CONTAINER_NAME=w3stream
 CORE_CONTAINER_NAME=w3stream-core
 STREAM_CONTAINER_NAME=w3stream-live
+STREAM_STG_CONTAINER_NAME=aioz-live
 GRPC_CONTAINER_NAME=w3stream-grpc
 GRPC_BIN_NAME=w3stream-grpc
 
@@ -53,4 +54,7 @@ deploy-prod: build
 	@scp bin/$(STREAM_BIN_NAME) root@w3stream:$(PROD_REMOTE_PATH)
 	@ssh root@w3stream docker restart $(STREAM_CONTAINER_NAME)
 
-
+deploy-stream-stg: build
+	@ssh root@w3stream-stg mv $(STG_REMOTE_PATH)/$(STREAM_BIN_NAME) $(STG_REMOTE_PATH)/BackUps/$(STREAM_BIN_NAME).bk`date +%Y%m%d%H`
+	@scp bin/$(STREAM_BIN_NAME) root@w3stream-stg:$(STG_REMOTE_PATH)
+	@ssh root@w3stream-stg docker restart $(STREAM_STG_CONTAINER_NAME)
