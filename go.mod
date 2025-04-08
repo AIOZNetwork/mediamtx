@@ -105,4 +105,4 @@ replace github.com/pion/ice/v4 => github.com/aler9/ice/v4 v4.0.0-20250119142625-
 
 replace github.com/pion/webrtc/v4 => github.com/aler9/webrtc/v4 v4.0.0-20250119122430-da50f500fa8e
 
-replace github.com/bluenviron/gohlslib/v2 => github.com/AIOZNetwork/gohlslib/v2 v2.1.4
+replace github.com/bluenviron/gohlslib/v2 => github.com/AIOZNetwork/gohlslib/v2 v2.1.5
