@@ -157,6 +157,11 @@ var defaultAuthInternalUsers = AuthInternalUsers{
 // Conf is a configuration.
 // WARNING: Avoid using slices directly due to https://github.com/golang/go/issues/21092
 type Conf struct {
+	PostgresHost		   string          `json:"postgresHost"`
+	PostgresPort		   string          `json:"postgresPort"`
+	PostgresUser		   string          `json:"postgresUser"`
+	PostgresPassword	 string          `json:"postgresPassword"`
+	PostgresDBName		 string          `json:"postgresDbName"`
 	// General
 	LogLevel            LogLevel        `json:"logLevel"`
 	LogDestinations     LogDestinations `json:"logDestinations"`

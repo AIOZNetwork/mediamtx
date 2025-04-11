@@ -5,9 +5,11 @@ import (
 	"strings"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/google/uuid"
 )
 
 var jsonData = map[string][]string{
@@ -36,11 +38,19 @@ func ffmpegGenerator(sourceUrl string, forwardURIs []string) string {
 }
 
 func getMultiStreams(key string) []string {
-	// Placeholder for querying DB or external command
-	if streams, exists := jsonData[key]; exists {
-		return streams
+	uuid, err := uuid.Parse(key)
+	if err != nil {
+		return nil
 	}
-	return nil
+
+	repo := repository.NewLiveStreamMulticastRepository()
+	data, err := repo.GetLiveStreamMulticastByStreamKey(uuid)
+
+	if err != nil || data == nil {
+		return nil
+	}
+
+	return data.LiveStreamMulticastUrls
 }
 
 // OnReadyParams are the parameters of OnReady.
@@ -81,7 +91,7 @@ func OnReady(params OnReadyParams) func() {
 	if params.Conf.IsRunMulticast {
 		params.Logger.Log(logger.Info, "Run multicast command started")
 		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["MTX_PATH"])
-		multiStreamsUrl := getMultiStreams(env["MTX_PATH"])
+		multiStreamsUrl := getMultiStreams(env["AIOZ_StreamKey"])
 
 		ffmpegQuery := ffmpegGenerator(sourceUrl, multiStreamsUrl)
 
