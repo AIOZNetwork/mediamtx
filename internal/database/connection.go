@@ -62,11 +62,6 @@ func Connect(config *conf.Conf) *gorm.DB {
 		panic(fmt.Sprintf("failed to ping database: %v", err))
 	}
 
-	// TODO: Don't understand why this is needed
-	// if err := db.Callback().Query().After("gorm:query").Register("captureQueryOnError", captureQueryOnError); err != nil {
-	// 	slog.Error("failed to register captureQueryOnError callback")
-	// }
-
 	fmt.Println("Connected Successfully to the database.")
 	DB = db
 	return db
