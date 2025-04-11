@@ -26,10 +26,14 @@ import (
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
-func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, string, error) {
+func pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Values, string, string, error) {
 	tmp := strings.TrimRight(inURL.String(), "/")
 	ur, _ := url.Parse(tmp)
 	pathName := strings.TrimLeft(ur.Path, "/")
+
+	if !isPublish {
+		return pathName, ur.Query(), ur.RawQuery, "", nil
+	}
 
 	if pathName == "" {
 		return "", nil, "", "", errors.New("invalid path name")
@@ -263,7 +267,7 @@ func (c *conn) runReader() error {
 }
 
 func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
-	pathName, query, rawQuery, _, err := pathNameAndQuery(u)
+	pathName, query, rawQuery, _, err := pathNameAndQuery(u, false)
 
 	if err != nil {
 		return err
@@ -333,7 +337,7 @@ func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
 }
 
 func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
-	pathName, query, rawQuery, streamKey, err := pathNameAndQuery(u)
+	pathName, query, rawQuery, streamKey, err := pathNameAndQuery(u, true)
 	if err != nil {
 		return err
 	}

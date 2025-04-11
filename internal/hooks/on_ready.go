@@ -12,10 +12,6 @@ import (
 	"github.com/google/uuid"
 )
 
-var jsonData = map[string][]string{
-	"mystream": {"rtmp://a.rtmp.youtube.com/live2/abcd"},
-}
-
 func ffmpegGenerator(sourceUrl string, forwardURIs []string) string {
 	if len(forwardURIs) == 0 {
 		return ""
@@ -90,7 +86,7 @@ func OnReady(params OnReadyParams) func() {
 
 	if params.Conf.IsRunMulticast {
 		params.Logger.Log(logger.Info, "Run multicast command started")
-		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["AIOZ_StreamKey"])
+		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["MTX_PATH"])
 		multiStreamsUrl := getMultiStreams(env["AIOZ_StreamKey"])
 
 		ffmpegQuery := ffmpegGenerator(sourceUrl, multiStreamsUrl)
