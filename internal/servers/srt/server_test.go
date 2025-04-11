@@ -26,6 +26,9 @@ func (p *dummyPath) Name() string {
 	return "teststream"
 }
 
+func (pa *dummyPath) SetStreamKey(_ string) {
+}
+
 func (p *dummyPath) SafeConf() *conf.Path {
 	return &conf.Path{}
 }

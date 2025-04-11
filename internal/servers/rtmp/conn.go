@@ -26,24 +26,24 @@ import (
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
-func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
+func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, string, error) {
 	tmp := strings.TrimRight(inURL.String(), "/")
 	ur, _ := url.Parse(tmp)
 	pathName := strings.TrimLeft(ur.Path, "/")
 
 	if pathName == "" {
-		return "", nil, "", errors.New("invalid path name")
+		return "", nil, "", "", errors.New("invalid path name")
 	}
 
 	filename := "/app/streamId/streamId.json"
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("stream key file not found: %v", err)
+		return "", nil, "", "", fmt.Errorf("stream key file not found: %v", err)
 	}
 
 	var streams []StreamInfo
 	if err := json.Unmarshal(data, &streams); err != nil {
-		return "", nil, "", errors.New("invalid stream key file")
+		return "", nil, "", "", errors.New("invalid stream key file")
 	}
 
 	var validStreams []StreamInfo
@@ -66,14 +66,14 @@ func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
 
 		updatedData, err := json.MarshalIndent(streams, "", "  ")
 		if err != nil {
-			return "", nil, "", errors.New("failed to update stream file")
+			return "", nil, "", "", errors.New("failed to update stream file")
 		}
 
 		if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-			return "", nil, "", errors.New("failed to save stream file")
+			return "", nil, "", "", errors.New("failed to save stream file")
 		}
 
-		return newStreamID, ur.Query(), ur.RawQuery, nil
+		return newStreamID, ur.Query(), ur.RawQuery, pathName, nil
 	}
 
 	sort.Slice(validStreams, func(i, j int) bool {
@@ -93,14 +93,14 @@ func pathNameAndQuery(inURL *url.URL) (string, url.Values, string, error) {
 
 	updatedData, err := json.MarshalIndent(streams, "", "  ")
 	if err != nil {
-		return "", nil, "", errors.New("failed to update stream file")
+		return "", nil, "", "", errors.New("failed to update stream file")
 	}
 
 	if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-		return "", nil, "", errors.New("failed to save stream file")
+		return "", nil, "", "", errors.New("failed to save stream file")
 	}
 
-	return selectedStream.StreamID, ur.Query(), ur.RawQuery, nil
+	return selectedStream.StreamID, ur.Query(), ur.RawQuery,pathName, nil
 }
 
 func deleteStreamByID(streamID string) error {
@@ -263,7 +263,8 @@ func (c *conn) runReader() error {
 }
 
 func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
-	pathName, query, rawQuery, err := pathNameAndQuery(u)
+	pathName, query, rawQuery, _, err := pathNameAndQuery(u)
+
 	if err != nil {
 		return err
 	}
@@ -332,7 +333,7 @@ func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
 }
 
 func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
-	pathName, query, rawQuery, err := pathNameAndQuery(u)
+	pathName, query, rawQuery, streamKey, err := pathNameAndQuery(u)
 	if err != nil {
 		return err
 	}
@@ -350,6 +351,9 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
 			ID:      &c.uuid,
 		},
 	})
+	
+	path.SetStreamKey(streamKey)
+
 	if err != nil {
 		var terr auth.Error
 		if errors.As(err, &terr) {

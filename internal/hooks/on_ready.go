@@ -90,7 +90,7 @@ func OnReady(params OnReadyParams) func() {
 
 	if params.Conf.IsRunMulticast {
 		params.Logger.Log(logger.Info, "Run multicast command started")
-		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["MTX_PATH"])
+		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["AIOZ_StreamKey"])
 		multiStreamsUrl := getMultiStreams(env["AIOZ_StreamKey"])
 
 		ffmpegQuery := ffmpegGenerator(sourceUrl, multiStreamsUrl)
