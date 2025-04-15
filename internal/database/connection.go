@@ -15,7 +15,7 @@ import (
 
 var DB *gorm.DB
 
-func Connect(config *conf.Conf) *gorm.DB {
+func MustConnectToDatabase(config *conf.Conf) *gorm.DB {
   if config == nil {
     panic("config is nil")
   }
