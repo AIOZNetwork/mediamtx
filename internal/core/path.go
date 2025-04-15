@@ -71,6 +71,7 @@ type path struct {
 	udpMaxPayloadSize int
 	conf              *conf.Path
 	name              string
+	streamKey         string
 	matches           []string
 	wg                *sync.WaitGroup
 	externalCmdPool   *externalcmd.Pool
@@ -614,6 +615,7 @@ func (pa *path) ExternalCmdEnv() externalcmd.Environment {
 		"MTX_PATH":  pa.name,
 		"RTSP_PATH": pa.name, // deprecated
 		"RTSP_PORT": port,
+		"AIOZ_StreamKey": pa.streamKey,
 	}
 
 	if len(pa.matches) > 1 {
@@ -981,4 +983,8 @@ func (pa *path) APIPathsGet(req pathAPIPathsGetReq) (*defs.APIPath, error) {
 	case <-pa.ctx.Done():
 		return nil, fmt.Errorf("terminated")
 	}
+}
+
+func (pa *path) SetStreamKey(streamKey string) {
+	pa.streamKey = streamKey
 }

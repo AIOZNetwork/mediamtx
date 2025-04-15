@@ -104,6 +104,7 @@ type Path struct {
 	Name   string         `json:"name"` // filled by Check()
 
 	// General
+	Hostname                   string   `json:"hostname"`
 	Source                     string   `json:"source"`
 	SourceFingerprint          string   `json:"sourceFingerprint"`
 	SourceOnDemand             bool     `json:"sourceOnDemand"`
@@ -192,6 +193,7 @@ type Path struct {
 	RunOnDemandCloseAfter      Duration `json:"runOnDemandCloseAfter"`
 	RunOnUnDemand              string   `json:"runOnUnDemand"`
 	RunOnReady                 string   `json:"runOnReady"`
+	IsRunMulticast             bool		  `json:"isRunMulticast"`
 	RunOnReadyRestart          bool     `json:"runOnReadyRestart"`
 	RunOnNotReady              string   `json:"runOnNotReady"`
 	RunOnRead                  string   `json:"runOnRead"`
@@ -206,6 +208,7 @@ func (pconf *Path) setDefaults() {
 	pconf.Source = "publisher"
 	pconf.SourceOnDemandStartTimeout = 10 * Duration(time.Second)
 	pconf.SourceOnDemandCloseAfter = 10 * Duration(time.Second)
+	pconf.IsRunMulticast = false
 
 	// Record
 	pconf.RecordPath = "./recordings/%path/%Y-%m-%d_%H-%M-%S-%f"
