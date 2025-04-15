@@ -102,7 +102,7 @@ func (s *Source) runReader(u *url.URL, nconn net.Conn) error {
 
 	var stream *stream.Stream
 
-	medias, err := rtmp.ToStream(r, &stream)
+	medias, err := rtmp.ToStream(r, &stream, "teststream") // Skip this for now because we don't have a stream with video on demand
 	if err != nil {
 		return err
 	}

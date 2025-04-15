@@ -147,6 +147,8 @@ func New(args []string) (*Core, bool) {
 		return nil, false
 	}
 	database.Connect(p.conf)
+	database.InitLiveStreamStatisticsDatabase()
+	database.InitLiveStreamMulticastDatabase()
 
 	go p.run()
 

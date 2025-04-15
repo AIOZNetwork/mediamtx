@@ -3,6 +3,7 @@ package rtmp
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -641,7 +642,7 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, streamKey s
 		// fmt.Printf("Bitrate in: %f kbps. Test in %d seconds\n", r.bitrate, second)
 
 		//framerate
-		r.frameRate = int16(float64(r.totalFrames) / eclapsed)
+		r.frameRate = int16(math.Round(float64(r.totalFrames) / eclapsed))
 		errFrameRate := r.repository.UpsertFPSIn(uuid, r.frameRate)
 		if errFrameRate != nil {
 			fmt.Println("Error inserting framerate:", errFrameRate)

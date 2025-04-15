@@ -3,10 +3,11 @@ package database
 import (
 	"fmt"
 	"log"
-	"time"
 	"os"
+	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/models"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -65,4 +66,12 @@ func Connect(config *conf.Conf) *gorm.DB {
 	fmt.Println("Connected Successfully to the database.")
 	DB = db
 	return db
+}
+
+func InitLiveStreamStatisticsDatabase() {
+	DB.AutoMigrate(&models.LiveStreamStatistic{})
+}
+
+func InitLiveStreamMulticastDatabase() {
+	DB.AutoMigrate(&models.LiveStreamMulticast{})
 }
