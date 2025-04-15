@@ -23,6 +23,7 @@ require (
 	github.com/gookit/color v1.5.4
 	github.com/gorilla/websocket v1.5.3
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
+	github.com/lib/pq v1.10.9
 	github.com/matthewhartstonge/argon2 v1.1.1
 	github.com/pion/ice/v4 v4.0.5
 	github.com/pion/interceptor v0.1.37
@@ -73,7 +74,6 @@ require (
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
-	github.com/lib/pq v1.10.9 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
@@ -114,4 +114,4 @@ replace github.com/pion/ice/v4 => github.com/aler9/ice/v4 v4.0.0-20250119142625-
 
 replace github.com/pion/webrtc/v4 => github.com/aler9/webrtc/v4 v4.0.0-20250119122430-da50f500fa8e
 
-replace github.com/bluenviron/gohlslib/v2 => github.com/AIOZNetwork/gohlslib/v2 v2.1.4
+replace github.com/bluenviron/gohlslib/v2 => github.com/AIOZNetwork/gohlslib/v2 v2.1.5
