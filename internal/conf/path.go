@@ -193,7 +193,7 @@ type Path struct {
 	RunOnDemandCloseAfter      Duration `json:"runOnDemandCloseAfter"`
 	RunOnUnDemand              string   `json:"runOnUnDemand"`
 	RunOnReady                 string   `json:"runOnReady"`
-	IsRunMulticast             bool		  `json:"isRunMulticast"`
+	IsRunMulticast             bool     `json:"isRunMulticast"`
 	RunOnReadyRestart          bool     `json:"runOnReadyRestart"`
 	RunOnNotReady              string   `json:"runOnNotReady"`
 	RunOnRead                  string   `json:"runOnRead"`

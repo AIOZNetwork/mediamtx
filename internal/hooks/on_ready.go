@@ -41,7 +41,6 @@ func getMultiStreams(key string) []string {
 
 	repo := repository.NewLiveStreamMulticastRepository()
 	data, err := repo.GetLiveStreamMulticastByStreamKey(uuid)
-
 	if err != nil || data == nil {
 		return nil
 	}
@@ -88,18 +87,17 @@ func OnReady(params OnReadyParams) func() {
 		params.Logger.Log(logger.Info, "Run multicast command started")
 		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["MTX_PATH"])
 		multiStreamsUrl := getMultiStreams(env["AIOZ_StreamKey"])
-
 		ffmpegQuery := ffmpegGenerator(sourceUrl, multiStreamsUrl)
 
 		if ffmpegQuery != "" {
 			onReadyCmd = externalcmd.NewCmd(
-			params.ExternalCmdPool,
-			ffmpegQuery,
-			params.Conf.RunOnReadyRestart,
-			env,
-			func(err error) {
-				params.Logger.Log(logger.Info, "Run multicast command exited: %v", err)
-			})
+				params.ExternalCmdPool,
+				ffmpegQuery,
+				params.Conf.RunOnReadyRestart,
+				env,
+				func(err error) {
+					params.Logger.Log(logger.Info, "Run multicast command exited: %v", err)
+				})
 		}
 	}
 
