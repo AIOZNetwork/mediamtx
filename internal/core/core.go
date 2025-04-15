@@ -146,7 +146,7 @@ func New(args []string) (*Core, bool) {
 		p.closeResources(nil, false)
 		return nil, false
 	}
-	database.Connect(p.conf)
+	database.MustConnectToDatabase(p.conf)
 
 	go p.run()
 
