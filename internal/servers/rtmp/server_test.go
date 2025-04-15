@@ -297,7 +297,7 @@ func TestServerRead(t *testing.T) {
 					test.FormatH264.PPS,
 					{5, 2, 3, 4},
 				}, au)
-			})
+			}, "teststream")
 
 			err = r.Read()
 			require.NoError(t, err)
