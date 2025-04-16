@@ -16,6 +16,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	"github.com/google/uuid"
 
+	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/database"
 	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/models"
@@ -626,7 +627,7 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, streamKey s
 	eclapsed := time.Since(r.startTime).Seconds()
 	r.totalBytesReceived += int64(len(msg.Payload))
 	r.totalFrames++
-	second := 5 //TODO: move to const or config
+	second := conf.SecondCalculate
 	uuid, err := uuid.Parse(streamKey)
 	if err != nil {
 		fmt.Println("Error parsing streamKey:", err)
@@ -640,7 +641,6 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, streamKey s
 			fmt.Println("Error inserting bitrate:", err)
 			return err
 		}
-		// fmt.Printf("Bitrate in: %f kbps. Test in %d seconds\n", r.bitrate, second)
 
 		//framerate
 		r.frameRate = int16(math.Round(float64(r.totalFrames) / eclapsed))
@@ -649,8 +649,6 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, streamKey s
 			fmt.Println("Error inserting framerate:", errFrameRate)
 			return errFrameRate
 		}
-
-		// fmt.Printf("Frame rate: %d fps. Test in %d seconds\n", r.frameRate, second)
 
 		// reset
 		r.startTime = time.Now()
