@@ -2,9 +2,11 @@ package hooks
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database"
 	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
@@ -22,11 +24,17 @@ func ffmpegGenerator(sourceUrl string, forwardURIs []string) string {
 	outputs := make([]string, len(forwardURIs))
 
 	for i, uri := range forwardURIs {
+		parsedURL, err := url.Parse(uri)
+
+		if err != nil || parsedURL.Scheme != "rtmp" {
+        fmt.Println("Invalid URL")
+        return ""
+    }
 		switch {
-		case strings.HasPrefix(uri, "rtmp://"):
-			outputs[i] = fmt.Sprintf("-c copy -f flv %s", uri)
-		case strings.HasPrefix(uri, "rtsp://"):
-			outputs[i] = fmt.Sprintf("-c copy -f rtsp %s", uri)
+		case strings.HasPrefix(parsedURL.String(), "rtmp://") && !strings.Contains(uri, " "):
+			outputs[i] = fmt.Sprintf("-c copy -f flv %s", parsedURL.String())
+		default:
+			return ""
 		}
 	}
 
@@ -39,7 +47,7 @@ func getMultiStreams(key string) []string {
 		return nil
 	}
 
-	repo := repository.NewLiveStreamMulticastRepository()
+	repo := repository.NewLiveStreamMulticastRepository(database.DB)
 	data, err := repo.GetLiveStreamMulticastByStreamKey(uuid)
 
 	if err != nil || data == nil {
