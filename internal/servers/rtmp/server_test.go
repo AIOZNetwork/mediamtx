@@ -40,6 +40,10 @@ func (p *dummyPath) ExternalCmdEnv() externalcmd.Environment {
 	return externalcmd.Environment{}
 }
 
+func (pa *dummyPath) GetStreamKey() string {
+	return ""
+}
+
 func (p *dummyPath) StartPublisher(req defs.PathStartPublisherReq) (*stream.Stream, error) {
 	var err error
 	p.stream, err = stream.New(

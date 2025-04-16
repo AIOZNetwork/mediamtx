@@ -51,6 +51,10 @@ func (pa *dummyPath) RemoveReader(_ defs.PathRemoveReaderReq) {
 func (pa *dummyPath) SetStreamKey(_ string) {
 }
 
+func (pa *dummyPath) GetStreamKey() string {
+	return ""
+}
+
 func TestPreflightRequest(t *testing.T) {
 	s := &Server{
 		Address:     "127.0.0.1:8888",
