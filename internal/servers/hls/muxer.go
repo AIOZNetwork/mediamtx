@@ -150,6 +150,7 @@ func (m *muxer) runInner() error {
 		stream:          stream,
 		bytesSent:       m.bytesSent,
 		parent:          m,
+		streamKey: 		   m.path.GetStreamKey(),
 	}
 	err = mi.initialize()
 	if err != nil {
@@ -207,6 +208,7 @@ func (m *muxer) runInner() error {
 				stream:          stream,
 				bytesSent:       m.bytesSent,
 				parent:          m,
+				streamKey: 		   m.path.GetStreamKey(),
 			}
 			err := mi.initialize()
 			if err != nil {

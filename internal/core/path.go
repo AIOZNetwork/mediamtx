@@ -988,3 +988,7 @@ func (pa *path) APIPathsGet(req pathAPIPathsGetReq) (*defs.APIPath, error) {
 func (pa *path) SetStreamKey(streamKey string) {
 	pa.streamKey = streamKey
 }
+
+func (pa *path) GetStreamKey() string {
+	return pa.streamKey
+}

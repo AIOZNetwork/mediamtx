@@ -1,13 +1,15 @@
 package repository
 
 import (
-	"github.com/bluenviron/mediamtx/internal/database"
 	"github.com/bluenviron/mediamtx/internal/models"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-type LiveStreamStatisticRepository struct{}
+type LiveStreamStatisticRepository struct {
+	db *gorm.DB
+}
 
 func (l *LiveStreamStatisticRepository) UpsertBitrateIn(streamKey uuid.UUID, bitrate float64) error {
 	record := models.LiveStreamStatistic{
@@ -16,7 +18,7 @@ func (l *LiveStreamStatisticRepository) UpsertBitrateIn(streamKey uuid.UUID, bit
 		Bitrate_in:    bitrate,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "live_stream_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"bitrate_in"}),
 	}).Create(&record)
@@ -30,7 +32,7 @@ func (l *LiveStreamStatisticRepository) UpsertBitrateOut(streamKey uuid.UUID, bi
 		Bitrate_out:   bitrate,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "live_stream_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"bitrate_out"}),
 	}).Create(&record)
@@ -45,7 +47,7 @@ func (l *LiveStreamStatisticRepository) UpsertFPSIn(streamKey uuid.UUID, fps int
 		FPS_in:        fps,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "live_stream_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"fps_in"}),
 	}).Create(&record)
@@ -60,7 +62,7 @@ func (l *LiveStreamStatisticRepository) UpsertFPSOut(streamKey uuid.UUID, fps in
 		FPS_out:       fps,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "live_stream_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"fps_out"}),
 	}).Create(&record)
@@ -75,7 +77,7 @@ func (l *LiveStreamStatisticRepository) UpsertNumberOfRequests(streamKey uuid.UU
 		NumberOfRequests: numberOfRequests,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "live_stream_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"number_of_requests"}),
 	}).Create(&record)
@@ -83,16 +85,18 @@ func (l *LiveStreamStatisticRepository) UpsertNumberOfRequests(streamKey uuid.UU
 	return result.Error
 }
 
-func (l *LiveStreamStatisticRepository) UpsertDataTransferred(streamKey uuid.UUID, dataTransferred int) error {
+func (l *LiveStreamStatisticRepository) UpsertDataTransferred(streamKey uuid.UUID, dataTransferred float64) error {
 	record := models.LiveStreamStatistic{
-		ID:             uuid.New(),
-		LiveStreamKey:  streamKey,
-		DataTransfered: dataTransferred,
+		ID:              uuid.New(),
+		LiveStreamKey:   streamKey,
+		DataTransferred: dataTransferred,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"data_transferred"}),
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "live_stream_key"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"data_transferred": gorm.Expr("live_stream_statistics.data_transferred + ?", dataTransferred),
+		}),
 	}).Create(&record)
 
 	return result.Error
@@ -105,7 +109,7 @@ func (l *LiveStreamStatisticRepository) UpsertDevice(streamKey uuid.UUID, device
 		Device:        device,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "live_stream_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"device"}),
 	}).Create(&record)
@@ -120,7 +124,7 @@ func (l *LiveStreamStatisticRepository) UpsertOS(streamKey uuid.UUID, os string)
 		OS:            os,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "live_stream_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"os"}),
 	}).Create(&record)
@@ -135,7 +139,7 @@ func (l *LiveStreamStatisticRepository) UpsertLocation(streamKey uuid.UUID, loca
 		Location:      location,
 	}
 
-	result := database.DB.Table("live_stream_statistics").Clauses(clause.OnConflict{
+	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "live_stream_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"location"}),
 	}).Create(&record)
@@ -143,6 +147,6 @@ func (l *LiveStreamStatisticRepository) UpsertLocation(streamKey uuid.UUID, loca
 	return result.Error
 }
 
-func NewLiveStreamStatisticsRepository() models.LiveStreamStatisticRepository {
-	return &LiveStreamStatisticRepository{}
+func NewLiveStreamStatisticsRepository(db *gorm.DB) models.LiveStreamStatisticRepository {
+	return &LiveStreamStatisticRepository{db: db}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	"github.com/google/uuid"
 
+	"github.com/bluenviron/mediamtx/internal/database"
 	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/models"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp/h264conf"
@@ -297,7 +298,7 @@ func NewReader(conn *Conn) (*Reader, error) {
 		totalBytesReceived: 0,
 		startTime:          time.Now(),
 		totalFrames:        0,
-		repository:         repository.NewLiveStreamStatisticsRepository(),
+		repository:         repository.NewLiveStreamStatisticsRepository(database.DB),
 	}
 
 	var err error
