@@ -43,7 +43,7 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Val
 		return "", nil, "", "", errors.New("invalid path name")
 	}
 
-	videoStreaming, err := c.livestreamVideoRepo.GetStreamVideoStreamingByStreamKey(uuidPathName)
+	videoStreaming, err := c.livestreamVideoRepo.GetStreamVideoAvaialbleByStreamKey(uuidPathName)
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return "", nil, "", "", errors.New("something went wrong")
 	}
@@ -58,6 +58,10 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Val
 		newStreamID := uuid.New()
 		c.livestreamVideoRepo.UpsertStreamVideo(streamKey, newStreamID)
 		return newStreamID.String(), ur.Query(), ur.RawQuery, pathName, nil
+	}
+
+	if videoStreaming.Status == "streaming" {
+		return "", nil, "", "", errors.New("this streamkey is streaming")
 	}
 
 	return videoStreaming.Id.String(), ur.Query(), ur.RawQuery, pathName, nil

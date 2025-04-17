@@ -14,12 +14,12 @@ func NewLiveStreamVideoRepository(db *gorm.DB) *LiveStreamVideoRepository {
 	return &LiveStreamVideoRepository{db: db}
 }
 
-func (l *LiveStreamVideoRepository) GetStreamVideoStreamingByStreamKey(streamKey uuid.UUID) (*models.LiveStreamVideo, error) {
+func (l *LiveStreamVideoRepository) GetStreamVideoAvaialbleByStreamKey(streamKey uuid.UUID) (*models.LiveStreamVideo, error) {
 	var video models.LiveStreamVideo
 	err := l.db.Table("live_stream_videos").
-		Select("live_stream_videos.id, live_stream_videos.live_stream_key_id").
+		Select("live_stream_videos.id, live_stream_videos.live_stream_key_id, live_stream_videos.status").
 		Joins("JOIN live_stream_keys ON live_stream_keys.id = live_stream_videos.live_stream_key_id").
-		Where("live_stream_keys.stream_key = ? AND live_stream_videos.status = ?", streamKey, "streaming").First(&video).Error
+		Where("live_stream_keys.stream_key = ? AND (live_stream_videos.status = ? OR live_stream_videos.status = ?)", streamKey, "streaming", "created").First(&video).Error
 	if err != nil {
 		return nil, err
 	}
