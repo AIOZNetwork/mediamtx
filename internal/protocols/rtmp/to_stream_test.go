@@ -9,7 +9,7 @@ import (
 func TestToStreamNoSupportedCodecs(t *testing.T) {
 	r := &Reader{}
 
-	_, err := ToStream(r, nil)
+	_, err := ToStream(r, nil, "teststream")
 	require.Equal(t, errNoSupportedCodecsTo, err)
 }
 

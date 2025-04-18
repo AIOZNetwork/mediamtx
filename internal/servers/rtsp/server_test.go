@@ -32,6 +32,10 @@ func (p *dummyPath) Name() string {
 func (pa *dummyPath) SetStreamKey(_ string) {
 }
 
+func (pa *dummyPath) GetStreamKey() string {
+	return ""
+}
+
 func (p *dummyPath) SafeConf() *conf.Path {
 	return &conf.Path{}
 }

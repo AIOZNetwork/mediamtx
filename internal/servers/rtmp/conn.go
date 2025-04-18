@@ -383,7 +383,7 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
 
 	var stream *stream.Stream
 
-	medias, err := rtmp.ToStream(r, &stream)
+	medias, err := rtmp.ToStream(r, &stream, streamKey)
 	if err != nil {
 		return err
 	}

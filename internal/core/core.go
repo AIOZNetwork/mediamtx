@@ -146,7 +146,10 @@ func New(args []string) (*Core, bool) {
 		p.closeResources(nil, false)
 		return nil, false
 	}
+
 	database.MustConnectToDatabase(p.conf)
+	database.MustInitLiveStreamStatisticsDatabase()
+	database.MustInitLiveStreamMulticastDatabase()
 
 	go p.run()
 

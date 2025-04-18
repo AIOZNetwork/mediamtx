@@ -1,7 +1,7 @@
 dario.cat/mergo v1.0.0 h1:AGCNq9Evsj31mOgNPcLyXc+4PNABt905YmuqPYYpBWk=
 dario.cat/mergo v1.0.0/go.mod h1:uNxQE+84aUszobStD9th8a29P2fMDhsBdgRYvZOxGmk=
-github.com/AIOZNetwork/gohlslib/v2 v2.1.5 h1:tqIiyG29WLjpIYIemA/wszZRx7C+Nl2nkqnrE/HAj10=
-github.com/AIOZNetwork/gohlslib/v2 v2.1.5/go.mod h1:soTVqoidOT+L08hUSDreM7DebNyjjViUiEvpWlr7EIs=
+github.com/AIOZNetwork/gohlslib/v2 v2.1.6 h1:Md2j6cVzQDh7AEgkp/tRl/k1ysLocb1LGh/5gBxOH2w=
+github.com/AIOZNetwork/gohlslib/v2 v2.1.6/go.mod h1:soTVqoidOT+L08hUSDreM7DebNyjjViUiEvpWlr7EIs=
 github.com/MicahParks/jwkset v0.8.0 h1:jHtclI38Gibmu17XMI6+6/UB59srp58pQVxePHRK5o8=
 github.com/MicahParks/jwkset v0.8.0/go.mod h1:fVrj6TmG1aKlJEeceAz7JsXGTXEn72zP1px3us53JrA=
 github.com/MicahParks/keyfunc/v3 v3.3.10 h1:JtEGE8OcNeI297AMrR4gVXivV8fyAawFUMkbwNreJRk=
