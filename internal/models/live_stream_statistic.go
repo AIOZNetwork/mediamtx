@@ -7,10 +7,10 @@ import (
 type LiveStreamStatistic struct {
 	ID               uuid.UUID      `json:"id" gorm:"primaryKey"`
 	LiveStreamKey    uuid.UUID      `json:"live_stream_key" gorm:"uniqueIndex"`
-	FPS_in           int16          `json:"fps_in"`
-	FPS_out          int16          `json:"fps_out"`
-	Bitrate_in       float64        `json:"bitrate_in"`
-	Bitrate_out      float64        `json:"bitrate_out"`
+	FpsIn            int16          `json:"fps_in"`
+	FpsOut           int16          `json:"fps_out"`
+	BitrateIn        float64        `json:"bitrate_in"`
+	BitrateOut       float64        `json:"bitrate_out"`
 	NumberOfRequests int            `json:"number_of_requests"`
 	DataTransferred  float64        `json:"data_transferred"`
 	Device           string         `json:"device"`

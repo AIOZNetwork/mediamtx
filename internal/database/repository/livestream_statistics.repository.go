@@ -15,7 +15,7 @@ func (l *LiveStreamStatisticRepository) UpsertBitrateIn(streamKey uuid.UUID, bit
 	record := models.LiveStreamStatistic{
 		ID:            uuid.New(),
 		LiveStreamKey: streamKey,
-		Bitrate_in:    bitrate,
+		BitrateIn:     bitrate,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
@@ -29,7 +29,7 @@ func (l *LiveStreamStatisticRepository) UpsertBitrateOut(streamKey uuid.UUID, bi
 	record := models.LiveStreamStatistic{
 		ID:            uuid.New(),
 		LiveStreamKey: streamKey,
-		Bitrate_out:   bitrate,
+		BitrateOut:    bitrate,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
@@ -44,7 +44,7 @@ func (l *LiveStreamStatisticRepository) UpsertFPSIn(streamKey uuid.UUID, fps int
 	record := models.LiveStreamStatistic{
 		ID:            uuid.New(),
 		LiveStreamKey: streamKey,
-		FPS_in:        fps,
+		FpsIn:         fps,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
@@ -59,7 +59,7 @@ func (l *LiveStreamStatisticRepository) UpsertFPSOut(streamKey uuid.UUID, fps in
 	record := models.LiveStreamStatistic{
 		ID:            uuid.New(),
 		LiveStreamKey: streamKey,
-		FPS_out:       fps,
+		FpsOut:        fps,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
