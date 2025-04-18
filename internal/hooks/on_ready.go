@@ -1,11 +1,60 @@
 package hooks
 
 import (
+	"fmt"
+	"net/url"
+	"strings"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/google/uuid"
 )
+
+func ffmpegGenerator(sourceUrl string, forwardURIs []string) string {
+	if len(forwardURIs) == 0 {
+		return ""
+	}
+
+	input := fmt.Sprintf("ffmpeg -i %s", sourceUrl)
+
+	outputs := make([]string, len(forwardURIs))
+
+	for i, uri := range forwardURIs {
+		parsedURL, err := url.Parse(uri)
+
+		if err != nil || parsedURL.Scheme != "rtmp" {
+        fmt.Println("Invalid URL")
+        return ""
+    }
+		switch {
+		case strings.HasPrefix(parsedURL.String(), "rtmp://") && !strings.Contains(uri, " "):
+			outputs[i] = fmt.Sprintf("-c copy -f flv %s", parsedURL.String())
+		default:
+			return ""
+		}
+	}
+
+	return fmt.Sprintf("%s %s", input, strings.Join(outputs, " "))
+}
+
+func getMultiStreams(key string) []string {
+	uuid, err := uuid.Parse(key)
+	if err != nil {
+		return nil
+	}
+
+	repo := repository.NewLiveStreamMulticastRepository(database.DB)
+	data, err := repo.GetLiveStreamMulticastByStreamKey(uuid)
+	if err != nil || data == nil {
+		return nil
+	}
+
+	return data.LiveStreamMulticastUrls
+}
 
 // OnReadyParams are the parameters of OnReady.
 type OnReadyParams struct {
@@ -21,8 +70,9 @@ type OnReadyParams struct {
 func OnReady(params OnReadyParams) func() {
 	var env externalcmd.Environment
 	var onReadyCmd *externalcmd.Cmd
+	var onMulticastCmd *externalcmd.Cmd
 
-	if params.Conf.RunOnReady != "" || params.Conf.RunOnNotReady != "" {
+	if params.Conf.RunOnReady != "" || params.Conf.RunOnNotReady != "" || params.Conf.IsRunMulticast {
 		env = params.ExternalCmdEnv
 		env["MTX_QUERY"] = params.Query
 		env["MTX_SOURCE_TYPE"] = params.Desc.Type
@@ -41,10 +91,33 @@ func OnReady(params OnReadyParams) func() {
 			})
 	}
 
+	if params.Conf.IsRunMulticast {
+		params.Logger.Log(logger.Info, "Run multicast command started")
+		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["MTX_PATH"])
+		multiStreamsUrl := getMultiStreams(env["AIOZ_StreamKey"])
+		ffmpegQuery := ffmpegGenerator(sourceUrl, multiStreamsUrl)
+
+		if ffmpegQuery != "" {
+			onReadyCmd = externalcmd.NewCmd(
+				params.ExternalCmdPool,
+				ffmpegQuery,
+				params.Conf.RunOnReadyRestart,
+				env,
+				func(err error) {
+					params.Logger.Log(logger.Info, "Run multicast command exited: %v", err)
+				})
+		}
+	}
+
 	return func() {
 		if onReadyCmd != nil {
 			onReadyCmd.Close()
 			params.Logger.Log(logger.Info, "runOnReady command stopped")
+		}
+
+		if onMulticastCmd != nil {
+			onMulticastCmd.Close()
+			params.Logger.Log(logger.Info, "Run multicast command stopped")
 		}
 
 		if params.Conf.RunOnNotReady != "" {

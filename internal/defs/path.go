@@ -23,6 +23,8 @@ func (e PathNoOnePublishingError) Error() string {
 // Path is a path.
 type Path interface {
 	Name() string
+	SetStreamKey(key string)
+	GetStreamKey() string
 	SafeConf() *conf.Path
 	ExternalCmdEnv() externalcmd.Environment
 	StartPublisher(req PathStartPublisherReq) (*stream.Stream, error)

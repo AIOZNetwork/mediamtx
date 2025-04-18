@@ -7,6 +7,8 @@ import (
 
 	"github.com/bluenviron/gohlslib/v2"
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/hls"
@@ -25,6 +27,7 @@ type muxerInstance struct {
 	stream          *stream.Stream
 	bytesSent       *uint64
 	parent          logger.Writer
+	streamKey			  string
 
 	hmuxer *gohlslib.Muxer
 }
@@ -53,7 +56,7 @@ func (mi *muxerInstance) initialize() error {
 		return err
 	}
 
-	err = mi.hmuxer.Start()
+	err = mi.hmuxer.Start(repository.NewLiveStreamStatisticsRepository(database.DB), mi.streamKey)
 	if err != nil {
 		mi.stream.RemoveReader(mi)
 		return err

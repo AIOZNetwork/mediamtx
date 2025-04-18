@@ -104,9 +104,6 @@ type RTMPServer interface {
 	APIConnsList() (*defs.APIRTMPConnList, error)
 	APIConnsGet(uuid.UUID) (*defs.APIRTMPConn, error)
 	APIConnsKick(uuid.UUID) error
-	APICreateStreamKey(streamKey uuid.UUID, streamId uuid.UUID) (uuid.UUID, error)
-	APIDeleteStreamId(streamKey uuid.UUID, streamId uuid.UUID) error
-	APIDeleteStreamKey(streamKey uuid.UUID) error
 }
 
 // SRTServer contains methods used by the API and Metrics server.
@@ -205,9 +202,6 @@ func (a *API) Initialize() error {
 	}
 
 	if !interfaceIsEmpty(a.RTMPServer) {
-		group.DELETE("/rtmpconns/streamId", a.onRTMPConnsDeleteStreamId)
-		group.DELETE("/rtmpconns/streamKey", a.onRTMPConnsDeleteStreamKey)
-		group.POST("/rtmpconns/create", a.onRTMPConnsCreateStreamKey)
 		group.GET("/rtmpconns/list", a.onRTMPConnsList)
 		group.GET("/rtmpconns/get/:id", a.onRTMPConnsGet)
 		group.POST("/rtmpconns/kick/:id", a.onRTMPConnsKick)
@@ -813,87 +807,6 @@ func (a *API) onRTSPSSessionsKick(ctx *gin.Context) {
 	}
 
 	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onRTMPConnsCreateStreamKey(ctx *gin.Context) {
-	streamKey := ctx.PostForm("streamKey")
-	streamId := ctx.PostForm("streamId")
-	if streamKey == "" || streamId == "" {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("streamKey and streamId are required"))
-		return
-	}
-
-	streamKeyUUID, err := uuid.Parse(streamKey)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid streamKey"))
-		return
-	}
-
-	streamIdUUID, err := uuid.Parse(streamId)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid streamId"))
-		return
-	}
-
-	streamKeyUUID, err = a.RTMPServer.APICreateStreamKey(streamKeyUUID, streamIdUUID)
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	ctx.JSON(http.StatusOK, streamKeyUUID)
-}
-
-func (a *API) onRTMPConnsDeleteStreamId(ctx *gin.Context) {
-	streamKey := ctx.Query("streamKey")
-	streamId := ctx.Query("streamId")
-
-	if streamKey == "" || streamId == "" {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("streamKey and streamId are required"))
-		return
-	}
-
-	streamKeyUUID, err := uuid.Parse(streamKey)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid streamKey"))
-		return
-	}
-
-	streamIdUUID, err := uuid.Parse(streamId)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid streamId"))
-		return
-	}
-
-	err = a.RTMPServer.APIDeleteStreamId(streamKeyUUID, streamIdUUID)
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	ctx.JSON(http.StatusOK, streamKeyUUID)
-}
-
-func (a *API) onRTMPConnsDeleteStreamKey(ctx *gin.Context) {
-	streamKey := ctx.Query("streamKey")
-	if streamKey == "" {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("streamKey is required"))
-		return
-	}
-
-	streamKeyUUID, err := uuid.Parse(streamKey)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid streamKey"))
-		return
-	}
-
-	err = a.RTMPServer.APIDeleteStreamKey(streamKeyUUID)
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	ctx.JSON(http.StatusOK, streamKeyUUID)
 }
 
 func (a *API) onRTMPConnsList(ctx *gin.Context) {

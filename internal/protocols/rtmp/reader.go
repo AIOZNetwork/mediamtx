@@ -3,6 +3,7 @@ package rtmp
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -13,7 +14,12 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/google/uuid"
 
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
+	"github.com/bluenviron/mediamtx/internal/models"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp/h264conf"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp/message"
 )
@@ -272,7 +278,14 @@ func sortedKeys(m map[uint8]format.Format) []int {
 
 // Reader is a wrapper around Conn that provides utilities to demux incoming data.
 type Reader struct {
-	conn        *Conn
+	conn               *Conn
+	totalBytesReceived int64
+	startTime          time.Time
+	bitrate            float64
+	totalFrames        int64
+	frameRate          int16
+	repository         models.LiveStreamStatisticRepository
+
 	videoTracks map[uint8]format.Format
 	audioTracks map[uint8]format.Format
 	onVideoData map[uint8]func(message.Message) error
@@ -282,7 +295,11 @@ type Reader struct {
 // NewReader allocates a Reader.
 func NewReader(conn *Conn) (*Reader, error) {
 	r := &Reader{
-		conn: conn,
+		conn:               conn,
+		totalBytesReceived: 0,
+		startTime:          time.Now(),
+		totalFrames:        0,
+		repository:         repository.NewLiveStreamStatisticsRepository(database.DB),
 	}
 
 	var err error
@@ -606,11 +623,48 @@ func (r *Reader) OnDataH265(track *format.H265, cb OnDataH26xFunc) {
 	}
 }
 
+func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, streamKey string) error {
+	eclapsed := time.Since(r.startTime).Seconds()
+	r.totalBytesReceived += int64(len(msg.Payload))
+	r.totalFrames++
+	second := conf.SecondCalculate
+	uuid, err := uuid.Parse(streamKey)
+	if err != nil {
+		fmt.Println("Error parsing streamKey:", err)
+		return err
+	}
+	if eclapsed >= float64(second) {
+		// bitrate
+		r.bitrate = float64(r.totalBytesReceived*8) / (eclapsed) / 1000
+		err := r.repository.UpsertBitrateIn(uuid, r.bitrate)
+		if err != nil {
+			fmt.Println("Error inserting bitrate:", err)
+			return err
+		}
+
+		//framerate
+		r.frameRate = int16(math.Round(float64(r.totalFrames) / eclapsed))
+		errFrameRate := r.repository.UpsertFPSIn(uuid, r.frameRate)
+		if errFrameRate != nil {
+			fmt.Println("Error inserting framerate:", errFrameRate)
+			return errFrameRate
+		}
+
+		// reset
+		r.startTime = time.Now()
+		r.totalBytesReceived = 0
+		r.totalFrames = 0
+
+	}
+	return nil
+}
+
 // OnDataH264 sets a callback that is called when H264 data is received.
-func (r *Reader) OnDataH264(track *format.H264, cb OnDataH26xFunc) {
+func (r *Reader) OnDataH264(track *format.H264, cb OnDataH26xFunc, streamKey string) {
 	r.onVideoData[r.videoTrackID(track)] = func(msg message.Message) error {
 		switch msg := msg.(type) {
 		case *message.Video:
+			r.CalculateAndSaveBitrateFrameRate(*msg, streamKey)
 			switch msg.Type {
 			case message.VideoTypeConfig:
 				var conf h264conf.Conf

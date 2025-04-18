@@ -25,7 +25,7 @@ func durationToTimestamp(d time.Duration, clockRate int) int64 {
 }
 
 // ToStream maps a RTMP stream to a MediaMTX stream.
-func ToStream(r *Reader, stream **stream.Stream) ([]*description.Media, error) {
+func ToStream(r *Reader, stream **stream.Stream, streamKey string) ([]*description.Media, error) {
 	var medias []*description.Media
 
 	for _, track := range r.Tracks() {
@@ -98,7 +98,7 @@ func ToStream(r *Reader, stream **stream.Stream) ([]*description.Media, error) {
 					},
 					AU: au,
 				})
-			})
+			}, streamKey)
 
 		case *format.Opus:
 			medi := &description.Media{
