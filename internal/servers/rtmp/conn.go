@@ -297,7 +297,12 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
 	c.query = rawQuery
 	c.mutex.Unlock()
 
-	r, err := rtmp.NewReader(conn)
+	streamKeyUUID, err := uuid.Parse(streamKey)
+	if err != nil {
+		return err
+	}
+
+	r, err := rtmp.NewReader(conn, streamKeyUUID)
 	if err != nil {
 		return err
 	}
