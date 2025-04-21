@@ -29,12 +29,19 @@ func (p *dummyPath) Name() string {
 	return "teststream"
 }
 
+func (pa *dummyPath) SetStreamKey(_ string) {
+}
+
 func (p *dummyPath) SafeConf() *conf.Path {
 	return &conf.Path{}
 }
 
 func (p *dummyPath) ExternalCmdEnv() externalcmd.Environment {
 	return externalcmd.Environment{}
+}
+
+func (pa *dummyPath) GetStreamKey() string {
+	return ""
 }
 
 func (p *dummyPath) StartPublisher(req defs.PathStartPublisherReq) (*stream.Stream, error) {
@@ -294,7 +301,7 @@ func TestServerRead(t *testing.T) {
 					test.FormatH264.PPS,
 					{5, 2, 3, 4},
 				}, au)
-			})
+			}, "teststream")
 
 			err = r.Read()
 			require.NoError(t, err)

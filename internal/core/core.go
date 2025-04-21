@@ -20,6 +20,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/confwatcher"
+	"github.com/bluenviron/mediamtx/internal/database"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
@@ -135,6 +136,10 @@ func New(args []string) (*Core, bool) {
 		return nil, false
 	}
 
+	database.MustConnectToDatabase(p.conf)
+	database.MustInitLiveStreamMulticastDatabase()
+	database.MustInitLiveStreamStatisticsDatabase()
+
 	err = p.createResources(true)
 	if err != nil {
 		if p.logger != nil {
@@ -145,6 +150,10 @@ func New(args []string) (*Core, bool) {
 		p.closeResources(nil, false)
 		return nil, false
 	}
+
+	database.MustConnectToDatabase(p.conf)
+	database.MustInitLiveStreamStatisticsDatabase()
+	database.MustInitLiveStreamMulticastDatabase()
 
 	go p.run()
 
