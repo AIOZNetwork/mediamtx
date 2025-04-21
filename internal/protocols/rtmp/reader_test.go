@@ -9,6 +9,7 @@ import (
 	"github.com/bluenviron/gortsplib/v4/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp/amf0"
@@ -1632,7 +1633,7 @@ func TestReadTracks(t *testing.T) {
 
 			c := newNoHandshakeConn(&buf)
 
-			r, err := NewReader(c)
+			r, err := NewReader(c, uuid.Nil)
 			require.NoError(t, err)
 			tracks := r.Tracks()
 			require.Equal(t, ca.tracks, tracks)
