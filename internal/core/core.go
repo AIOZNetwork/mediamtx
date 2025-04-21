@@ -151,10 +151,6 @@ func New(args []string) (*Core, bool) {
 		return nil, false
 	}
 
-	database.MustConnectToDatabase(p.conf)
-	database.MustInitLiveStreamStatisticsDatabase()
-	database.MustInitLiveStreamMulticastDatabase()
-
 	go p.run()
 
 	return p, true
