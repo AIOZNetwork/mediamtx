@@ -386,8 +386,3 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		BytesSent:     bytesSent,
 	}
 }
-
-func generateStreamID() string {
-	id := uuid.New()
-	return id.String()
-}
