@@ -136,6 +136,10 @@ func New(args []string) (*Core, bool) {
 		return nil, false
 	}
 
+	database.MustConnectToDatabase(p.conf)
+	database.MustInitLiveStreamMulticastDatabase()
+	database.MustInitLiveStreamStatisticsDatabase()
+
 	err = p.createResources(true)
 	if err != nil {
 		if p.logger != nil {

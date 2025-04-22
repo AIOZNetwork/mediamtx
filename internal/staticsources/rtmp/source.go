@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/gortsplib/v4/pkg/description"
+	"github.com/google/uuid"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
@@ -95,7 +96,7 @@ func (s *Source) runReader(u *url.URL, nconn net.Conn) error {
 		return err
 	}
 
-	r, err := rtmp.NewReader(conn)
+	r, err := rtmp.NewReader(conn, uuid.Nil)
 	if err != nil {
 		return err
 	}

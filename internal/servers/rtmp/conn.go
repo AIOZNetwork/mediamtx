@@ -2,22 +2,22 @@ package rtmp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
-	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v4/pkg/description"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/hooks"
@@ -26,7 +26,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
-func pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Values, string, string, error) {
+func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Values, string, string, error) {
 	tmp := strings.TrimRight(inURL.String(), "/")
 	ur, _ := url.Parse(tmp)
 	pathName := strings.TrimLeft(ur.Path, "/")
@@ -38,111 +38,33 @@ func pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Values, strin
 	if pathName == "" {
 		return "", nil, "", "", errors.New("invalid path name")
 	}
-
-	filename := "/app/streamId/streamId.json"
-	data, err := os.ReadFile(filename)
+	uuidPathName, err := uuid.Parse(pathName)
 	if err != nil {
-		return "", nil, "", "", fmt.Errorf("stream key file not found: %v", err)
+		return "", nil, "", "", errors.New("invalid path name")
 	}
 
-	var streams []StreamInfo
-	if err := json.Unmarshal(data, &streams); err != nil {
-		return "", nil, "", "", errors.New("invalid stream key file")
+	videoStreaming, err := c.livestreamVideoRepo.GetStreamVideoAvaialbleByStreamKey(uuidPathName)
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return "", nil, "", "", errors.New("something went wrong")
 	}
 
-	var validStreams []StreamInfo
-	for _, stream := range streams {
-		if stream.StreamKey == pathName && stream.Available {
-			validStreams = append(validStreams, stream)
-		}
-	}
+	if err == gorm.ErrRecordNotFound { // stream directly without create stream session
 
-	if len(validStreams) == 0 {
-		newStreamID := generateStreamID()
-		newStream := StreamInfo{
-			StreamID:  newStreamID,
-			StreamKey: pathName,
-			Available: false,
-			CreatedAt: time.Now().Format(time.RFC3339),
+		streamKey := c.livestreamVideoRepo.GetStreamKeyExist(uuidPathName)
+		if streamKey == uuid.Nil {
+			return "", nil, "", "", errors.New("invalid path name")
 		}
 
-		streams = append(streams, newStream)
-
-		updatedData, err := json.MarshalIndent(streams, "", "  ")
-		if err != nil {
-			return "", nil, "", "", errors.New("failed to update stream file")
-		}
-
-		if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-			return "", nil, "", "", errors.New("failed to save stream file")
-		}
-
-		return newStreamID, ur.Query(), ur.RawQuery, pathName, nil
+		newStreamID := uuid.New()
+		c.livestreamVideoRepo.UpsertStreamVideo(streamKey, newStreamID)
+		return newStreamID.String(), ur.Query(), ur.RawQuery, pathName, nil
 	}
 
-	sort.Slice(validStreams, func(i, j int) bool {
-		timeI, _ := time.Parse(time.RFC3339, validStreams[i].CreatedAt)
-		timeJ, _ := time.Parse(time.RFC3339, validStreams[j].CreatedAt)
-		return timeI.Before(timeJ)
-	})
-
-	selectedStream := validStreams[0]
-
-	for i := range streams {
-		if streams[i].StreamID == selectedStream.StreamID {
-			streams[i].Available = false
-			break
-		}
+	if videoStreaming.Status == "streaming" {
+		return "", nil, "", "", errors.New("this streamkey is streaming")
 	}
 
-	updatedData, err := json.MarshalIndent(streams, "", "  ")
-	if err != nil {
-		return "", nil, "", "", errors.New("failed to update stream file")
-	}
-
-	if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-		return "", nil, "", "", errors.New("failed to save stream file")
-	}
-
-	return selectedStream.StreamID, ur.Query(), ur.RawQuery,pathName, nil
-}
-
-func deleteStreamByID(streamID string) error {
-	filename := "/app/streamId/streamId.json"
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return fmt.Errorf("stream key file not found: %v", err)
-	}
-
-	var streams []StreamInfo
-	if err := json.Unmarshal(data, &streams); err != nil {
-		return errors.New("invalid stream key file")
-	}
-
-	newStreams := make([]StreamInfo, 0, len(streams))
-	found := false
-	for _, stream := range streams {
-		if stream.StreamID == streamID {
-			found = true
-			continue
-		}
-		newStreams = append(newStreams, stream)
-	}
-
-	if !found {
-		return errors.New("stream ID not found")
-	}
-
-	updatedData, err := json.MarshalIndent(newStreams, "", "  ")
-	if err != nil {
-		return errors.New("failed to update stream file")
-	}
-
-	if err := os.WriteFile(filename, updatedData, 0644); err != nil {
-		return errors.New("failed to save stream file")
-	}
-
-	return nil
+	return videoStreaming.Id.String(), ur.Query(), ur.RawQuery, pathName, nil
 }
 
 type connState int
@@ -167,15 +89,16 @@ type conn struct {
 	pathManager         serverPathManager
 	parent              *Server
 
-	ctx       context.Context
-	ctxCancel func()
-	uuid      uuid.UUID
-	created   time.Time
-	mutex     sync.RWMutex
-	rconn     *rtmp.Conn
-	state     connState
-	pathName  string
-	query     string
+	ctx                 context.Context
+	ctxCancel           func()
+	uuid                uuid.UUID
+	created             time.Time
+	mutex               sync.RWMutex
+	rconn               *rtmp.Conn
+	state               connState
+	pathName            string
+	query               string
+	livestreamVideoRepo *repository.LiveStreamVideoRepository
 }
 
 func (c *conn) initialize() {
@@ -183,6 +106,7 @@ func (c *conn) initialize() {
 
 	c.uuid = uuid.New()
 	c.created = time.Now()
+	c.livestreamVideoRepo = repository.NewLiveStreamVideoRepository(database.DB)
 
 	c.Log(logger.Info, "opened")
 
@@ -225,9 +149,6 @@ func (c *conn) run() { //nolint:dupl
 	c.ctxCancel()
 
 	c.parent.closeConn(c)
-	if err := deleteStreamByID(c.pathName); err != nil {
-		c.Log(logger.Info, "failed to delete stream: %v", err)
-	}
 	c.Log(logger.Info, "closed: %v", err)
 }
 
@@ -267,7 +188,7 @@ func (c *conn) runReader() error {
 }
 
 func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
-	pathName, query, rawQuery, _, err := pathNameAndQuery(u, false)
+	pathName, query, rawQuery, _, err := c.pathNameAndQuery(u, false)
 
 	if err != nil {
 		return err
@@ -337,7 +258,7 @@ func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
 }
 
 func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
-	pathName, query, rawQuery, streamKey, err := pathNameAndQuery(u, true)
+	pathName, query, rawQuery, streamKey, err := c.pathNameAndQuery(u, true)
 	if err != nil {
 		return err
 	}
@@ -355,7 +276,7 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
 			ID:      &c.uuid,
 		},
 	})
-	
+
 	path.SetStreamKey(streamKey)
 
 	if err != nil {
@@ -376,7 +297,12 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
 	c.query = rawQuery
 	c.mutex.Unlock()
 
-	r, err := rtmp.NewReader(conn)
+	streamKeyUUID, err := uuid.Parse(streamKey)
+	if err != nil {
+		return err
+	}
+
+	r, err := rtmp.NewReader(conn, streamKeyUUID)
 	if err != nil {
 		return err
 	}
@@ -459,9 +385,4 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		BytesReceived: bytesReceived,
 		BytesSent:     bytesSent,
 	}
-}
-
-func generateStreamID() string {
-	id := uuid.New()
-	return id.String()
 }

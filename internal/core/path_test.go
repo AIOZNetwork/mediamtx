@@ -20,6 +20,7 @@ import (
 	"github.com/bluenviron/gortsplib/v4/pkg/headers"
 	"github.com/bluenviron/gortsplib/v4/pkg/sdp"
 	srt "github.com/datarhei/gosrt"
+	"github.com/google/uuid"
 	"github.com/pion/rtp"
 	"github.com/stretchr/testify/require"
 
@@ -443,7 +444,7 @@ func TestPathRunOnRead(t *testing.T) {
 					conn, err := rtmp.NewClientConn(nconn, u, false)
 					require.NoError(t, err)
 
-					_, err = rtmp.NewReader(conn)
+					_, err = rtmp.NewReader(conn, uuid.Nil)
 					require.NoError(t, err)
 
 				case "rtmps":
@@ -474,7 +475,7 @@ func TestPathRunOnRead(t *testing.T) {
 						}
 					}()
 
-					_, err = rtmp.NewReader(conn)
+					_, err = rtmp.NewReader(conn, uuid.Nil)
 					require.NoError(t, err)
 
 				case "srt":

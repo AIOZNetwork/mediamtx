@@ -17,6 +17,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -289,7 +290,7 @@ func TestServerRead(t *testing.T) {
 			conn, err := rtmp.NewClientConn(nconn, u, false)
 			require.NoError(t, err)
 
-			r, err := rtmp.NewReader(conn)
+			r, err := rtmp.NewReader(conn , uuid.Nil)
 			require.NoError(t, err)
 
 			tracks := r.Tracks()
