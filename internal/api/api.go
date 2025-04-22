@@ -160,7 +160,6 @@ func (a *API) Initialize() error {
 	router.SetTrustedProxies(a.TrustedProxies.ToTrustedProxies()) //nolint:errcheck
 
 	router.Use(a.middlewareOrigin)
-
 	router.Use(a.middlewareAuth)
 	group := router.Group("/v3")
 
