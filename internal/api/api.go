@@ -161,7 +161,6 @@ func (a *API) Initialize() error {
 
 	router.Use(a.middlewareOrigin)
 	router.Use(a.middlewareAuth)
-
 	group := router.Group("/v3")
 
 	group.GET("/config/global/get", a.onConfigGlobalGet)
