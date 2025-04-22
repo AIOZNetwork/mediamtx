@@ -161,9 +161,6 @@ func (a *API) Initialize() error {
 
 	router.Use(a.middlewareOrigin)
 
-	publicGroup := router.Group("/public")
-	publicGroup.GET("/ping", a.onPingConnection)
-
 	router.Use(a.middlewareAuth)
 	group := router.Group("/v3")
 
@@ -252,11 +249,6 @@ func (a *API) Initialize() error {
 	a.Log(logger.Info, "listener opened on "+address)
 
 	return nil
-}
-
-// Ping Connection is a simple ping.
-func (a *API) onPingConnection(ctx *gin.Context) {
-	ctx.String(http.StatusOK, "pong")
 }
 
 // Close closes the API.

@@ -53,6 +53,10 @@ func (s *httpServer) initialize() error {
 	router := gin.New()
 	router.SetTrustedProxies(s.trustedProxies.ToTrustedProxies()) //nolint:errcheck
 
+	router.GET("/ping", func(ctx *gin.Context) {
+		ctx.String(http.StatusOK, "pong")
+	})
+
 	router.Use(s.middlewareOrigin)
 
 	router.Use(s.onRequest)
