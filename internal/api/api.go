@@ -160,8 +160,11 @@ func (a *API) Initialize() error {
 	router.SetTrustedProxies(a.TrustedProxies.ToTrustedProxies()) //nolint:errcheck
 
 	router.Use(a.middlewareOrigin)
-	router.Use(a.middlewareAuth)
 
+	publicGroup := router.Group("/public")
+	publicGroup.GET("/ping", a.onPingConnection)
+
+	router.Use(a.middlewareAuth)
 	group := router.Group("/v3")
 
 	group.GET("/config/global/get", a.onConfigGlobalGet)
@@ -225,7 +228,6 @@ func (a *API) Initialize() error {
 		group.POST("/srtconns/kick/:id", a.onSRTConnsKick)
 	}
 
-	group.GET("/ping", a.onPingConnection)
 	group.GET("/recordings/list", a.onRecordingsList)
 	group.GET("/recordings/get/*name", a.onRecordingsGet)
 	group.DELETE("/recordings/deletesegment", a.onRecordingDeleteSegment)
