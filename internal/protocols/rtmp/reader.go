@@ -623,14 +623,14 @@ func (r *Reader) OnDataH265(track *format.H265, cb OnDataH26xFunc) {
 	}
 }
 
-func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, streamKey string) error {
+func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, pathName string) error {
 	eclapsed := time.Since(r.startTime).Seconds()
 	r.totalBytesReceived += int64(len(msg.Payload))
 	r.totalFrames++
 	second := conf.SecondCalculate
-	uuid, err := uuid.Parse(streamKey)
+	uuid, err := uuid.Parse(pathName)
 	if err != nil {
-		fmt.Println("Error parsing streamKey:", err)
+		fmt.Println("Error parsing pathName:", err)
 		return err
 	}
 	if eclapsed >= float64(second) {
@@ -660,11 +660,11 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, streamKey s
 }
 
 // OnDataH264 sets a callback that is called when H264 data is received.
-func (r *Reader) OnDataH264(track *format.H264, cb OnDataH26xFunc, streamKey string) {
+func (r *Reader) OnDataH264(track *format.H264, cb OnDataH26xFunc, pathName string) {
 	r.onVideoData[r.videoTrackID(track)] = func(msg message.Message) error {
 		switch msg := msg.(type) {
 		case *message.Video:
-			r.CalculateAndSaveBitrateFrameRate(*msg, streamKey)
+			r.CalculateAndSaveBitrateFrameRate(*msg, pathName)
 			switch msg.Type {
 			case message.VideoTypeConfig:
 				var conf h264conf.Conf
