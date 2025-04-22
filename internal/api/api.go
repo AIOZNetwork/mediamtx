@@ -225,6 +225,7 @@ func (a *API) Initialize() error {
 		group.POST("/srtconns/kick/:id", a.onSRTConnsKick)
 	}
 
+	group.GET("/ping", a.onPingConnection)
 	group.GET("/recordings/list", a.onRecordingsList)
 	group.GET("/recordings/get/*name", a.onRecordingsGet)
 	group.DELETE("/recordings/deletesegment", a.onRecordingDeleteSegment)
@@ -249,6 +250,11 @@ func (a *API) Initialize() error {
 	a.Log(logger.Info, "listener opened on "+address)
 
 	return nil
+}
+
+// Ping Connection is a simple ping.
+func (a *API) onPingConnection(ctx *gin.Context) {
+	ctx.String(http.StatusOK, "pong")
 }
 
 // Close closes the API.
