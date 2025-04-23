@@ -56,7 +56,7 @@ func (mi *muxerInstance) initialize() error {
 		return err
 	}
 
-	err = mi.hmuxer.Start(repository.NewLiveStreamStatisticsRepository(database.DB), mi.streamKey)
+	err = mi.hmuxer.Start(repository.NewLiveStreamStatisticsRepository(database.DB), mi.pathName)
 	if err != nil {
 		mi.stream.RemoveReader(mi)
 		return err
