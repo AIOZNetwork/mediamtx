@@ -85,6 +85,7 @@ type Server struct {
 	ln        net.Listener
 	conns     map[*conn]struct{}
 	loader    *certloader.CertLoader
+	listStreamKeys map[string]bool
 
 	// in
 	chNewConn      chan net.Conn
@@ -121,6 +122,7 @@ func (s *Server) Initialize() error {
 
 	s.ln = ln
 	s.conns = make(map[*conn]struct{})
+	s.listStreamKeys = make(map[string]bool)
 	s.chNewConn = make(chan net.Conn)
 	s.chAcceptErr = make(chan error)
 	s.chCloseConn = make(chan *conn)
@@ -190,10 +192,11 @@ outer:
 				pathManager:         s.PathManager,
 				parent:              s,
 			}
-			c.initialize()
+			c.initialize(&s.listStreamKeys)
 			s.conns[c] = struct{}{}
 
 		case c := <-s.chCloseConn:
+			delete(s.listStreamKeys, c.streamKey)
 			delete(s.conns, c)
 
 		case req := <-s.chAPIConnsList:
@@ -250,7 +253,7 @@ outer:
 				req.res <- serverAPIConnsKickRes{err: ErrConnNotFound}
 				continue
 			}
-
+			s.listStreamKeys[c.streamKey] = false
 			delete(s.conns, c)
 			c.Close()
 			req.res <- serverAPIConnsKickRes{}

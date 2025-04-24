@@ -97,11 +97,12 @@ type conn struct {
 	rconn               *rtmp.Conn
 	state               connState
 	pathName            string
+	streamKey					 string
 	query               string
 	livestreamVideoRepo *repository.LiveStreamVideoRepository
 }
 
-func (c *conn) initialize() {
+func (c *conn) initialize(listStreamKeys *map[string]bool) {
 	c.ctx, c.ctxCancel = context.WithCancel(c.parentCtx)
 
 	c.uuid = uuid.New()
@@ -111,7 +112,7 @@ func (c *conn) initialize() {
 	c.Log(logger.Info, "opened")
 
 	c.wg.Add(1)
-	go c.run()
+	go c.run(listStreamKeys)
 }
 
 func (c *conn) Close() {
@@ -131,7 +132,7 @@ func (c *conn) ip() net.IP {
 	return c.nconn.RemoteAddr().(*net.TCPAddr).IP
 }
 
-func (c *conn) run() { //nolint:dupl
+func (c *conn) run(listStreamKey *map[string]bool) { //nolint:dupl
 	defer c.wg.Done()
 	onDisconnectHook := hooks.OnConnect(hooks.OnConnectParams{
 		Logger:              c,
@@ -144,7 +145,7 @@ func (c *conn) run() { //nolint:dupl
 	})
 	defer onDisconnectHook()
 
-	err := c.runInner()
+	err := c.runInner(listStreamKey)
 
 	c.ctxCancel()
 
@@ -152,10 +153,10 @@ func (c *conn) run() { //nolint:dupl
 	c.Log(logger.Info, "closed: %v", err)
 }
 
-func (c *conn) runInner() error {
+func (c *conn) runInner(listStreamKeys *map[string]bool) error {
 	readerErr := make(chan error)
 	go func() {
-		readerErr <- c.runReader()
+		readerErr <- c.runReader(listStreamKeys)
 	}()
 	select {
 	case err := <-readerErr:
@@ -169,7 +170,7 @@ func (c *conn) runInner() error {
 	}
 }
 
-func (c *conn) runReader() error {
+func (c *conn) runReader(listStreamKeys *map[string]bool) error {
 	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
 	c.nconn.SetWriteDeadline(time.Now().Add(time.Duration(c.writeTimeout)))
 	conn, u, publish, err := rtmp.NewServerConn(c.nconn)
@@ -184,7 +185,7 @@ func (c *conn) runReader() error {
 	if !publish {
 		return c.runRead(conn, u)
 	}
-	return c.runPublish(conn, u)
+	return c.runPublish(conn, u, listStreamKeys)
 }
 
 func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
@@ -257,10 +258,14 @@ func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
 	}
 }
 
-func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
+func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL, listStreamKeys *map[string]bool) error {
 	pathName, query, rawQuery, streamKey, err := c.pathNameAndQuery(u, true)
 	if err != nil {
 		return err
+	}
+
+	if (*listStreamKeys)[streamKey]{
+		return errors.New("this streamkey is streaming")
 	}
 
 	path, err := c.pathManager.AddPublisher(defs.PathAddPublisherReq{
@@ -276,7 +281,7 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
 			ID:      &c.uuid,
 		},
 	})
-
+	(*listStreamKeys)[streamKey] = true
 	path.SetStreamKey(streamKey)
 
 	if err != nil {
@@ -294,6 +299,7 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL) error {
 	c.mutex.Lock()
 	c.state = connStatePublish
 	c.pathName = pathName
+	c.streamKey = streamKey
 	c.query = rawQuery
 	c.mutex.Unlock()
 
