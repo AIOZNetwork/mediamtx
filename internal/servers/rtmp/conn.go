@@ -57,11 +57,21 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Val
 
 		newStreamID := uuid.New()
 		c.livestreamVideoRepo.UpsertStreamVideo(streamKey, newStreamID)
+
+		_, err := database.RedisDb.Set(c.ctx, newStreamID.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
+		if err != nil {
+			return "", nil, "", "", errors.New("cannot update redis")
+		}
 		return newStreamID.String(), ur.Query(), ur.RawQuery, pathName, nil
 	}
 
 	if videoStreaming.Status == "streaming" {
 		return "", nil, "", "", errors.New("this streamkey is streaming")
+	}
+
+	_, err = database.RedisDb.Set(c.ctx, videoStreaming.Id.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
+	if err != nil {
+		return "", nil, "", "", errors.New("cannot update redis")
 	}
 
 	return videoStreaming.Id.String(), ur.Query(), ur.RawQuery, pathName, nil
@@ -97,7 +107,7 @@ type conn struct {
 	rconn               *rtmp.Conn
 	state               connState
 	pathName            string
-	streamKey					 string
+	streamKey           string
 	query               string
 	livestreamVideoRepo *repository.LiveStreamVideoRepository
 }
@@ -264,7 +274,7 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL, listStreamKeys *map[strin
 		return err
 	}
 
-	if (*listStreamKeys)[streamKey]{
+	if (*listStreamKeys)[streamKey] {
 		return errors.New("this streamkey is streaming")
 	}
 

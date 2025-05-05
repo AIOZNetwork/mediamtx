@@ -26,6 +26,8 @@ import (
 // ErrPathNotFound is returned when a path is not found.
 var ErrPathNotFound = errors.New("path not found")
 var SecondCalculate = 5
+var IdentityServer string
+var RedisTTLHours = 24
 
 func sortedKeys(paths map[string]*OptionalPath) []string {
 	ret := make([]string, len(paths))
@@ -158,12 +160,18 @@ var defaultAuthInternalUsers = AuthInternalUsers{
 // Conf is a configuration.
 // WARNING: Avoid using slices directly due to https://github.com/golang/go/issues/21092
 type Conf struct {
-	PostgresHost		   string          `json:"postgresHost"`
-	PostgresPort		   string          `json:"postgresPort"`
-	PostgresUser		   string          `json:"postgresUser"`
-	PostgresPassword	 string          `json:"postgresPassword"`
-	PostgresDBName		 string          `json:"postgresDbName"`
-	SecondCalculate    int             `json:"secondCalculate"`
+	IdentityServer string `json:"identityServer"`
+	RedisHost      string `json:"redisHost"`
+	RedisPort      string `json:"redisPort"`
+	RedisPassword  string `json:"redisPassword"`
+	RedisTTLHours  int    `json:"redisTTLHours"`
+
+	PostgresHost     string `json:"postgresHost"`
+	PostgresPort     string `json:"postgresPort"`
+	PostgresUser     string `json:"postgresUser"`
+	PostgresPassword string `json:"postgresPassword"`
+	PostgresDBName   string `json:"postgresDbName"`
+	SecondCalculate  int    `json:"secondCalculate"`
 	// General
 	LogLevel            LogLevel        `json:"logLevel"`
 	LogDestinations     LogDestinations `json:"logDestinations"`
@@ -486,6 +494,8 @@ func (conf *Conf) loadFromFile(fpath string, defaultConfPaths []string) (string,
 	}
 
 	SecondCalculate = conf.SecondCalculate
+	IdentityServer = conf.IdentityServer
+	RedisTTLHours = conf.RedisTTLHours
 
 	return fpath, nil
 }

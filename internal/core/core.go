@@ -137,6 +137,7 @@ func New(args []string) (*Core, bool) {
 	}
 
 	database.MustConnectToDatabase(p.conf)
+	database.MustConnectToRedis(p.conf)
 	database.MustInitLiveStreamMulticastDatabase()
 	database.MustInitLiveStreamStatisticsDatabase()
 
