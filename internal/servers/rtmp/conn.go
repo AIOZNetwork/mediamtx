@@ -58,7 +58,7 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Val
 		newStreamID := uuid.New()
 		c.livestreamVideoRepo.UpsertStreamVideo(streamKey, newStreamID)
 
-		_, err := database.RedisDb.Set(c.ctx, newStreamID.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
+		_, err := database.RedisIdDb.Set(c.ctx, newStreamID.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
 		if err != nil {
 			return "", nil, "", "", errors.New("cannot update redis")
 		}
@@ -69,7 +69,7 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Val
 		return "", nil, "", "", errors.New("this streamkey is streaming")
 	}
 
-	_, err = database.RedisDb.Set(c.ctx, videoStreaming.Id.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
+	_, err = database.RedisIdDb.Set(c.ctx, videoStreaming.Id.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
 	if err != nil {
 		return "", nil, "", "", errors.New("cannot update redis")
 	}

@@ -9,7 +9,7 @@ import (
 )
 
 var ctx = context.Background()
-var RedisDb *redis.Client
+var RedisIdDb *redis.Client
 
 func MustConnectToRedis(config *conf.Conf) {
 	if config == nil {
@@ -19,15 +19,14 @@ func MustConnectToRedis(config *conf.Conf) {
 		panic("Redis host is empty")
 	}
 
-	rdb := redis.NewClient(&redis.Options{
+	rdStreamIdDb := redis.NewClient(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%s", config.RedisHost, config.RedisPort),
 		Password: config.RedisPassword,
 		DB:       0,
 	})
-	_, err := rdb.Ping(ctx).Result()
+	_, err := rdStreamIdDb.Ping(ctx).Result()
 	if err != nil {
 		panic(err)
 	}
-
-	RedisDb = rdb
+	RedisIdDb = rdStreamIdDb
 }

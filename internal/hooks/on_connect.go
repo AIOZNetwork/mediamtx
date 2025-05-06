@@ -1,8 +1,12 @@
 package hooks
 
 import (
+	"context"
 	"net"
+	"time"
 
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -35,6 +39,11 @@ func OnConnect(params OnConnectParams) func() {
 
 	if params.RunOnConnect != "" {
 		params.Logger.Log(logger.Info, "runOnConnect command started")
+		
+		_, err := database.RedisIdDb.Set(context.Background(), params.Desc.ID, conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
+		if err != nil {
+			params.Logger.Log(logger.Error, "Failed to set connid in redis: %v", err)
+		}
 
 		onConnectCmd = externalcmd.NewCmd(
 			params.ExternalCmdPool,
