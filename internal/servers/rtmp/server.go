@@ -197,10 +197,10 @@ outer:
 
 		case c := <-s.chCloseConn:
 			// remove from redis connid database
-			_, err:= database.RedisIdDb.Del(context.Background(), c.pathName, c.uuid.String()).Result()
-			if err != nil {
-				c.Log(logger.Error, "Failed to delete connid in redis: %v", err)
-			}
+			// _, err:= database.RedisIdDb.Del(context.Background(), c.pathName, c.uuid.String()).Result()
+			// if err != nil {
+			// 	c.Log(logger.Error, "Failed to delete connid in redis: %v", err)
+			// }
 
 			delete(s.listStreamKeys, c.streamKey)
 			delete(s.conns, c)
@@ -260,10 +260,10 @@ outer:
 				continue
 			}
 			
-			_, err:= database.RedisIdDb.Del(context.Background(), c.pathName, c.uuid.String()).Result()
-			if err != nil {
-				c.Log(logger.Error, "Failed to delete connid in redis: %v", err)
-			}
+			// _, err:= database.RedisIdDb.Del(context.Background(), c.pathName, c.uuid.String()).Result()
+			// if err != nil {
+			// 	c.Log(logger.Error, "Failed to delete connid in redis: %v", err)
+			// }
 			
 			delete(s.listStreamKeys, c.streamKey)
 			delete(s.conns, c)
