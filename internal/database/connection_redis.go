@@ -10,6 +10,7 @@ import (
 
 var ctx = context.Background()
 var RedisIdDb *redis.Client
+var RedisStatsDb *redis.Client
 
 func MustConnectToRedis(config *conf.Conf) {
 	if config == nil {
@@ -29,4 +30,16 @@ func MustConnectToRedis(config *conf.Conf) {
 		panic(err)
 	}
 	RedisIdDb = rdStreamIdDb
+
+
+	rdStreamStatsDb := redis.NewClient(&redis.Options{
+		Addr:     fmt.Sprintf("%s:%s", config.RedisHost, config.RedisPort),
+		Password: config.RedisPassword,
+		DB:       1,
+	})
+	_, err = rdStreamStatsDb.Ping(ctx).Result()
+	if err != nil {
+		panic(err)
+	}
+	RedisStatsDb = rdStreamStatsDb
 }

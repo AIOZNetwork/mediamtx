@@ -45,6 +45,11 @@ func OnConnect(params OnConnectParams) func() {
 			params.Logger.Log(logger.Error, "Failed to set connid in redis: %v", err)
 		}
 
+		_, err = database.RedisStatsDb.SAdd(context.Background(), conf.IdentityServer, params.Desc.ID ).Result()
+		if err != nil {
+			params.Logger.Log(logger.Error, "Failed to set connid in redis for stats: %v", err)
+		}
+
 		onConnectCmd = externalcmd.NewCmd(
 			params.ExternalCmdPool,
 			params.RunOnConnect,
@@ -62,6 +67,10 @@ func OnConnect(params OnConnectParams) func() {
 		}
 
 		if params.RunOnDisconnect != "" {
+			_, err := database.RedisStatsDb.SRem(context.Background(), conf.IdentityServer, params.Desc.ID ).Result()
+			if err != nil {
+				params.Logger.Log(logger.Error, "Failed to remove connid in redis for stats: %v", err)
+			}
 			params.Logger.Log(logger.Info, "runOnDisconnect command launched")
 			externalcmd.NewCmd(
 				params.ExternalCmdPool,
