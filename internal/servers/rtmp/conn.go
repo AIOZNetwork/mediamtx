@@ -26,13 +26,17 @@ import (
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
-func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool) (string, url.Values, string, string, error) {
+func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *map[string]bool) (string, url.Values, string, string, error) {
 	tmp := strings.TrimRight(inURL.String(), "/")
 	ur, _ := url.Parse(tmp)
 	pathName := strings.TrimLeft(ur.Path, "/")
 
 	if !isPublish {
 		return pathName, ur.Query(), ur.RawQuery, "", nil
+	}
+
+	if listStreamKey != nil && (*listStreamKey)[pathName] {
+		return "", nil, "", "", errors.New("this streamkey is streaming")
 	}
 
 	if pathName == "" {
@@ -199,7 +203,7 @@ func (c *conn) runReader(listStreamKeys *map[string]bool) error {
 }
 
 func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
-	pathName, query, rawQuery, _, err := c.pathNameAndQuery(u, false)
+	pathName, query, rawQuery, _, err := c.pathNameAndQuery(u, false, nil)
 
 	if err != nil {
 		return err
@@ -269,7 +273,7 @@ func (c *conn) runRead(conn *rtmp.Conn, u *url.URL) error {
 }
 
 func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL, listStreamKeys *map[string]bool) error {
-	pathName, query, rawQuery, streamKey, err := c.pathNameAndQuery(u, true)
+	pathName, query, rawQuery, streamKey, err := c.pathNameAndQuery(u, true, listStreamKeys)
 	if err != nil {
 		return err
 	}

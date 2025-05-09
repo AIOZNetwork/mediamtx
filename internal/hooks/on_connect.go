@@ -39,13 +39,13 @@ func OnConnect(params OnConnectParams) func() {
 
 	if params.RunOnConnect != "" {
 		params.Logger.Log(logger.Info, "runOnConnect command started")
-		
+
 		_, err := database.RedisIdDb.Set(context.Background(), params.Desc.ID, conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
 		if err != nil {
 			params.Logger.Log(logger.Error, "Failed to set connid in redis: %v", err)
 		}
 
-		_, err = database.RedisStatsDb.SAdd(context.Background(), conf.IdentityServer, params.Desc.ID ).Result()
+		_, err = database.RedisStatsDb.SAdd(context.Background(), conf.IdentityServer, params.Desc.ID).Result()
 		if err != nil {
 			params.Logger.Log(logger.Error, "Failed to set connid in redis for stats: %v", err)
 		}
@@ -56,6 +56,11 @@ func OnConnect(params OnConnectParams) func() {
 			params.RunOnConnectRestart,
 			env,
 			func(err error) {
+				_, e := database.RedisIdDb.Del(context.Background(), params.Desc.ID).Result()
+				if e != nil {
+					params.Logger.Log(logger.Error, "Failed to remove connid in redis: %v", e)
+				}
+
 				params.Logger.Log(logger.Info, "runOnConnect command exited: %v", err)
 			})
 	}
@@ -63,11 +68,15 @@ func OnConnect(params OnConnectParams) func() {
 	return func() {
 		if onConnectCmd != nil {
 			onConnectCmd.Close()
+			_, err := database.RedisStatsDb.SRem(context.Background(), conf.IdentityServer, params.Desc.ID).Result()
+			if err != nil {
+				params.Logger.Log(logger.Error, "Failed to remove connid in redis for stats: %v", err)
+			}
 			params.Logger.Log(logger.Info, "runOnConnect command stopped")
 		}
 
 		if params.RunOnDisconnect != "" {
-			_, err := database.RedisStatsDb.SRem(context.Background(), conf.IdentityServer, params.Desc.ID ).Result()
+			_, err := database.RedisStatsDb.SRem(context.Background(), conf.IdentityServer, params.Desc.ID).Result()
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to remove connid in redis for stats: %v", err)
 			}
