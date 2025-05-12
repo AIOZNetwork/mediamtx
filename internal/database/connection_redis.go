@@ -20,22 +20,21 @@ func MustConnectToRedis(config *conf.Conf) {
 		panic("Redis host is empty")
 	}
 
-	rdStreamIdDb := redis.NewClient(&redis.Options{
+	rdUuidDb := redis.NewClient(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%s", config.RedisHost, config.RedisPort),
 		Password: config.RedisPassword,
-		DB:       0,
+		DB:       config.RedisUuidDB,
 	})
-	_, err := rdStreamIdDb.Ping(ctx).Result()
+	_, err := rdUuidDb.Ping(ctx).Result()
 	if err != nil {
 		panic(err)
 	}
-	RedisIdDb = rdStreamIdDb
-
+	RedisIdDb = rdUuidDb
 
 	rdStreamStatsDb := redis.NewClient(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%s", config.RedisHost, config.RedisPort),
 		Password: config.RedisPassword,
-		DB:       1,
+		DB:       config.RedisConnidsDB,
 	})
 	_, err = rdStreamStatsDb.Ping(ctx).Result()
 	if err != nil {

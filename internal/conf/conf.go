@@ -165,6 +165,8 @@ type Conf struct {
 	RedisPort      string `json:"redisPort"`
 	RedisPassword  string `json:"redisPassword"`
 	RedisTTLHours  int    `json:"redisTTLHours"`
+	RedisUuidDB    int    `json:"redisUuidDb"`
+	RedisConnidsDB int    `json:"redisConnidDb"`
 
 	PostgresHost     string `json:"postgresHost"`
 	PostgresPort     string `json:"postgresPort"`
