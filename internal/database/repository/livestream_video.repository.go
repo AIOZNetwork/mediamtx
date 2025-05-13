@@ -14,6 +14,15 @@ func NewLiveStreamVideoRepository(db *gorm.DB) *LiveStreamVideoRepository {
 	return &LiveStreamVideoRepository{db: db}
 }
 
+func (l *LiveStreamVideoRepository) GetStreamVideoByConnId(connId uuid.UUID) (*models.LiveStreamVideo, error) {
+	var video models.LiveStreamVideo
+	err := l.db.Table("live_stream_videos").Where("live_stream_videos.connection_id = ?", connId).First(&video).Error
+	if err != nil {
+		return nil, err
+	}
+	return &video, nil
+}
+
 func (l *LiveStreamVideoRepository) GetStreamVideoAvaialbleByStreamKey(streamKey uuid.UUID) (*models.LiveStreamVideo, error) {
 	var video models.LiveStreamVideo
 	err := l.db.Table("live_stream_videos").

@@ -28,6 +28,8 @@ var ErrPathNotFound = errors.New("path not found")
 var SecondCalculate = 5
 var IdentityServer string
 var RedisTTLHours = 24
+var WebhookAddress string
+var GrpcAddress string
 
 func sortedKeys(paths map[string]*OptionalPath) []string {
 	ret := make([]string, len(paths))
@@ -167,6 +169,12 @@ type Conf struct {
 	RedisTTLHours  int    `json:"redisTTLHours"`
 	RedisUuidDB    int    `json:"redisUuidDb"`
 	RedisConnidsDB int    `json:"redisConnidDb"`
+
+	// Webhooks
+	WebhookAddress string `json:"webhookAddress"`
+
+	// GRPC
+	GrpcAddress string `json:"grpcAddress"`
 
 	PostgresHost     string `json:"postgresHost"`
 	PostgresPort     string `json:"postgresPort"`
@@ -498,6 +506,8 @@ func (conf *Conf) loadFromFile(fpath string, defaultConfPaths []string) (string,
 	SecondCalculate = conf.SecondCalculate
 	IdentityServer = conf.IdentityServer
 	RedisTTLHours = conf.RedisTTLHours
+	WebhookAddress = conf.WebhookAddress
+	GrpcAddress = conf.GrpcAddress
 
 	return fpath, nil
 }
