@@ -54,14 +54,21 @@ func NewW3streamClient(addr string) (*W3StreamClient, error) {
 	}, nil
 }
 
-func (c *W3StreamClient) UploadVideo(
+func (c *W3StreamClient) Close() error {
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
+}
+
+func (c *W3StreamClient) UploadMedia(
 	ctx context.Context,
-	videoId string,
+	mediaId string,
 	fileName string,
 	size int64,
 	reader io.Reader,
 ) error {
-	stream, err := c.client.UploadVideo(ctx)
+	stream, err := c.client.UploadMedia(ctx)
 	if err != nil {
 		return err
 	}
@@ -77,9 +84,9 @@ func (c *W3StreamClient) UploadVideo(
 		}
 
 		md5Hash := md5.Sum(buf[:n])
-		if err := stream.Send(&UploadVideoRequest{
-			VideoId: videoId,
-			Data:  buf[:n],
+		if err := stream.Send(&UploadMediaRequest{
+			MediaId: mediaId,
+			Data:    buf[:n],
 			BlockMetadata: &BlockMetadata{
 				Size:     int32(n),
 				Checksum: fmt.Sprintf("%x", md5Hash),
@@ -95,6 +102,16 @@ func (c *W3StreamClient) UploadVideo(
 	}
 
 	if _, err := stream.CloseAndRecv(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *W3StreamClient) Ping(
+	ctx context.Context,
+) error {
+	if _, err := c.client.Ping(ctx, &PingRequest{}); err != nil {
 		return err
 	}
 
