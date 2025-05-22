@@ -98,23 +98,27 @@ func OnConnect(params OnConnectParams) func() {
 			connUuid, err := uuid.Parse(params.Desc.ID)
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to parse connid: %v", err)
+				return
 			}
 
 			video, err := videoRepository.GetStreamMediaByConnId(connUuid)
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to get stream video by connid: %v", err)
+				return
 			}
 
 			videoId := video.Id.String()
 			videoData, err := os.Open("./input/" + videoId + "/video.mp4")
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to open video file: %v", err)
+				return
 			}
 			defer videoData.Close()
 
 			fi, err := videoData.Stat()
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to get file info: %v", err)
+				return
 			}
 			if fi.Size() < 1000000 { // Must more than 1MB
 				params.Logger.Log(logger.Error, "File is too small")
@@ -124,6 +128,7 @@ func OnConnect(params OnConnectParams) func() {
 			w3streamClient, err := grpc_service.NewW3streamClient(conf.GrpcAddress)
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to create W3stream client: %v", err)
+				return
 			}
 
 			err = w3streamClient.UploadMedia(
@@ -136,6 +141,7 @@ func OnConnect(params OnConnectParams) func() {
 
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to upload media resource: %v", err)
+				return
 			}
 		}
 	}

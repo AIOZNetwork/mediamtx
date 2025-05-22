@@ -278,13 +278,15 @@ func sortedKeys(m map[uint8]format.Format) []int {
 
 // Reader is a wrapper around Conn that provides utilities to demux incoming data.
 type Reader struct {
-	conn               *Conn
-	totalBytesReceived int64
-	startTime          time.Time
-	bitrate            float64
-	totalFrames        int64
-	frameRate          int16
-	repository         models.LiveStreamStatisticRepository
+	conn                    *Conn
+	totalBytesReceived      int64
+	startTime               time.Time
+	bitrate                 float64
+	totalFrames             int64
+	frameRate               int16
+	isAudioOnly             bool
+	repositoryStatistic     models.LiveStreamStatisticRepository
+	repositoryLiveStreamKey models.LiveStreamKeyRepository
 
 	videoTracks map[uint8]format.Format
 	audioTracks map[uint8]format.Format
@@ -293,13 +295,14 @@ type Reader struct {
 }
 
 // NewReader allocates a Reader.
-func NewReader(conn *Conn) (*Reader, error) {
+func NewReader(conn *Conn, streamKey uuid.UUID) (*Reader, error) {
 	r := &Reader{
-		conn:               conn,
-		totalBytesReceived: 0,
-		startTime:          time.Now(),
-		totalFrames:        0,
-		repository:         repository.NewLiveStreamStatisticsRepository(database.DB),
+		conn:                    conn,
+		totalBytesReceived:      0,
+		startTime:               time.Now(),
+		totalFrames:             0,
+		repositoryStatistic:     repository.NewLiveStreamStatisticsRepository(database.DB),
+		repositoryLiveStreamKey: repository.NewLiveStreamKeyRepository(database.DB),
 	}
 
 	var err error
@@ -308,6 +311,14 @@ func NewReader(conn *Conn) (*Reader, error) {
 		return nil, err
 	}
 
+	liveStreamKey, err := r.repositoryLiveStreamKey.GetLiveStreamKeyByStreamKey(streamKey)
+	if err != nil {
+		return nil, err
+	}
+	r.isAudioOnly = liveStreamKey.IsAudioOnly
+	if r.isAudioOnly {
+		r.videoTracks = make(map[uint8]format.Format)
+	}
 	r.onVideoData = make(map[uint8]func(message.Message) error)
 	r.onAudioData = make(map[uint8]func(message.Message) error)
 
@@ -636,7 +647,7 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, pathName st
 	if eclapsed >= float64(second) {
 		// bitrate
 		r.bitrate = float64(r.totalBytesReceived*8) / (eclapsed) / 1000
-		err := r.repository.UpsertBitrateIn(uuid, r.bitrate)
+		err := r.repositoryStatistic.UpsertBitrateIn(uuid, r.bitrate)
 		if err != nil {
 			fmt.Println("Error inserting bitrate:", err)
 			return err
@@ -644,7 +655,7 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, pathName st
 
 		//framerate
 		r.frameRate = int16(math.Round(float64(r.totalFrames) / eclapsed))
-		errFrameRate := r.repository.UpsertFPSIn(uuid, r.frameRate)
+		errFrameRate := r.repositoryStatistic.UpsertFPSIn(uuid, r.frameRate)
 		if errFrameRate != nil {
 			fmt.Println("Error inserting framerate:", errFrameRate)
 			return errFrameRate
@@ -823,6 +834,9 @@ func (r *Reader) Read() error {
 
 	switch msg := msg.(type) {
 	case *message.Video, *message.VideoExCodedFrames, *message.VideoExFramesX:
+		if r.isAudioOnly {
+			return nil
+		}
 		if r.videoTracks[0] == nil {
 			return fmt.Errorf("received a packet for video track 0, but track is not set up")
 		}
