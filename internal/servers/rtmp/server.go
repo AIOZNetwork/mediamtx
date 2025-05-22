@@ -79,12 +79,12 @@ type Server struct {
 	PathManager         serverPathManager
 	Parent              serverParent
 
-	ctx       context.Context
-	ctxCancel func()
-	wg        sync.WaitGroup
-	ln        net.Listener
-	conns     map[*conn]struct{}
-	loader    *certloader.CertLoader
+	ctx            context.Context
+	ctxCancel      func()
+	wg             sync.WaitGroup
+	ln             net.Listener
+	conns          map[*conn]struct{}
+	loader         *certloader.CertLoader
 	listStreamKeys map[string]bool
 
 	// in
@@ -196,6 +196,7 @@ outer:
 			s.conns[c] = struct{}{}
 
 		case c := <-s.chCloseConn:
+
 			delete(s.listStreamKeys, c.streamKey)
 			delete(s.conns, c)
 
@@ -253,7 +254,8 @@ outer:
 				req.res <- serverAPIConnsKickRes{err: ErrConnNotFound}
 				continue
 			}
-			s.listStreamKeys[c.streamKey] = false
+
+			delete(s.listStreamKeys, c.streamKey)
 			delete(s.conns, c)
 			c.Close()
 			req.res <- serverAPIConnsKickRes{}
