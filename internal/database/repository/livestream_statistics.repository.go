@@ -14,12 +14,12 @@ type LiveStreamStatisticRepository struct {
 func (l *LiveStreamStatisticRepository) UpsertBitrateIn(pathName uuid.UUID, bitrate float64) error {
 	record := models.LiveStreamStatistic{
 		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
+		LiveStreamMediaId: pathName,
 		BitrateIn:         bitrate,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_video_id"}},
+		Columns:   []clause.Column{{Name: "live_stream_media_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"bitrate_in"}),
 	}).Create(&record)
 
@@ -28,12 +28,12 @@ func (l *LiveStreamStatisticRepository) UpsertBitrateIn(pathName uuid.UUID, bitr
 func (l *LiveStreamStatisticRepository) UpsertBitrateOut(pathName uuid.UUID, bitrate float64) error {
 	record := models.LiveStreamStatistic{
 		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
+		LiveStreamMediaId: pathName,
 		BitrateOut:        bitrate,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_video_id"}},
+		Columns:   []clause.Column{{Name: "live_stream_media_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"bitrate_out"}),
 	}).Create(&record)
 
@@ -43,12 +43,12 @@ func (l *LiveStreamStatisticRepository) UpsertBitrateOut(pathName uuid.UUID, bit
 func (l *LiveStreamStatisticRepository) UpsertFPSIn(pathName uuid.UUID, fps int16) error {
 	record := models.LiveStreamStatistic{
 		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
+		LiveStreamMediaId: pathName,
 		FpsIn:             fps,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_video_id"}},
+		Columns:   []clause.Column{{Name: "live_stream_media_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"fps_in"}),
 	}).Create(&record)
 
@@ -58,12 +58,12 @@ func (l *LiveStreamStatisticRepository) UpsertFPSIn(pathName uuid.UUID, fps int1
 func (l *LiveStreamStatisticRepository) UpsertFPSOut(pathName uuid.UUID, fps int16) error {
 	record := models.LiveStreamStatistic{
 		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
+		LiveStreamMediaId: pathName,
 		FpsOut:            fps,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_video_id"}},
+		Columns:   []clause.Column{{Name: "live_stream_media_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"fps_out"}),
 	}).Create(&record)
 
@@ -73,12 +73,12 @@ func (l *LiveStreamStatisticRepository) UpsertFPSOut(pathName uuid.UUID, fps int
 func (l *LiveStreamStatisticRepository) UpsertNumberOfRequests(pathName uuid.UUID, numberOfRequests int) error {
 	record := models.LiveStreamStatistic{
 		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
+		LiveStreamMediaId: pathName,
 		NumberOfRequests:  numberOfRequests,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_video_id"}},
+		Columns:   []clause.Column{{Name: "live_stream_media_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"number_of_requests"}),
 	}).Create(&record)
 
@@ -88,60 +88,15 @@ func (l *LiveStreamStatisticRepository) UpsertNumberOfRequests(pathName uuid.UUI
 func (l *LiveStreamStatisticRepository) UpsertDataTransferred(pathName uuid.UUID, dataTransferred float64) error {
 	record := models.LiveStreamStatistic{
 		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
+		LiveStreamMediaId: pathName,
 		DataTransferred:   dataTransferred,
 	}
 
 	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "live_stream_video_id"}},
+		Columns: []clause.Column{{Name: "live_stream_media_id"}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
 			"data_transferred": gorm.Expr("live_stream_statistics.data_transferred + ?", dataTransferred),
 		}),
-	}).Create(&record)
-
-	return result.Error
-}
-
-func (l *LiveStreamStatisticRepository) UpsertDevice(pathName uuid.UUID, device string) error {
-	record := models.LiveStreamStatistic{
-		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
-		Device:            device,
-	}
-
-	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_video_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"device"}),
-	}).Create(&record)
-
-	return result.Error
-}
-
-func (l *LiveStreamStatisticRepository) UpsertOS(pathName uuid.UUID, os string) error {
-	record := models.LiveStreamStatistic{
-		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
-		OS:                os,
-	}
-
-	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_video_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"os"}),
-	}).Create(&record)
-
-	return result.Error
-}
-
-func (l *LiveStreamStatisticRepository) UpsertLocation(pathName uuid.UUID, location string) error {
-	record := models.LiveStreamStatistic{
-		ID:                uuid.New(),
-		LiveStreamVideoId: pathName,
-		Location:          location,
-	}
-
-	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_video_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"location"}),
 	}).Create(&record)
 
 	return result.Error

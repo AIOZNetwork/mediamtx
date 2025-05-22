@@ -102,7 +102,7 @@ func OnConnect(params OnConnectParams) func() {
 			}
 
 			video, err := videoRepository.GetStreamMediaByConnId(connUuid)
-			if err != nil {
+			if err != nil || video == nil {
 				params.Logger.Log(logger.Error, "Failed to get stream video by connid: %v", err)
 				return
 			}
@@ -143,6 +143,7 @@ func OnConnect(params OnConnectParams) func() {
 				params.Logger.Log(logger.Error, "Failed to upload media resource: %v", err)
 				return
 			}
+			params.Logger.Log(logger.Info, "Media resource uploaded successfully: %s", videoId)
 		}
 	}
 }
