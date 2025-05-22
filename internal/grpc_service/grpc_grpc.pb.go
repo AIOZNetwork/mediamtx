@@ -21,7 +21,8 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	GRPCService_UploadVTTFiles_FullMethodName    = "/GRPCService/UploadVTTFiles"
 	GRPCService_DownloadAudioFile_FullMethodName = "/GRPCService/DownloadAudioFile"
-	GRPCService_UploadVideo_FullMethodName       = "/GRPCService/UploadVideo"
+	GRPCService_UploadMedia_FullMethodName       = "/GRPCService/UploadMedia"
+	GRPCService_Ping_FullMethodName              = "/GRPCService/Ping"
 )
 
 // GRPCServiceClient is the client API for GRPCService service.
@@ -29,8 +30,9 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type GRPCServiceClient interface {
 	UploadVTTFiles(ctx context.Context, in *UploadVTTFilesRequest, opts ...grpc.CallOption) (*UploadVTTFilesResponse, error)
-	DownloadAudioFile(ctx context.Context, in *VideoInfoRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AudioFileChunk], error)
-	UploadVideo(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadVideoRequest, UploadVideoResponse], error)
+	DownloadAudioFile(ctx context.Context, in *MediaInfoRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AudioFileChunk], error)
+	UploadMedia(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadMediaRequest, UploadMediaResponse], error)
+	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
 }
 
 type gRPCServiceClient struct {
@@ -51,13 +53,13 @@ func (c *gRPCServiceClient) UploadVTTFiles(ctx context.Context, in *UploadVTTFil
 	return out, nil
 }
 
-func (c *gRPCServiceClient) DownloadAudioFile(ctx context.Context, in *VideoInfoRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AudioFileChunk], error) {
+func (c *gRPCServiceClient) DownloadAudioFile(ctx context.Context, in *MediaInfoRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AudioFileChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &GRPCService_ServiceDesc.Streams[0], GRPCService_DownloadAudioFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[VideoInfoRequest, AudioFileChunk]{ClientStream: stream}
+	x := &grpc.GenericClientStream[MediaInfoRequest, AudioFileChunk]{ClientStream: stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -70,26 +72,37 @@ func (c *gRPCServiceClient) DownloadAudioFile(ctx context.Context, in *VideoInfo
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type GRPCService_DownloadAudioFileClient = grpc.ServerStreamingClient[AudioFileChunk]
 
-func (c *gRPCServiceClient) UploadVideo(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadVideoRequest, UploadVideoResponse], error) {
+func (c *gRPCServiceClient) UploadMedia(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadMediaRequest, UploadMediaResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &GRPCService_ServiceDesc.Streams[1], GRPCService_UploadVideo_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &GRPCService_ServiceDesc.Streams[1], GRPCService_UploadMedia_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[UploadVideoRequest, UploadVideoResponse]{ClientStream: stream}
+	x := &grpc.GenericClientStream[UploadMediaRequest, UploadMediaResponse]{ClientStream: stream}
 	return x, nil
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type GRPCService_UploadVideoClient = grpc.ClientStreamingClient[UploadVideoRequest, UploadVideoResponse]
+type GRPCService_UploadMediaClient = grpc.ClientStreamingClient[UploadMediaRequest, UploadMediaResponse]
+
+func (c *gRPCServiceClient) Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PingResponse)
+	err := c.cc.Invoke(ctx, GRPCService_Ping_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 // GRPCServiceServer is the server API for GRPCService service.
 // All implementations must embed UnimplementedGRPCServiceServer
 // for forward compatibility.
 type GRPCServiceServer interface {
 	UploadVTTFiles(context.Context, *UploadVTTFilesRequest) (*UploadVTTFilesResponse, error)
-	DownloadAudioFile(*VideoInfoRequest, grpc.ServerStreamingServer[AudioFileChunk]) error
-	UploadVideo(grpc.ClientStreamingServer[UploadVideoRequest, UploadVideoResponse]) error
+	DownloadAudioFile(*MediaInfoRequest, grpc.ServerStreamingServer[AudioFileChunk]) error
+	UploadMedia(grpc.ClientStreamingServer[UploadMediaRequest, UploadMediaResponse]) error
+	Ping(context.Context, *PingRequest) (*PingResponse, error)
 	mustEmbedUnimplementedGRPCServiceServer()
 }
 
@@ -103,11 +116,14 @@ type UnimplementedGRPCServiceServer struct{}
 func (UnimplementedGRPCServiceServer) UploadVTTFiles(context.Context, *UploadVTTFilesRequest) (*UploadVTTFilesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UploadVTTFiles not implemented")
 }
-func (UnimplementedGRPCServiceServer) DownloadAudioFile(*VideoInfoRequest, grpc.ServerStreamingServer[AudioFileChunk]) error {
+func (UnimplementedGRPCServiceServer) DownloadAudioFile(*MediaInfoRequest, grpc.ServerStreamingServer[AudioFileChunk]) error {
 	return status.Errorf(codes.Unimplemented, "method DownloadAudioFile not implemented")
 }
-func (UnimplementedGRPCServiceServer) UploadVideo(grpc.ClientStreamingServer[UploadVideoRequest, UploadVideoResponse]) error {
-	return status.Errorf(codes.Unimplemented, "method UploadVideo not implemented")
+func (UnimplementedGRPCServiceServer) UploadMedia(grpc.ClientStreamingServer[UploadMediaRequest, UploadMediaResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method UploadMedia not implemented")
+}
+func (UnimplementedGRPCServiceServer) Ping(context.Context, *PingRequest) (*PingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Ping not implemented")
 }
 func (UnimplementedGRPCServiceServer) mustEmbedUnimplementedGRPCServiceServer() {}
 func (UnimplementedGRPCServiceServer) testEmbeddedByValue()                     {}
@@ -149,22 +165,40 @@ func _GRPCService_UploadVTTFiles_Handler(srv interface{}, ctx context.Context, d
 }
 
 func _GRPCService_DownloadAudioFile_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(VideoInfoRequest)
+	m := new(MediaInfoRequest)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(GRPCServiceServer).DownloadAudioFile(m, &grpc.GenericServerStream[VideoInfoRequest, AudioFileChunk]{ServerStream: stream})
+	return srv.(GRPCServiceServer).DownloadAudioFile(m, &grpc.GenericServerStream[MediaInfoRequest, AudioFileChunk]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type GRPCService_DownloadAudioFileServer = grpc.ServerStreamingServer[AudioFileChunk]
 
-func _GRPCService_UploadVideo_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(GRPCServiceServer).UploadVideo(&grpc.GenericServerStream[UploadVideoRequest, UploadVideoResponse]{ServerStream: stream})
+func _GRPCService_UploadMedia_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(GRPCServiceServer).UploadMedia(&grpc.GenericServerStream[UploadMediaRequest, UploadMediaResponse]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type GRPCService_UploadVideoServer = grpc.ClientStreamingServer[UploadVideoRequest, UploadVideoResponse]
+type GRPCService_UploadMediaServer = grpc.ClientStreamingServer[UploadMediaRequest, UploadMediaResponse]
+
+func _GRPCService_Ping_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GRPCServiceServer).Ping(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GRPCService_Ping_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GRPCServiceServer).Ping(ctx, req.(*PingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
 
 // GRPCService_ServiceDesc is the grpc.ServiceDesc for GRPCService service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -177,6 +211,10 @@ var GRPCService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "UploadVTTFiles",
 			Handler:    _GRPCService_UploadVTTFiles_Handler,
 		},
+		{
+			MethodName: "Ping",
+			Handler:    _GRPCService_Ping_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -185,8 +223,8 @@ var GRPCService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 		{
-			StreamName:    "UploadVideo",
-			Handler:       _GRPCService_UploadVideo_Handler,
+			StreamName:    "UploadMedia",
+			Handler:       _GRPCService_UploadMedia_Handler,
 			ClientStreams: true,
 		},
 	},

@@ -101,7 +101,7 @@ func OnConnect(params OnConnectParams) func() {
 				return
 			}
 
-			video, err := videoRepository.GetStreamVideoByConnId(connUuid)
+			video, err := videoRepository.GetStreamMediaByConnId(connUuid)
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to get stream video by connid: %v", err)
 				return
@@ -131,7 +131,7 @@ func OnConnect(params OnConnectParams) func() {
 				return
 			}
 
-			err = w3streamClient.UploadVideo(
+			err = w3streamClient.UploadMedia(
 				context.Background(),
 				videoId,
 				"video.mp4",

@@ -14,21 +14,21 @@ func NewLiveStreamVideoRepository(db *gorm.DB) *LiveStreamVideoRepository {
 	return &LiveStreamVideoRepository{db: db}
 }
 
-func (l *LiveStreamVideoRepository) GetStreamVideoByConnId(connId uuid.UUID) (*models.LiveStreamVideo, error) {
-	var video models.LiveStreamVideo
-	err := l.db.Table("live_stream_videos").Where("live_stream_videos.connection_id = ?", connId).First(&video).Error
+func (l *LiveStreamVideoRepository) GetStreamMediaByConnId(connId uuid.UUID) (*models.LiveStreamMedia, error) {
+	var video models.LiveStreamMedia
+	err := l.db.Table("live_stream_media").Where("live_stream_media.connection_id = ?", connId).First(&video).Error
 	if err != nil {
 		return nil, err
 	}
 	return &video, nil
 }
 
-func (l *LiveStreamVideoRepository) GetStreamVideoAvaialbleByStreamKey(streamKey uuid.UUID) (*models.LiveStreamVideo, error) {
-	var video models.LiveStreamVideo
-	err := l.db.Table("live_stream_videos").
-		Select("live_stream_videos.id, live_stream_videos.live_stream_key_id, live_stream_videos.status").
-		Joins("JOIN live_stream_keys ON live_stream_keys.id = live_stream_videos.live_stream_key_id").
-		Where("live_stream_keys.stream_key = ? AND (live_stream_videos.status = ? OR live_stream_videos.status = ?)", streamKey, "streaming", "created").First(&video).Error
+func (l *LiveStreamVideoRepository) GetStreamMediaAvaialbleByStreamKey(streamKey uuid.UUID) (*models.LiveStreamMedia, error) {
+	var video models.LiveStreamMedia
+	err := l.db.Table("live_stream_media").
+		Select("live_stream_media.id, live_stream_media.live_stream_key_id, live_stream_media.status").
+		Joins("JOIN live_stream_keys ON live_stream_keys.id = live_stream_media.live_stream_key_id").
+		Where("live_stream_keys.stream_key = ? AND (live_stream_media.status = ? OR live_stream_media.status = ?)", streamKey, "streaming", "created").First(&video).Error
 	if err != nil {
 		return nil, err
 	}
@@ -50,10 +50,10 @@ func (l *LiveStreamVideoRepository) GetStreamKeyExist(streamKey uuid.UUID) uuid.
 
 func (l *LiveStreamVideoRepository) GetStreamKeyByStreamID(streamID uuid.UUID) (uuid.UUID, error) {
 	var streamKey string
-	err := l.db.Table("live_stream_videos").
+	err := l.db.Table("live_stream_media").
 		Select("live_stream_keys.stream_key").
-		Joins("JOIN live_stream_keys ON live_stream_keys.id = live_stream_videos.live_stream_key_id").
-		Where("live_stream_videos.id = ?", streamID).Scan(&streamKey).Error
+		Joins("JOIN live_stream_keys ON live_stream_keys.id = live_stream_media.live_stream_key_id").
+		Where("live_stream_media.id = ?", streamID).Scan(&streamKey).Error
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -65,7 +65,7 @@ func (l *LiveStreamVideoRepository) GetStreamKeyByStreamID(streamID uuid.UUID) (
 	return uuidStreamKey, nil
 }
 
-func (l *LiveStreamVideoRepository) UpsertStreamVideo(streamKey uuid.UUID, streamID uuid.UUID) error {
+func (l *LiveStreamVideoRepository) UpsertStreamMedia(streamKey uuid.UUID, streamID uuid.UUID) error {
 
 	var streamKeyId string
 	err := l.db.Table("live_stream_keys").
@@ -81,12 +81,12 @@ func (l *LiveStreamVideoRepository) UpsertStreamVideo(streamKey uuid.UUID, strea
 		return err
 	}
 
-	livestreamVideo := &models.LiveStreamVideo{
+	livestreamVideo := &models.LiveStreamMedia{
 		Id:              streamID,
 		LiveStreamKeyId: uuidStreamKeyId,
 	}
 
-	err = l.db.Table("live_stream_videos").Create(&livestreamVideo).Error
+	err = l.db.Table("live_stream_media").Create(&livestreamVideo).Error
 	if err != nil {
 		return err
 	}

@@ -47,7 +47,7 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *m
 		return "", nil, "", "", errors.New("invalid path name")
 	}
 
-	videoStreaming, err := c.livestreamVideoRepo.GetStreamVideoAvaialbleByStreamKey(uuidPathName)
+	videoStreaming, err := c.livestreamVideoRepo.GetStreamMediaAvaialbleByStreamKey(uuidPathName)
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return "", nil, "", "", errors.New("something went wrong")
 	}
@@ -60,7 +60,7 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *m
 		}
 
 		newStreamID := uuid.New()
-		c.livestreamVideoRepo.UpsertStreamVideo(streamKey, newStreamID)
+		c.livestreamVideoRepo.UpsertStreamMedia(streamKey, newStreamID)
 
 		_, err := database.RedisIdDb.Set(c.ctx, newStreamID.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
 		if err != nil {
