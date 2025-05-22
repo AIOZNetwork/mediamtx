@@ -303,7 +303,12 @@ func (c *conn) runPublish(conn *rtmp.Conn, u *url.URL, listStreamKeys *map[strin
 	c.query = rawQuery
 	c.mutex.Unlock()
 
-	r, err := rtmp.NewReader(conn)
+	streamKeyUUID, err := uuid.Parse(streamKey)
+	if err != nil {
+		return err
+	}
+
+	r, err := rtmp.NewReader(conn, streamKeyUUID)
 	if err != nil {
 		return err
 	}
@@ -386,9 +391,4 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		BytesReceived: bytesReceived,
 		BytesSent:     bytesSent,
 	}
-}
-
-func generateStreamID() string {
-	id := uuid.New()
-	return id.String()
 }
