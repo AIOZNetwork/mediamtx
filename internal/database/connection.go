@@ -78,6 +78,6 @@ func MustInitLiveStreamStatisticsDatabase() {
 func MustInitLiveStreamMulticastDatabase() {
 	err := DB.AutoMigrate(&models.LiveStreamMulticast{})
 	if err != nil {
-		panic(fmt.Sprintf("failed to migrate LiveStreamStatistic: %v", err))
+		panic(fmt.Sprintf("failed to migrate LiveStreamMulticast: %v", err))
 	}
 }
