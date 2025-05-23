@@ -69,7 +69,8 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *m
 		return newStreamID.String(), ur.Query(), ur.RawQuery, pathName, nil
 	}
 
-	if videoStreaming.Status == "streaming" {
+	if value, _ := database.RedisIdDb.Get(c.ctx, videoStreaming.Id.String()).Result();
+	 value != "" && videoStreaming.Status == "streaming" {
 		return "", nil, "", "", errors.New("this streamkey is streaming")
 	}
 
