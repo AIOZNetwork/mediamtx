@@ -14,9 +14,9 @@ import (
 	"github.com/google/uuid"
 )
 
-func ffmpegGenerator(sourceUrl string, forwardURIs []string) string {
+func ffmpegGenerator(sourceUrl string, forwardURIs []string) (string, error) {
 	if len(forwardURIs) == 0 {
-		return ""
+		return "", nil
 	}
 
 	input := fmt.Sprintf("ffmpeg -i %s", sourceUrl)
@@ -27,18 +27,17 @@ func ffmpegGenerator(sourceUrl string, forwardURIs []string) string {
 		parsedURL, err := url.Parse(uri)
 
 		if err != nil || parsedURL.Scheme != "rtmp" {
-        fmt.Println("Invalid URL")
-        return ""
-    }
+			return "", err
+		}
 		switch {
 		case strings.HasPrefix(parsedURL.String(), "rtmp://") && !strings.Contains(uri, " "):
 			outputs[i] = fmt.Sprintf("-c copy -f flv %s", parsedURL.String())
 		default:
-			return ""
+			return "", nil
 		}
 	}
 
-	return fmt.Sprintf("%s %s", input, strings.Join(outputs, " "))
+	return fmt.Sprintf("%s %s", input, strings.Join(outputs, " ")), nil
 }
 
 func getMultiStreams(key string) []string {
@@ -95,7 +94,11 @@ func OnReady(params OnReadyParams) func() {
 		params.Logger.Log(logger.Info, "Run multicast command started")
 		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["MTX_PATH"])
 		multiStreamsUrl := getMultiStreams(env["AIOZ_StreamKey"])
-		ffmpegQuery := ffmpegGenerator(sourceUrl, multiStreamsUrl)
+		ffmpegQuery, err := ffmpegGenerator(sourceUrl, multiStreamsUrl)
+
+		if err != nil {
+			params.Logger.Log(logger.Error, "Error generating ffmpeg command: %v", err)
+		}
 
 		if ffmpegQuery != "" {
 			onReadyCmd = externalcmd.NewCmd(

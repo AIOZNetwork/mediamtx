@@ -231,21 +231,6 @@ outer:
 				continue
 			}
 
-			uuidStreamId, err := uuid.Parse(streamID)
-			if err != nil {
-				c.Log(logger.Error, "Cannot find stream key: %s", err)
-				req.res <- serverAPIConnsGetRes{data: item}
-				continue
-			}
-
-			streamKey, err := s.livestreamVideoRepo.GetStreamKeyByStreamID(uuidStreamId)
-			if err != nil || streamID == uuid.Nil.String() {
-				c.Log(logger.Error, "Cannot find stream key: %s", err)
-				req.res <- serverAPIConnsGetRes{data: item}
-				continue
-			}
-
-			item.StreamKeyId = streamKey
 			req.res <- serverAPIConnsGetRes{data: item}
 
 		case req := <-s.chAPIConnsKick:
