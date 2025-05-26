@@ -1,9 +1,11 @@
 package hooks
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/database"
@@ -76,6 +78,11 @@ func OnReady(params OnReadyParams) func() {
 		env["MTX_QUERY"] = params.Query
 		env["MTX_SOURCE_TYPE"] = params.Desc.Type
 		env["MTX_SOURCE_ID"] = params.Desc.ID
+	}
+
+	_, err := database.RedisIdDb.Set(context.Background(), env["MTX_PATH"], conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
+	if err != nil {
+		params.Logger.Log(logger.Error, "Failed to set connid in redis: %v", err)
 	}
 
 	if params.Conf.RunOnReady != "" {
