@@ -1,12 +1,18 @@
 package models
 
-import "github.com/google/uuid"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 type LiveStreamMedia struct {
 	Id              uuid.UUID `json:"id"`
 	LiveStreamKeyId uuid.UUID `json:"live_stream_key_id"`
 	Status          string    `json:"status"`
 	ConnectionId    string    `json:"connection_id"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type LiveStreamMediaRepository interface {
