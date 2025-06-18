@@ -70,21 +70,6 @@ func (l *LiveStreamStatisticRepository) UpsertFPSOut(pathName uuid.UUID, fps int
 	return result.Error
 }
 
-func (l *LiveStreamStatisticRepository) UpsertNumberOfRequests(pathName uuid.UUID, numberOfRequests int) error {
-	record := models.LiveStreamStatistic{
-		ID:                uuid.New(),
-		LiveStreamMediaId: pathName,
-		NumberOfRequests:  numberOfRequests,
-	}
-
-	result := l.db.Table("live_stream_statistics").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "live_stream_media_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"number_of_requests"}),
-	}).Create(&record)
-
-	return result.Error
-}
-
 func (l *LiveStreamStatisticRepository) UpsertDataTransferred(pathName uuid.UUID, dataTransferred float64) error {
 	record := models.LiveStreamStatistic{
 		ID:                uuid.New(),

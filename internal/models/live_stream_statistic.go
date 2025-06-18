@@ -11,7 +11,6 @@ type LiveStreamStatistic struct {
 	FpsOut            int16     `json:"fps_out"`
 	BitrateIn         float64   `json:"bitrate_in"`
 	BitrateOut        float64   `json:"bitrate_out"`
-	NumberOfRequests  int       `json:"number_of_requests"`
 	DataTransferred   float64   `json:"data_transferred"`
 }
 type LiveStreamStatisticRepository interface {
@@ -19,6 +18,5 @@ type LiveStreamStatisticRepository interface {
 	UpsertBitrateOut(pathName uuid.UUID, bitrate float64) error
 	UpsertFPSIn(pathName uuid.UUID, fps int16) error
 	UpsertFPSOut(pathName uuid.UUID, fps int16) error
-	UpsertNumberOfRequests(pathName uuid.UUID, numberOfRequests int) error
 	UpsertDataTransferred(pathname uuid.UUID, dataTransferred float64) error
 }
