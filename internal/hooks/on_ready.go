@@ -1,9 +1,11 @@
 package hooks
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/database"
@@ -14,9 +16,9 @@ import (
 	"github.com/google/uuid"
 )
 
-func ffmpegGenerator(sourceUrl string, forwardURIs []string) string {
+func ffmpegGenerator(sourceUrl string, forwardURIs []string) (string, error) {
 	if len(forwardURIs) == 0 {
-		return ""
+		return "", nil
 	}
 
 	input := fmt.Sprintf("ffmpeg -i %s", sourceUrl)
@@ -27,18 +29,17 @@ func ffmpegGenerator(sourceUrl string, forwardURIs []string) string {
 		parsedURL, err := url.Parse(uri)
 
 		if err != nil || parsedURL.Scheme != "rtmp" {
-        fmt.Println("Invalid URL")
-        return ""
-    }
+			return "", err
+		}
 		switch {
 		case strings.HasPrefix(parsedURL.String(), "rtmp://") && !strings.Contains(uri, " "):
 			outputs[i] = fmt.Sprintf("-c copy -f flv %s", parsedURL.String())
 		default:
-			return ""
+			return "", nil
 		}
 	}
 
-	return fmt.Sprintf("%s %s", input, strings.Join(outputs, " "))
+	return fmt.Sprintf("%s %s", input, strings.Join(outputs, " ")), nil
 }
 
 func getMultiStreams(key string) []string {
@@ -79,6 +80,11 @@ func OnReady(params OnReadyParams) func() {
 		env["MTX_SOURCE_ID"] = params.Desc.ID
 	}
 
+	_, err := database.RedisIdDb.Set(context.Background(), env["MTX_PATH"], conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
+	if err != nil {
+		params.Logger.Log(logger.Error, "Failed to set connid in redis: %v", err)
+	}
+
 	if params.Conf.RunOnReady != "" {
 		params.Logger.Log(logger.Info, "runOnReady command started")
 		onReadyCmd = externalcmd.NewCmd(
@@ -95,7 +101,11 @@ func OnReady(params OnReadyParams) func() {
 		params.Logger.Log(logger.Info, "Run multicast command started")
 		sourceUrl := fmt.Sprintf("rtmp://%s/%s", params.Conf.Hostname, env["MTX_PATH"])
 		multiStreamsUrl := getMultiStreams(env["AIOZ_StreamKey"])
-		ffmpegQuery := ffmpegGenerator(sourceUrl, multiStreamsUrl)
+		ffmpegQuery, err := ffmpegGenerator(sourceUrl, multiStreamsUrl)
+
+		if err != nil {
+			params.Logger.Log(logger.Error, "Error generating ffmpeg command: %v", err)
+		}
 
 		if ffmpegQuery != "" {
 			onReadyCmd = externalcmd.NewCmd(

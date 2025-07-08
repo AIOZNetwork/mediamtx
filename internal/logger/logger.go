@@ -4,6 +4,7 @@ package logger
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -43,6 +44,12 @@ func New(level Level, destinations []Destination, filePath string) (*Logger, err
 				lh.Close()
 				return nil, err
 			}
+			lh.destinations = append(lh.destinations, dest)
+		case DestinationGraylog:
+			graylogFacility := os.Getenv("GRAYLOG_FACILITY")
+			graylogUrl:= os.Getenv("GRAYLOG_URL")
+			graylogServiceName := os.Getenv("GRAYLOG_LIVE_SERVICE_NAME")
+			dest := newDestinationGraylog(graylogFacility, graylogServiceName, graylogUrl)
 			lh.destinations = append(lh.destinations, dest)
 		}
 	}

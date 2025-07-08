@@ -68,6 +68,9 @@ func (d *LogDestinations) UnmarshalJSON(b []byte) error {
 		case "syslog":
 			v = logger.DestinationSyslog
 
+		case "graylog":
+			v = logger.DestinationGraylog
+
 		default:
 			return fmt.Errorf("invalid log destination: %s", dest)
 		}

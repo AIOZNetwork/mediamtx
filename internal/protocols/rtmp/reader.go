@@ -646,7 +646,7 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, pathName st
 	}
 	if eclapsed >= float64(second) {
 		// bitrate
-		r.bitrate = float64(r.totalBytesReceived*8) / (eclapsed) / 1000
+		r.bitrate = float64(r.totalBytesReceived*8) / (eclapsed)
 		err := r.repositoryStatistic.UpsertBitrateIn(uuid, r.bitrate)
 		if err != nil {
 			fmt.Println("Error inserting bitrate:", err)

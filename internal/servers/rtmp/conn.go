@@ -47,7 +47,7 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *m
 		return "", nil, "", "", errors.New("invalid path name")
 	}
 
-	videoStreaming, err := c.livestreamVideoRepo.GetStreamVideoAvaialbleByStreamKey(uuidPathName)
+	videoStreaming, err := c.livestreamVideoRepo.GetStreamMediaAvaialbleByStreamKey(uuidPathName)
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return "", nil, "", "", errors.New("something went wrong")
 	}
@@ -60,22 +60,12 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *m
 		}
 
 		newStreamID := uuid.New()
-		c.livestreamVideoRepo.UpsertStreamVideo(streamKey, newStreamID)
 
-		_, err := database.RedisIdDb.Set(c.ctx, newStreamID.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
-		if err != nil {
-			return "", nil, "", "", errors.New("cannot update redis")
-		}
 		return newStreamID.String(), ur.Query(), ur.RawQuery, pathName, nil
 	}
 
-	if videoStreaming.Status == "streaming" {
+	if value, _ := database.RedisIdDb.Get(c.ctx, videoStreaming.Id.String()).Result(); value != "" && videoStreaming.Status == "streaming" {
 		return "", nil, "", "", errors.New("this streamkey is streaming")
-	}
-
-	_, err = database.RedisIdDb.Set(c.ctx, videoStreaming.Id.String(), conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
-	if err != nil {
-		return "", nil, "", "", errors.New("cannot update redis")
 	}
 
 	return videoStreaming.Id.String(), ur.Query(), ur.RawQuery, pathName, nil
@@ -384,6 +374,8 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		bytesSent = c.rconn.BytesSent()
 	}
 
+	streamKey, _ := uuid.Parse(c.streamKey)
+
 	return &defs.APIRTMPConn{
 		ID:         c.uuid,
 		Created:    c.created,
@@ -404,5 +396,6 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		Query:         c.query,
 		BytesReceived: bytesReceived,
 		BytesSent:     bytesSent,
+		StreamKey:     streamKey,
 	}
 }
