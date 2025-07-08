@@ -16,6 +16,8 @@ const (
 
 	// DestinationSyslog writes logs to the system logger.
 	DestinationSyslog
+
+	DestinationGraylog
 )
 
 type destination interface {
