@@ -284,7 +284,7 @@ type Reader struct {
 	bitrate                 float64
 	totalFrames             int64
 	frameRate               int16
-	isAudioOnly             bool
+	typeStream              string
 	repositoryStatistic     models.LiveStreamStatisticRepository
 	repositoryLiveStreamKey models.LiveStreamKeyRepository
 
@@ -315,8 +315,8 @@ func NewReader(conn *Conn, streamKey uuid.UUID) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	r.isAudioOnly = liveStreamKey.IsAudioOnly
-	if r.isAudioOnly {
+	r.typeStream = liveStreamKey.Type
+	if r.typeStream == "audio" {
 		r.videoTracks = make(map[uint8]format.Format)
 	}
 	r.onVideoData = make(map[uint8]func(message.Message) error)
@@ -653,7 +653,7 @@ func (r *Reader) CalculateAndSaveBitrateFrameRate(msg message.Video, pathName st
 			return err
 		}
 
-		//framerate
+		// framerate
 		r.frameRate = int16(math.Round(float64(r.totalFrames) / eclapsed))
 		errFrameRate := r.repositoryStatistic.UpsertFPSIn(uuid, r.frameRate)
 		if errFrameRate != nil {
@@ -834,7 +834,7 @@ func (r *Reader) Read() error {
 
 	switch msg := msg.(type) {
 	case *message.Video, *message.VideoExCodedFrames, *message.VideoExFramesX:
-		if r.isAudioOnly {
+		if r.typeStream == "audio" {
 			return nil
 		}
 		if r.videoTracks[0] == nil {
