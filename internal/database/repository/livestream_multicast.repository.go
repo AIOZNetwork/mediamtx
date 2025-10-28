@@ -10,10 +10,12 @@ type liveStreamMulticastRepository struct {
 	db *gorm.DB
 }
 
-func (l *liveStreamMulticastRepository) GetLiveStreamMulticastByStreamKey( stream_key uuid.UUID) (*models.LiveStreamMulticast, error) {
+func (l *liveStreamMulticastRepository) GetLiveStreamMulticastByStreamKey(streamKey uuid.UUID) (*models.LiveStreamMulticast, error) {
 	var liveStreamMulticast models.LiveStreamMulticast
 
-	if err := l.db.Table("live_stream_multicasts").Joins("join live_stream_keys on live_stream_keys.id = live_stream_multicasts.live_stream_key_id").Where("live_stream_keys.stream_key = ?", stream_key).First(&liveStreamMulticast).Error; err != nil {
+	if err := l.db.Table("live_stream_multicasts").
+		Joins("join live_stream_keys on live_stream_keys.id = live_stream_multicasts.live_stream_key_id").
+		Where("live_stream_keys.stream_key = ?", streamKey).First(&liveStreamMulticast).Error; err != nil {
 		return nil, err
 	}
 	return &liveStreamMulticast, nil

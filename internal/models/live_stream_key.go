@@ -11,7 +11,7 @@ type LiveStreamKey struct {
 	UserId             uuid.UUID `json:"user_id"`
 	Name               string    `json:"name"`
 	Save               bool      `json:"save"`
-	IsAudioOnly        bool      `json:"is_audio_only"`
+	Type               string    `json:"type"`
 	StreamKey          uuid.UUID `json:"stream_key" gorm:"unique;type:uuid"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
@@ -20,5 +20,5 @@ type LiveStreamKey struct {
 }
 
 type LiveStreamKeyRepository interface {
-	GetLiveStreamKeyByStreamKey(stream_key uuid.UUID) (*LiveStreamKey, error)
+	GetLiveStreamKeyByStreamKey(streamKey uuid.UUID) (*LiveStreamKey, error)
 }
