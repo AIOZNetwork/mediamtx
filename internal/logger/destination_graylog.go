@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"time"
@@ -44,7 +43,9 @@ type LogMessage struct {
 	Extra        map[string]any `json:"-"`
 }
 
-func newDestinationGraylog(facilityName, serviceName, graylogURL string) destination {
+func newDestinationGraylog(
+	facilityName, serviceName, graylogURL string,
+) destination {
 	return &GraylogLogger{
 		FacilityName: facilityName,
 		ServiceName:  serviceName,
@@ -53,8 +54,12 @@ func newDestinationGraylog(facilityName, serviceName, graylogURL string) destina
 	}
 }
 
-func (gl *GraylogLogger) log(t time.Time, level Level, format string, args ...interface{}) {
-
+func (gl *GraylogLogger) log(
+	t time.Time,
+	level Level,
+	format string,
+	args ...interface{},
+) {
 	message := fmt.Sprintf(format, args...)
 	fullMessage := message
 	attrs := make(map[string]any)
@@ -69,7 +74,6 @@ func (gl *GraylogLogger) log(t time.Time, level Level, format string, args ...in
 	case Debug:
 		gl.Debug(message, attrs)
 	}
-
 }
 
 func removeAllANSICodes(str string) string {
@@ -109,13 +113,18 @@ func (gl *GraylogLogger) sendLog(
 		return fmt.Errorf("failed to marshal log message: %v", err)
 	}
 
-	resp, err := gl.HTTPClient.Post(gl.GraylogURL, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := gl.HTTPClient.Post(
+		gl.GraylogURL,
+		"application/json",
+		bytes.NewBuffer(jsonData),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to send log to Graylog: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+	if resp.StatusCode != http.StatusOK &&
+		resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("Graylog returned status: %d", resp.StatusCode)
 	}
 
@@ -129,9 +138,7 @@ func (gl *GraylogLogger) Debug(message string, extra ...map[string]any) {
 		extraFields = extra[0]
 	}
 
-	if err := gl.sendLog(DEBUG, message, "", extraFields); err != nil {
-		log.Printf("Failed to send debug log: %v", err)
-	}
+	gl.sendLog(DEBUG, message, "", extraFields)
 }
 
 // Info logs an info message
@@ -141,9 +148,7 @@ func (gl *GraylogLogger) Info(message string, extra ...map[string]any) {
 		extraFields = extra[0]
 	}
 
-	if err := gl.sendLog(INFO, message, "", extraFields); err != nil {
-		log.Printf("Failed to send info log: %v", err)
-	}
+	gl.sendLog(INFO, message, "", extraFields)
 }
 
 // Warn logs a warning message
@@ -153,9 +158,7 @@ func (gl *GraylogLogger) Warn(message string, extra ...map[string]any) {
 		extraFields = extra[0]
 	}
 
-	if err := gl.sendLog(WARN, message, "", extraFields); err != nil {
-		log.Printf("Failed to send warn log: %v", err)
-	}
+	gl.sendLog(WARN, message, "", extraFields)
 }
 
 // Error logs an error message
@@ -169,9 +172,7 @@ func (gl *GraylogLogger) Error(
 		extraFields = extra[0]
 	}
 
-	if err := gl.sendLog(ERROR, message, fullMessage, extraFields); err != nil {
-		log.Printf("Failed to send error log: %v", err)
-	}
+	gl.sendLog(ERROR, message, fullMessage, extraFields)
 }
 
 // Fatal logs a fatal message
@@ -185,7 +186,5 @@ func (gl *GraylogLogger) Fatal(
 		extraFields = extra[0]
 	}
 
-	if err := gl.sendLog(FATAL, message, fullMessage, extraFields); err != nil {
-		log.Printf("Failed to send fatal log: %v", err)
-	}
+	gl.sendLog(FATAL, message, fullMessage, extraFields)
 }
