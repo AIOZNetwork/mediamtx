@@ -9,9 +9,10 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
-
 	// video_pb "./grpc_service"
 )
+
+var W3GrpcClient *W3StreamClient
 
 var (
 	jobClientConfig = fmt.Sprintf(`
@@ -46,12 +47,14 @@ func NewW3streamClient(addr string) (*W3StreamClient, error) {
 		return nil, err
 	}
 
-	return &W3StreamClient{
+	W3GrpcClient = &W3StreamClient{
 		addr: addr,
 
 		client: NewGRPCServiceClient(conn),
 		conn:   conn,
-	}, nil
+	}
+
+	return W3GrpcClient, nil
 }
 
 func (c *W3StreamClient) Close() error {
