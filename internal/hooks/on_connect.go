@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"io"
 	"net"
 	"os"
 	"time"
@@ -108,7 +109,9 @@ func OnConnect(params OnConnectParams) func() {
 			}
 
 			videoId := video.Id.String()
-			videoData, err := os.Open("./input/" + videoId + "/video.mp4")
+			sourceDir := "./input/" + videoId + "/video.mp4"
+			destDir := "./retry/" + videoId + "/video.mp4"
+			videoData, err := os.Open(sourceDir)
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to open video file: %v", err)
 				return
@@ -125,13 +128,7 @@ func OnConnect(params OnConnectParams) func() {
 				return
 			}
 
-			w3streamClient, err := grpc_service.NewW3streamClient(conf.GrpcAddress)
-			if err != nil {
-				params.Logger.Log(logger.Error, "Failed to create W3stream client: %v", err)
-				return
-			}
-
-			err = w3streamClient.UploadMedia(
+			err = grpc_service.W3GrpcClient.UploadMedia(
 				context.Background(),
 				videoId,
 				"video.mp4",
@@ -141,6 +138,37 @@ func OnConnect(params OnConnectParams) func() {
 
 			if err != nil {
 				params.Logger.Log(logger.Error, "Failed to upload media resource: %v", err)
+
+				// Move file to retry folder to retry upload again
+				retryDir := "./retry/" + videoId
+				if err := os.MkdirAll(retryDir, 0755); err != nil {
+					params.Logger.Log(logger.Error, "Cannot create media retry directory; Media ID: %s | %v", videoId, err)
+					return
+				}
+
+				// Seek back to the beginning of the file before copying
+				if _, err := videoData.Seek(0, 0); err != nil {
+					params.Logger.Log(logger.Error, "Cannot seek video file; Media ID: %s | %v", videoId, err)
+					return
+				}
+
+				destFile, err := os.Create(destDir)
+				if err != nil {
+					params.Logger.Log(logger.Error, "Cannot create media retry file; Media ID: %s | %v", videoId, err)
+					return
+				}
+				defer destFile.Close()
+
+				_, err = io.Copy(destFile, videoData)
+				if err != nil {
+					params.Logger.Log(logger.Error, "Cannot copy error upload Media ID: %s | %v", videoId, err)
+					return
+				}
+
+				if err := destFile.Sync(); err != nil {
+					params.Logger.Log(logger.Error, "Cannot sync copy error upload Media ID: %s | %v", videoId, err)
+					return
+				}
 				return
 			}
 			params.Logger.Log(logger.Info, "Media resource uploaded successfully: %s", videoId)
