@@ -6,14 +6,14 @@ RPI32_IMAGE = balenalib/raspberry-pi:bullseye-run-20240508
 RPI64_IMAGE = balenalib/raspberrypi3-64:bullseye-run-20240429
 BIN_NAME=vms
 CORE_BIN_NAME=w3stream-core
-STREAM_BIN_NAME=aioz-live
-STG_REMOTE_PATH=/mnt/staging_data/w3stream/bin
+STREAM_BIN_NAME=livestream
+STG_REMOTE_PATH=/mnt/staging_data/aioz-stream/bin
 PROD_REMOTE_PATH=/mnt/w3stream/bin
 REMOTE_USER=root
 CONTAINER_NAME=w3stream
 CORE_CONTAINER_NAME=w3stream-core
 STREAM_CONTAINER_NAME=w3stream-live
-STREAM_STG_CONTAINER_NAME=aioz-live
+STREAM_STG_CONTAINER_NAME=aioz-stream-live
 GRPC_CONTAINER_NAME=w3stream-grpc
 GRPC_BIN_NAME=w3stream-grpc
 
