@@ -24,6 +24,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/database"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/grpc_service"
+	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/playback"
@@ -144,6 +145,7 @@ func New(args []string) (*Core, bool) {
 	database.MustConnectToRedis(p.conf)
 	database.MustInitLiveStreamMulticastDatabase()
 	database.MustInitLiveStreamStatisticsDatabase()
+	database.MustInitLiveHLSSegmentDatabase()
 
 	err = p.createResources(true)
 	if err != nil {
@@ -555,6 +557,19 @@ func (p *Core) createResources(initial bool) error {
 			PartDuration:    p.conf.HLSPartDuration,
 			SegmentMaxSize:  p.conf.HLSSegmentMaxSize,
 			Directory:       p.conf.HLSDirectory,
+			UploadConfig: &hls.MuxerUploadConfig{
+				Storage: hlss3uploader.StorageConfig{
+					Provider:               p.conf.StorageProvider,
+					Prefix:                 p.conf.S3Prefix,
+					Endpoint:               p.conf.S3Endpoint,
+					Bucket:                 p.conf.S3Bucket,
+					Region:                 p.conf.S3Region,
+					AccessKeyID:            p.conf.S3AccessKeyId,
+					SecretAccessKey:        p.conf.S3SecretAccessKey,
+					DeleteLocalAfterUpload: true,
+					Workers:                4,
+				},
+			},
 			ReadTimeout:     p.conf.ReadTimeout,
 			MuxerCloseAfter: p.conf.HLSMuxerCloseAfter,
 			PathManager:     p.pathManager,
@@ -841,6 +856,13 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.HLSPartDuration != p.conf.HLSPartDuration ||
 		newConf.HLSSegmentMaxSize != p.conf.HLSSegmentMaxSize ||
 		newConf.HLSDirectory != p.conf.HLSDirectory ||
+		newConf.StorageProvider != p.conf.StorageProvider ||
+		newConf.S3Endpoint != p.conf.S3Endpoint ||
+		newConf.S3Bucket != p.conf.S3Bucket ||
+		newConf.S3Region != p.conf.S3Region ||
+		newConf.S3AccessKeyId != p.conf.S3AccessKeyId ||
+		newConf.S3SecretAccessKey != p.conf.S3SecretAccessKey ||
+		newConf.S3Prefix != p.conf.S3Prefix ||
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.HLSMuxerCloseAfter != p.conf.HLSMuxerCloseAfter ||
 		closePathManager ||
@@ -1042,3 +1064,4 @@ func (p *Core) APIConfigSet(conf *conf.Conf) {
 	case <-p.ctx.Done():
 	}
 }
+

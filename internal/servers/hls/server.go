@@ -73,6 +73,7 @@ type Server struct {
 	PartDuration    conf.Duration
 	SegmentMaxSize  conf.StringSize
 	Directory       string
+	UploadConfig    *MuxerUploadConfig
 	ReadTimeout     conf.Duration
 	MuxerCloseAfter conf.Duration
 	PathManager     serverPathManager
@@ -226,6 +227,7 @@ func (s *Server) createMuxer(pathName string, remoteAddr string, query string) *
 		partDuration:    s.PartDuration,
 		segmentMaxSize:  s.SegmentMaxSize,
 		directory:       s.Directory,
+		uploadConfig:    s.UploadConfig,
 		wg:              &s.wg,
 		pathName:        pathName,
 		pathManager:     s.PathManager,

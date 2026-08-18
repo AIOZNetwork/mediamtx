@@ -288,6 +288,15 @@ type Conf struct {
 	HLSDirectory       string     `json:"hlsDirectory"`
 	HLSMuxerCloseAfter Duration   `json:"hlsMuxerCloseAfter"`
 
+	// Storage Provider
+	StorageProvider   string `json:"storageProvider"`
+	S3Endpoint        string `json:"s3Endpoint"`
+	S3Bucket          string `json:"s3Bucket"`
+	S3Region          string `json:"s3Region"`
+	S3AccessKeyId     string `json:"s3AccessKeyId"`
+	S3SecretAccessKey string `json:"s3SecretAccessKey"`
+	S3Prefix          string `json:"s3Prefix"`
+
 	// WebRTC server
 	WebRTC                      bool             `json:"webrtc"`
 	WebRTCDisable               *bool            `json:"webrtcDisable,omitempty"` // deprecated

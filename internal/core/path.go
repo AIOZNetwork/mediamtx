@@ -612,9 +612,9 @@ func (pa *path) SafeConf() *conf.Path {
 func (pa *path) ExternalCmdEnv() externalcmd.Environment {
 	_, port, _ := net.SplitHostPort(pa.rtspAddress)
 	env := externalcmd.Environment{
-		"MTX_PATH":  pa.name,
-		"RTSP_PATH": pa.name, // deprecated
-		"RTSP_PORT": port,
+		"MTX_PATH":       pa.name,
+		"RTSP_PATH":      pa.name, // deprecated
+		"RTSP_PORT":      port,
 		"AIOZ_StreamKey": pa.streamKey,
 	}
 

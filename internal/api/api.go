@@ -166,6 +166,9 @@ func (a *API) Initialize() error {
 	group.GET("/config/global/get", a.onConfigGlobalGet)
 	group.PATCH("/config/global/patch", a.onConfigGlobalPatch)
 
+	group.GET("/config/storage/get", a.onConfigStorageGet)
+	group.PATCH("/config/storage/patch", a.onConfigStoragePatch)
+
 	group.GET("/config/pathdefaults/get", a.onConfigPathDefaultsGet)
 	group.PATCH("/config/pathdefaults/patch", a.onConfigPathDefaultsPatch)
 
@@ -341,6 +344,78 @@ func (a *API) onConfigGlobalPatch(ctx *gin.Context) {
 
 	// since reloading the configuration can cause the shutdown of the API,
 	// call it in a goroutine
+	go a.Parent.APIConfigSet(newConf)
+
+	ctx.Status(http.StatusOK)
+}
+
+type APIStorageConfig struct {
+	StorageProvider   string `json:"storageProvider"`
+	S3Endpoint        string `json:"s3Endpoint"`
+	S3Bucket          string `json:"s3Bucket"`
+	S3Region          string `json:"s3Region"`
+	S3AccessKeyId     string `json:"s3AccessKeyId"`
+	S3SecretAccessKey string `json:"s3SecretAccessKey"`
+	S3Prefix          string `json:"s3Prefix"`
+}
+
+func (a *API) onConfigStorageGet(ctx *gin.Context) {
+	a.mutex.RLock()
+	c := a.Conf
+	a.mutex.RUnlock()
+
+	ctx.JSON(http.StatusOK, &APIStorageConfig{
+		StorageProvider:   c.StorageProvider,
+		S3Endpoint:        c.S3Endpoint,
+		S3Bucket:          c.S3Bucket,
+		S3Region:          c.S3Region,
+		S3AccessKeyId:     c.S3AccessKeyId,
+		S3SecretAccessKey: c.S3SecretAccessKey,
+		S3Prefix:          c.S3Prefix,
+	})
+}
+
+func (a *API) onConfigStoragePatch(ctx *gin.Context) {
+	var p APIStorageConfig
+	err := jsonwrapper.Decode(ctx.Request.Body, &p)
+	if err != nil {
+		a.writeError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	newConf := a.Conf.Clone()
+	if p.StorageProvider != "" {
+		newConf.StorageProvider = p.StorageProvider
+	}
+	if p.S3Endpoint != "" {
+		newConf.S3Endpoint = p.S3Endpoint
+	}
+	if p.S3Bucket != "" {
+		newConf.S3Bucket = p.S3Bucket
+	}
+	if p.S3Region != "" {
+		newConf.S3Region = p.S3Region
+	}
+	if p.S3AccessKeyId != "" {
+		newConf.S3AccessKeyId = p.S3AccessKeyId
+	}
+	if p.S3SecretAccessKey != "" {
+		newConf.S3SecretAccessKey = p.S3SecretAccessKey
+	}
+	if p.S3Prefix != "" {
+		newConf.S3Prefix = p.S3Prefix
+	}
+
+	err = newConf.Validate(nil)
+	if err != nil {
+		a.writeError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	a.Conf = newConf
 	go a.Parent.APIConfigSet(newConf)
 
 	ctx.Status(http.StatusOK)

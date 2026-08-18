@@ -54,6 +54,7 @@ type muxer struct {
 	partDuration    conf.Duration
 	segmentMaxSize  conf.StringSize
 	directory       string
+	uploadConfig    *MuxerUploadConfig
 	closeAfter      conf.Duration
 	wg              *sync.WaitGroup
 	pathName        string
@@ -146,11 +147,12 @@ func (m *muxer) runInner() error {
 		partDuration:    m.partDuration,
 		segmentMaxSize:  m.segmentMaxSize,
 		directory:       m.directory,
+		uploadConfig:    m.uploadConfig,
 		pathName:        m.pathName,
 		stream:          stream,
 		bytesSent:       m.bytesSent,
 		parent:          m,
-		streamKey: 		   m.path.GetStreamKey(),
+		streamKey:       m.path.GetStreamKey(),
 	}
 	err = mi.initialize()
 	if err != nil {
@@ -204,11 +206,12 @@ func (m *muxer) runInner() error {
 				partDuration:    m.partDuration,
 				segmentMaxSize:  m.segmentMaxSize,
 				directory:       m.directory,
+				uploadConfig:    m.uploadConfig,
 				pathName:        m.pathName,
 				stream:          stream,
 				bytesSent:       m.bytesSent,
 				parent:          m,
-				streamKey: 		   m.path.GetStreamKey(),
+				streamKey:       m.path.GetStreamKey(),
 			}
 			err := mi.initialize()
 			if err != nil {
