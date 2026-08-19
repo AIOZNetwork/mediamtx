@@ -196,6 +196,15 @@ type Path struct {
 	IsRunMulticast             bool     `json:"isRunMulticast"`
 	RunOnReadyRestart          bool     `json:"runOnReadyRestart"`
 	RunOnNotReady              string   `json:"runOnNotReady"`
+
+	// HLS Transcoding
+	HLSTranscoding           bool                      `json:"hlsTranscoding"`
+	HLSTranscodingInputProto string                    `json:"hlsTranscodingInputProtocol"`
+	HLSTranscodingRenditions []HLSTranscodingRendition `json:"hlsTranscodingRenditions"`
+	HLSTranscodingVideoCodec string                    `json:"hlsTranscodingVideoCodec"`
+	HLSTranscodingAudioCodec string                    `json:"hlsTranscodingAudioCodec"`
+	HLSTranscodingPreset     string                    `json:"hlsTranscodingPreset"`
+
 	RunOnRead                  string   `json:"runOnRead"`
 	RunOnReadRestart           bool     `json:"runOnReadRestart"`
 	RunOnUnread                string   `json:"runOnUnread"`

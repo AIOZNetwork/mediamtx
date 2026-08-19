@@ -9,7 +9,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // S3StorageProvider implements StorageProvider for S3 / S3-compatible storage.
@@ -107,34 +106,39 @@ func (p *S3StorageProvider) DeleteFolder(ctx context.Context, prefix string) err
 		prefix += "/"
 	}
 
-	paginator := s3.NewListObjectsV2Paginator(p.client, &s3.ListObjectsV2Input{
+	// List all objects under the prefix
+	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String(p.bucket),
 		Prefix: aws.String(prefix),
-	})
+	}
 
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
+	deleted := 0
+	for {
+		output, err := p.client.ListObjectsV2(ctx, input)
 		if err != nil {
-			return err
+			return fmt.Errorf("list objects under %s: %w", prefix, err)
 		}
 
-		var objects []types.ObjectIdentifier
-		for _, obj := range page.Contents {
-			objects = append(objects, types.ObjectIdentifier{Key: obj.Key})
-		}
-
-		if len(objects) > 0 {
-			_, err = p.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		// Delete each object individually (avoids Content-MD5 requirement of batch DeleteObjects)
+		for _, obj := range output.Contents {
+			_, err := p.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 				Bucket: aws.String(p.bucket),
-				Delete: &types.Delete{
-					Objects: objects,
-					Quiet:   aws.Bool(true),
-				},
+				Key:    obj.Key,
 			})
 			if err != nil {
-				return err
+				return fmt.Errorf("delete object %s: %w", *obj.Key, err)
 			}
+			deleted++
 		}
+
+		if !aws.ToBool(output.IsTruncated) {
+			break
+		}
+		input.ContinuationToken = output.NextContinuationToken
+	}
+
+	if deleted == 0 {
+		return fmt.Errorf("no objects found under prefix %s", prefix)
 	}
 	return nil
 }

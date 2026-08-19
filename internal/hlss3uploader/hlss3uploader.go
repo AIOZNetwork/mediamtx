@@ -106,16 +106,44 @@ func (u *HLSS3Uploader) Close() {
 		u.watcher.Close()
 	}
 	if u.done != nil {
-		<-u.done
+		// Wait for watchLoop to exit, with a timeout
+		select {
+		case <-u.done:
+		case <-time.After(5 * time.Second):
+			u.Parent.Log(logger.Warn, "[HLS Uploader Close] watchLoop did not exit in time")
+		}
 	}
-	u.wg.Wait()
+
+	// Wait for workers to finish, with a timeout
+	waitDone := make(chan struct{})
+	go func() {
+		u.wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		u.Parent.Log(logger.Warn, "[HLS Uploader Close] workers did not exit in time")
+	}
+
+	// Always attempt to delete S3 folder, regardless of worker status
+	u.Parent.Log(logger.Info, "[HLS Uploader Close] provider=%v, StreamName=%q", u.provider != nil, u.Config.StreamName)
 	if u.provider != nil {
 		remotePrefix := path.Join(
 			"live-hls",
 			u.Config.StreamName,
 		)
-		if remotePrefix != "" && remotePrefix != "live-hls/" {
-			u.provider.DeleteFolder(context.Background(), remotePrefix)
+		u.Parent.Log(logger.Info, "[HLS Uploader Close] remotePrefix=%q", remotePrefix)
+		if remotePrefix != "" && remotePrefix != "live-hls/" && remotePrefix != "live-hls" {
+			u.Parent.Log(logger.Info, "deleting S3 folder: %s", remotePrefix)
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := u.provider.DeleteFolder(deleteCtx, remotePrefix)
+			cancel()
+			if err != nil {
+				u.Parent.Log(logger.Error, "failed to delete S3 folder %s: %v", remotePrefix, err)
+			} else {
+				u.Parent.Log(logger.Info, "successfully deleted S3 folder: %s", remotePrefix)
+			}
 		}
 		u.provider.Close()
 	}
@@ -177,6 +205,10 @@ func (u *HLSS3Uploader) watchLoop() {
 			if (ext == ".m3u8" || isSegment) && event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
 				u.sendToTaskChan(event.Name)
 			}
+			
+			if isSegment && event.Op&fsnotify.Remove != 0 {
+				go u.handleLocalRemove(event.Name)
+			}
 
 		case err, ok := <-u.watcher.Errors:
 			if !ok {
@@ -205,8 +237,6 @@ func (u *HLSS3Uploader) scanDirectory(dir string) {
 	})
 }
 
-
-
 // sendToTaskChan sends filePath to the upload worker queue without blocking.
 func (u *HLSS3Uploader) sendToTaskChan(filePath string) {
 	select {
@@ -220,6 +250,26 @@ func (u *HLSS3Uploader) sendToTaskChan(filePath string) {
 			}
 		}(filePath)
 	}
+}
+
+func (u *HLSS3Uploader) handleLocalRemove(filePath string) {
+	if u.Repository == nil {
+		return
+	}
+	
+	relPath, err := filepath.Rel(u.Config.Directory, filePath)
+	if err != nil {
+		relPath = filepath.Base(filePath)
+	}
+	relPath = filepath.ToSlash(relPath)
+
+	streamName := strings.Trim(strings.TrimSpace(u.Config.StreamName), "/")
+	if streamName == "" {
+		streamName = filepath.Base(u.Config.Directory)
+	}
+
+	segmentName := filepath.Base(filePath)
+	_ = u.Repository.MarkLocalDeleted(streamName, segmentName, time.Now())
 }
 
 func (u *HLSS3Uploader) workerLoop() {
@@ -257,6 +307,10 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 
 	// Segments: deduplicate — never re-upload a successfully completed segment.
 	if isSegment {
+		if strings.Contains(filepath.Base(filePath), "_part") {
+			// Skip uploading LL-HLS parts. The full segment will be uploaded instead.
+			return
+		}
 		if _, exists := u.uploadedFiles.Load(remoteKey); exists {
 			return
 		}
@@ -316,28 +370,10 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 			_ = u.Repository.UpsertUploaded(segmentRecord)
 		}
 		u.uploadedFiles.Store(remoteKey, true)
-		if u.Config.DeleteLocalAfterUpload {
-			err := os.Remove(filePath)
-			if err == nil {
-				deletedAt := time.Now()
-				if u.Repository != nil {
-					_ = u.Repository.MarkLocalDeleted(segmentRecord.StreamID, segmentRecord.SegmentName, deletedAt)
-				}
-				u.Log(logger.Info, "uploaded segment %s via %s (key: %s, streamKey: %s) and deleted local file", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey)
-			} else if !os.IsNotExist(err) {
-				u.Log(logger.Warn, "uploaded segment %s via %s (streamKey: %s) but failed to delete local file: %v", relPath, u.provider.Name(), u.Config.StreamKey, err)
-			} else {
-				u.Log(logger.Info, "uploaded segment %s via %s (key: %s, streamKey: %s) (local file already deleted)", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey)
-			}
-		} else {
-			u.Log(logger.Info, "uploaded segment %s via %s (key: %s, streamKey: %s)", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey)
-		}
 	} else {
-		u.Log(logger.Info, "uploaded playlist %s via %s (key: %s, streamKey: %s)", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey)
+		// u.Log(logger.Info, "uploaded playlist %s via %s (key: %s, streamKey: %s)", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey)
 	}
 }
-
-
 
 func getContentType(ext string) string {
 	switch ext {
@@ -433,6 +469,9 @@ func (u *HLSS3Uploader) waitStable(filePath string) bool {
 }
 
 func (u *HLSS3Uploader) IsUploaded(remoteKey string) bool {
+	if _, ok := u.uploadedFiles.Load(remoteKey); ok {
+		return true
+	}
 	if u.Repository == nil {
 		return false
 	}

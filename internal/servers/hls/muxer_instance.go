@@ -99,13 +99,19 @@ func (mi *muxerInstance) Log(level logger.Level, format string, args ...interfac
 
 func (mi *muxerInstance) close() {
 	mi.stream.RemoveReader(mi)
-	if mi.hmuxer != nil {
-		mi.hmuxer.Close()
-	}
+
+	// 1. Stop the uploader FIRST — flush pending uploads while local files still exist
 	if mi.hlsUploader != nil {
 		mi.hlsUploader.Close()
 		mi.hlsUploader = nil
 	}
+
+	// 2. Close the HLS muxer (gohlslib) — stops writing new segments
+	if mi.hmuxer != nil {
+		mi.hmuxer.Close()
+	}
+
+	// 3. Delete local directory last
 	if mi.hmuxer != nil && mi.hmuxer.Directory != "" {
 		os.RemoveAll(mi.hmuxer.Directory)
 	}
@@ -115,35 +121,63 @@ func (mi *muxerInstance) errorChan() chan error {
 	return mi.stream.ReaderError(mi)
 }
 
+func (mi *muxerInstance) localSegmentAvailable(fileName string) bool {
+	if mi.directory == "" {
+		return true // Fallback to hmuxer if RAM-based
+	}
+	localPath := filepath.Join(mi.directory, mi.pathName, fileName)
+	_, err := os.Stat(localPath)
+	return !os.IsNotExist(err)
+}
+
+func isHLSSegment(fileName string) bool {
+	return strings.HasSuffix(fileName, ".mp4") ||
+		strings.HasSuffix(fileName, ".ts") ||
+		strings.HasSuffix(fileName, ".m4s") ||
+		strings.HasSuffix(fileName, ".mp")
+}
+
 func (mi *muxerInstance) handleRequest(ctx *gin.Context) {
-	fname := path.Base(ctx.Request.URL.Path)
+	fileName := path.Base(ctx.Request.URL.Path)
 
-	if isHLSMediaFile(fname) {
-		remoteKey := path.Join(
-			"live-hls",
-			mi.pathName,
-			fname,
-		)
-
-		if mi.hlsUploader != nil && mi.hlsUploader.IsUploaded(remoteKey) {
-			url, err := mi.hlsUploader.Presign(remoteKey)
-			if err == nil {
-				ctx.Redirect(http.StatusFound, url)
-				return
-			}
-		}
+	if strings.HasSuffix(fileName, ".m3u8") || strings.HasSuffix(fileName, "_init.mp4") {
+		mi.hmuxer.Handle(ctx.Writer, ctx.Request)
+		return
 	}
 
 	w := &responseWriterWithCounter{
 		ResponseWriter: ctx.Writer,
 		bytesSent:      mi.bytesSent,
+		statusCode:     200,
 	}
 
-	mi.hmuxer.Handle(w, ctx.Request)
-}
+	if !isHLSSegment(fileName) {
+		mi.hmuxer.Handle(w, ctx.Request)
+		return
+	}
 
-func isHLSMediaFile(name string) bool {
-	return strings.HasSuffix(name, ".mp4") ||
-		strings.HasSuffix(name, ".ts") ||
-		strings.HasSuffix(name, ".mp")
+	if mi.localSegmentAvailable(fileName) {
+		mi.hmuxer.Handle(w, ctx.Request)
+		return
+	}
+
+	if mi.hlsUploader == nil {
+		ctx.Status(http.StatusNotFound)
+		return
+	}
+
+	remoteKey := path.Join("live-hls", mi.pathName, fileName)
+	if !mi.hlsUploader.IsUploaded(remoteKey) {
+		ctx.Status(http.StatusNotFound)
+		return
+	}
+
+	url, err := mi.hlsUploader.Presign(remoteKey)
+	if err != nil {
+		ctx.Status(http.StatusBadGateway)
+		return
+	}
+
+	mi.Log(logger.Info, "[HLS Resolver] Local miss for %s. S3 fallback successful, redirecting to remote.", fileName)
+	ctx.Redirect(http.StatusFound, url)
 }

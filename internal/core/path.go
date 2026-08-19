@@ -16,7 +16,9 @@ import (
 	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recorder"
+	"github.com/bluenviron/mediamtx/internal/servers/hls/transcoder"
 	"github.com/bluenviron/mediamtx/internal/stream"
+	"strings"
 )
 
 func emptyTimer() *time.Timer {
@@ -84,6 +86,7 @@ type path struct {
 	publisherQuery                 string
 	stream                         *stream.Stream
 	recorder                       *recorder.Recorder
+	transcoder                     *transcoder.Transcoder
 	readyTime                      time.Time
 	onUnDemandHook                 func(string)
 	onNotReadyHook                 func()
@@ -713,6 +716,17 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 		pa.startRecording()
 	}
 
+	pa.Log(logger.Info, "setReady: HLSTranscoding=%v, pathName=%s, containsUnderscore=%v, renditions=%d",
+		pa.conf.HLSTranscoding, pa.name, strings.Contains(pa.name, "_"), len(pa.conf.HLSTranscodingRenditions))
+
+	if pa.conf.HLSTranscoding && !strings.Contains(pa.name, "_") {
+		pa.Log(logger.Info, "starting transcoder for path %s with rtspAddress=%s", pa.name, pa.rtspAddress)
+		pa.transcoder = transcoder.NewTranscoder(pa.conf, pa.name, pa, pa.rtspAddress)
+		if err := pa.transcoder.Start(); err != nil {
+			pa.Log(logger.Error, "failed to start transcoder: %v", err)
+		}
+	}
+
 	pa.readyTime = time.Now()
 
 	pa.onNotReadyHook = hooks.OnReady(hooks.OnReadyParams{
@@ -756,6 +770,11 @@ func (pa *path) setNotReady() {
 	if pa.recorder != nil {
 		pa.recorder.Close()
 		pa.recorder = nil
+	}
+
+	if pa.transcoder != nil {
+		pa.transcoder.Stop()
+		pa.transcoder = nil
 	}
 
 	if pa.stream != nil {

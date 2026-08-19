@@ -288,6 +288,7 @@ type Conf struct {
 	HLSDirectory       string     `json:"hlsDirectory"`
 	HLSMuxerCloseAfter Duration   `json:"hlsMuxerCloseAfter"`
 
+
 	// Storage Provider
 	StorageProvider   string `json:"storageProvider"`
 	S3Endpoint        string `json:"s3Endpoint"`

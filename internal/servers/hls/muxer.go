@@ -33,6 +33,12 @@ func emptyTimer() *time.Timer {
 type responseWriterWithCounter struct {
 	http.ResponseWriter
 	bytesSent *uint64
+	statusCode int
+}
+
+func (w *responseWriterWithCounter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (w *responseWriterWithCounter) Write(p []byte) (int, error) {
