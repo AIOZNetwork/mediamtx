@@ -166,7 +166,7 @@ func (mi *muxerInstance) handleRequest(ctx *gin.Context) {
 		return
 	}
 
-	remoteKey := path.Join("live-hls", mi.pathName, fileName)
+	remoteKey := mi.hlsUploader.BuildRemoteKey(mi.pathName, fileName)
 	if !mi.hlsUploader.IsUploaded(remoteKey) {
 		ctx.Status(http.StatusNotFound)
 		return

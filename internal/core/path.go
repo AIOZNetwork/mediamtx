@@ -12,6 +12,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/dvr"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -77,6 +78,7 @@ type path struct {
 	matches           []string
 	wg                *sync.WaitGroup
 	externalCmdPool   *externalcmd.Pool
+	dvrService        *dvr.Service
 	parent            pathParent
 
 	ctx                            context.Context
@@ -115,6 +117,14 @@ type path struct {
 
 	// out
 	done chan struct{}
+}
+
+func isHLSTranscodingOutputPath(pathName string) bool {
+	return strings.Contains(pathName, "/video/") || strings.Contains(pathName, "/audio/")
+}
+
+func shouldStartHLSTranscoder(pathName string, pathConf *conf.Path) bool {
+	return pathConf != nil && pathConf.HLSTranscoding && !isHLSTranscodingOutputPath(pathName)
 }
 
 func (pa *path) initialize() {
@@ -713,13 +723,16 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 	}
 
 	if pa.conf.Record {
+		if pa.dvrService != nil && pa.conf.RecordFormat == conf.RecordFormatMPEGTS {
+			pa.dvrService.StartSession(pa.name)
+		}
 		pa.startRecording()
 	}
 
-	pa.Log(logger.Info, "setReady: HLSTranscoding=%v, pathName=%s, containsUnderscore=%v, renditions=%d",
-		pa.conf.HLSTranscoding, pa.name, strings.Contains(pa.name, "_"), len(pa.conf.HLSTranscodingRenditions))
+	pa.Log(logger.Info, "setReady: HLSTranscoding=%v, pathName=%s, isABROutput=%v, renditions=%d",
+		pa.conf.HLSTranscoding, pa.name, isHLSTranscodingOutputPath(pa.name), len(pa.conf.HLSTranscodingRenditions))
 
-	if pa.conf.HLSTranscoding && !strings.Contains(pa.name, "_") {
+	if shouldStartHLSTranscoder(pa.name, pa.conf) {
 		pa.Log(logger.Info, "starting transcoder for path %s with rtspAddress=%s", pa.name, pa.rtspAddress)
 		pa.transcoder = transcoder.NewTranscoder(pa.conf, pa.name, pa, pa.rtspAddress)
 		if err := pa.transcoder.Start(); err != nil {
@@ -771,6 +784,9 @@ func (pa *path) setNotReady() {
 		pa.recorder.Close()
 		pa.recorder = nil
 	}
+	if pa.dvrService != nil {
+		pa.dvrService.EndSession(pa.name)
+	}
 
 	if pa.transcoder != nil {
 		pa.transcoder.Stop()
@@ -806,6 +822,9 @@ func (pa *path) startRecording() {
 			}
 		},
 		OnSegmentComplete: func(segmentPath string, segmentDuration time.Duration) {
+			if pa.dvrService != nil {
+				go pa.dvrService.RecordSegment(pa.name, segmentPath, segmentDuration)
+			}
 			if pa.conf.RunOnRecordSegmentComplete != "" {
 				env := pa.ExternalCmdEnv()
 				env["MTX_SEGMENT_PATH"] = segmentPath

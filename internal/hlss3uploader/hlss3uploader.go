@@ -126,25 +126,11 @@ func (u *HLSS3Uploader) Close() {
 		u.Parent.Log(logger.Warn, "[HLS Uploader Close] workers did not exit in time")
 	}
 
-	// Always attempt to delete S3 folder, regardless of worker status
-	u.Parent.Log(logger.Info, "[HLS Uploader Close] provider=%v, StreamName=%q", u.provider != nil, u.Config.StreamName)
+	// Note: We intentionally do NOT delete S3 segments on Close().
+	// Previous versions called provider.DeleteFolder() here, which destroyed
+	// DVR/playback history whenever a muxer restarted, hit idle timeout, or
+	// errored. S3 lifecycle policies should handle cleanup instead.
 	if u.provider != nil {
-		remotePrefix := path.Join(
-			"live-hls",
-			u.Config.StreamName,
-		)
-		u.Parent.Log(logger.Info, "[HLS Uploader Close] remotePrefix=%q", remotePrefix)
-		if remotePrefix != "" && remotePrefix != "live-hls/" && remotePrefix != "live-hls" {
-			u.Parent.Log(logger.Info, "deleting S3 folder: %s", remotePrefix)
-			deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			err := u.provider.DeleteFolder(deleteCtx, remotePrefix)
-			cancel()
-			if err != nil {
-				u.Parent.Log(logger.Error, "failed to delete S3 folder %s: %v", remotePrefix, err)
-			} else {
-				u.Parent.Log(logger.Info, "successfully deleted S3 folder: %s", remotePrefix)
-			}
-		}
 		u.provider.Close()
 	}
 }
@@ -205,7 +191,7 @@ func (u *HLSS3Uploader) watchLoop() {
 			if (ext == ".m3u8" || isSegment) && event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
 				u.sendToTaskChan(event.Name)
 			}
-			
+
 			if isSegment && event.Op&fsnotify.Remove != 0 {
 				go u.handleLocalRemove(event.Name)
 			}
@@ -256,7 +242,7 @@ func (u *HLSS3Uploader) handleLocalRemove(filePath string) {
 	if u.Repository == nil {
 		return
 	}
-	
+
 	relPath, err := filepath.Rel(u.Config.Directory, filePath)
 	if err != nil {
 		relPath = filepath.Base(filePath)
@@ -331,6 +317,18 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 		return
 	}
 
+	durationMS := u.inferDurationMS(filePath)
+	if isInitSegmentFile(filepath.Base(filePath)) {
+		durationMS = 0
+	} else if durationMS <= 0 {
+		durationMS = 2000 // default 2s segment duration per spec
+	}
+	duration := time.Duration(durationMS) * time.Millisecond
+	startedAt := info.ModTime().Add(-duration)
+	if duration <= 0 {
+		startedAt = info.ModTime()
+	}
+
 	contentType := getContentType(ext)
 	segmentRecord := models.LiveHLSSegment{
 		StreamID:       streamName,
@@ -338,12 +336,17 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 		LocalPath:      filePath,
 		StorageBackend: u.provider.Name(),
 		StorageKey:     remoteKey,
-		DurationMS:     u.inferDurationMS(filePath),
+		StartedAt:      startedAt,
+		DurationMS:     durationMS,
 		SizeBytes:      info.Size(),
 		ContentType:    contentType,
 	}
 	if segmentRecord.StreamID == "" {
 		segmentRecord.StreamID = filepath.Base(u.Config.Directory)
+	}
+	populateABRMetadata(&segmentRecord, filepath.Base(filePath))
+	if isSegment && u.Repository != nil {
+		mergeExistingDVRMetadata(u.Repository, &segmentRecord)
 	}
 	if isSegment && u.Repository != nil {
 		_ = u.Repository.UpsertLocal(segmentRecord)
@@ -371,6 +374,9 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 		}
 		u.uploadedFiles.Store(remoteKey, true)
 	} else {
+		if strings.HasSuffix(filepath.Base(filePath), "_stream.m3u8") && u.Repository != nil {
+			u.ingestFMP4Playlist(filePath, streamName)
+		}
 		// u.Log(logger.Info, "uploaded playlist %s via %s (key: %s, streamKey: %s)", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey)
 	}
 }
@@ -393,19 +399,237 @@ func getContentType(ext string) string {
 }
 
 var (
-	extinfRe = regexp.MustCompile(`^#EXTINF:([0-9.]+)`)                               // #EXTINF:1.000,
-	partRe   = regexp.MustCompile(`^#EXT-X-PART:.*DURATION=([0-9.]+).*URI="([^"]+)"`) // LL-HLS parts
-	mapURIRe = regexp.MustCompile(`^#EXT-X-MAP:.*URI="([^"]+)"`)                      // init segment
+	extinfRe        = regexp.MustCompile(`^#EXTINF:([0-9.]+)`)                               // #EXTINF:1.000,
+	partRe          = regexp.MustCompile(`^#EXT-X-PART:.*DURATION=([0-9.]+).*URI="([^"]+)"`) // LL-HLS parts
+	mapURIRe        = regexp.MustCompile(`^#EXT-X-MAP:.*URI="?([^",]+)"?`)                   // init segment
+	mediaSequenceRe = regexp.MustCompile(`^#EXT-X-MEDIA-SEQUENCE:([0-9]+)`)                  // media sequence
+	pdtRe           = regexp.MustCompile(`^#EXT-X-PROGRAM-DATE-TIME:(.+)$`)
+	fmp4SegmentRe   = regexp.MustCompile(`_seg[0-9]+\.mp4$`)
 )
+
+func isInitSegmentFile(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), "_init.mp4")
+}
+
+func (u *HLSS3Uploader) ingestFMP4Playlist(playlistPath string, streamName string) {
+	entries, initName := parseFMP4Playlist(playlistPath)
+	if len(entries) == 0 {
+		return
+	}
+	playlistName := filepath.Base(playlistPath)
+	childToken := strings.TrimSuffix(playlistName, "_stream.m3u8")
+	if streamName == "" {
+		streamName = filepath.Base(u.Config.Directory)
+	}
+	initStorageKey := ""
+	if initName != "" {
+		initStorageKey = u.remoteKeyForName(streamName, initName)
+	}
+	storageBackend := "local"
+	if u.provider != nil {
+		storageBackend = u.provider.Name()
+	}
+	for _, entry := range entries {
+		segName := filepath.Base(entry.URI)
+		localPath := filepath.Join(filepath.Dir(playlistPath), segName)
+		size := int64(0)
+		startedAt := entry.ProgramDateTime
+		if startedAt.IsZero() {
+			if existing, err := u.Repository.GetByStreamAndSegment(streamName, segName); err == nil && existing != nil {
+				startedAt = existing.StartedAt
+			}
+		}
+		if info, err := os.Stat(localPath); err == nil {
+			size = info.Size()
+			if startedAt.IsZero() && entry.DurationMS > 0 {
+				startedAt = info.ModTime().Add(-time.Duration(entry.DurationMS) * time.Millisecond)
+			}
+		}
+		sequence := entry.MediaSequence
+		segment := models.LiveHLSSegment{
+			StreamID:        streamName,
+			SegmentName:     segName,
+			LocalPath:       localPath,
+			StorageBackend:  storageBackend,
+			StorageKey:      u.remoteKeyForName(streamName, segName),
+			StartedAt:       startedAt,
+			DurationMS:      entry.DurationMS,
+			SizeBytes:       size,
+			ContentType:     getContentType(strings.ToLower(filepath.Ext(segName))),
+			MediaSequence:   &sequence,
+			InitSegmentName: initName,
+			InitStorageKey:  initStorageKey,
+			PlaylistName:    playlistName,
+			MuxSessionID:    deriveMuxSessionID(segName, childToken),
+		}
+		populateABRMetadata(&segment, segName)
+		if existing, err := u.Repository.GetByStreamAndSegment(streamName, segName); err == nil && existing != nil && existing.Status == models.LiveHLSSegmentStatusUploadedS3 {
+			segment.StorageETag = existing.StorageETag
+			segment.UploadedAt = existing.UploadedAt
+			_ = u.Repository.UpsertUploaded(segment)
+		} else {
+			_ = u.Repository.UpsertLocal(segment)
+		}
+	}
+}
+
+type fmp4PlaylistEntry struct {
+	URI             string
+	DurationMS      int64
+	MediaSequence   int64
+	ProgramDateTime time.Time
+}
+
+func parseFMP4Playlist(playlistPath string) ([]fmp4PlaylistEntry, string) {
+	byts, err := os.ReadFile(playlistPath)
+	if err != nil {
+		return nil, ""
+	}
+	var entries []fmp4PlaylistEntry
+	var initName string
+	mediaSequence := int64(0)
+	pendingDuration := int64(0)
+	var pendingPDT time.Time
+	for _, line := range strings.Split(string(byts), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if matches := mediaSequenceRe.FindStringSubmatch(line); matches != nil {
+			mediaSequence, _ = strconv.ParseInt(matches[1], 10, 64)
+			continue
+		}
+		if matches := mapURIRe.FindStringSubmatch(line); matches != nil {
+			initName = filepath.Base(matches[1])
+			continue
+		}
+		if matches := pdtRe.FindStringSubmatch(line); matches != nil {
+			pendingPDT, _ = time.Parse(time.RFC3339Nano, strings.TrimSpace(matches[1]))
+			continue
+		}
+		if matches := extinfRe.FindStringSubmatch(line); matches != nil {
+			pendingDuration = secondsToMS(matches[1])
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		entries = append(entries, fmp4PlaylistEntry{
+			URI:             line,
+			DurationMS:      pendingDuration,
+			MediaSequence:   mediaSequence + int64(len(entries)),
+			ProgramDateTime: pendingPDT,
+		})
+		pendingDuration = 0
+		pendingPDT = time.Time{}
+	}
+	return entries, initName
+}
+
+func (u *HLSS3Uploader) remoteKeyForName(streamName, name string) string {
+	keyRelPath := path.Join(strings.Trim(streamName, "/"), name)
+	return path.Join(strings.TrimSuffix(u.Config.Prefix, "/"), keyRelPath)
+}
+
+func populateABRMetadata(segment *models.LiveHLSSegment, fileName string) {
+	base, track, rendition := deriveABRPathMetadata(segment.StreamID)
+	segment.BaseStreamID = base
+	segment.TrackType = track
+	segment.Rendition = rendition
+	if segment.MuxSessionID == "" {
+		childToken := strings.TrimSuffix(segment.PlaylistName, "_stream.m3u8")
+		segment.MuxSessionID = deriveMuxSessionID(fileName, childToken)
+	}
+}
+
+func mergeExistingDVRMetadata(repo models.LiveHLSSegmentRepository, segment *models.LiveHLSSegment) {
+	if repo == nil || segment == nil {
+		return
+	}
+	existing, err := repo.GetByStreamAndSegment(segment.StreamID, segment.SegmentName)
+	if err != nil || existing == nil {
+		return
+	}
+	if segment.BaseStreamID == "" {
+		segment.BaseStreamID = existing.BaseStreamID
+	}
+	if segment.TrackType == "" || segment.TrackType == "unknown" {
+		segment.TrackType = existing.TrackType
+	}
+	if segment.Rendition == "" {
+		segment.Rendition = existing.Rendition
+	}
+	if segment.MuxSessionID == "" || strings.Contains(segment.MuxSessionID, "_seg") {
+		segment.MuxSessionID = existing.MuxSessionID
+	}
+	if segment.InitSegmentName == "" {
+		segment.InitSegmentName = existing.InitSegmentName
+	}
+	if segment.InitStorageKey == "" {
+		segment.InitStorageKey = existing.InitStorageKey
+	}
+	if segment.PlaylistName == "" {
+		segment.PlaylistName = existing.PlaylistName
+	}
+	if segment.MediaSequence == nil {
+		segment.MediaSequence = existing.MediaSequence
+	}
+	if segment.StartedAt.IsZero() {
+		segment.StartedAt = existing.StartedAt
+	}
+	if segment.DurationMS <= 0 {
+		segment.DurationMS = existing.DurationMS
+	}
+}
+
+func deriveABRPathMetadata(streamID string) (string, string, string) {
+	if idx := strings.LastIndex(streamID, "/video/"); idx >= 0 {
+		return streamID[:idx], "video", streamID[idx+len("/video/"):]
+	}
+	if idx := strings.LastIndex(streamID, "/audio/"); idx >= 0 {
+		return streamID[:idx], "audio", streamID[idx+len("/audio/"):]
+	}
+	return streamID, "unknown", ""
+}
+
+func deriveMuxSessionID(fileName, childToken string) string {
+	base := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+	if childToken != "" {
+		for _, suffix := range []string{"_" + childToken + "_init", "_" + childToken} {
+			if strings.HasSuffix(base, suffix) {
+				return strings.TrimSuffix(base, suffix)
+			}
+		}
+		segSuffix := regexp.MustCompile(`_` + regexp.QuoteMeta(childToken) + `_seg[0-9]+$`)
+		if loc := segSuffix.FindStringIndex(base); loc != nil && loc[1] == len(base) {
+			return base[:loc[0]]
+		}
+	}
+	if loc := fmp4SegmentRe.FindStringIndex(fileName); loc != nil && loc[1] == len(fileName) {
+		return fileName[:loc[0]]
+	}
+	return base
+}
 
 func (u *HLSS3Uploader) inferDurationMS(filePath string) int64 {
 	playlistPath := filepath.Join(filepath.Dir(filePath), "index.m3u8")
+	if strings.HasSuffix(filepath.Base(filePath), ".mp4") {
+		matches, _ := filepath.Glob(filepath.Join(filepath.Dir(filePath), "*_stream.m3u8"))
+		for _, candidate := range matches {
+			if duration := inferDurationFromPlaylist(candidate, filepath.Base(filePath)); duration > 0 {
+				return duration
+			}
+		}
+	}
+	return inferDurationFromPlaylist(playlistPath, filepath.Base(filePath))
+}
+
+func inferDurationFromPlaylist(playlistPath string, name string) int64 {
 	byts, err := os.ReadFile(playlistPath)
 	if err != nil {
 		return 0
 	}
 
-	name := filepath.Base(filePath)
 	lines := strings.Split(string(byts), "\n")
 	var pendingDuration int64
 	for _, line := range lines {
@@ -466,6 +690,16 @@ func (u *HLSS3Uploader) waitStable(filePath string) bool {
 			return false
 		}
 	}
+}
+
+// BuildRemoteKey constructs the S3 storage key for a given stream path and file name
+// using the configured prefix, ensuring consistency between upload and lookup.
+func (u *HLSS3Uploader) BuildRemoteKey(streamPath, fileName string) string {
+	prefix := strings.TrimSuffix(u.Config.Prefix, "/")
+	if prefix == "" {
+		prefix = "live-hls"
+	}
+	return path.Join(prefix, streamPath, fileName)
 }
 
 func (u *HLSS3Uploader) IsUploaded(remoteKey string) bool {

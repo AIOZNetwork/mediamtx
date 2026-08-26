@@ -62,6 +62,14 @@ func (p *S3StorageProvider) Name() string {
 	return string(ProviderS3)
 }
 
+func (p *S3StorageProvider) Bucket() string {
+	return p.bucket
+}
+
+func (p *S3StorageProvider) PresignClient() *s3.PresignClient {
+	return p.presignClient
+}
+
 func (p *S3StorageProvider) UploadFile(ctx context.Context, localPath, remoteKey, contentType string) (string, error) {
 	byts, err := os.ReadFile(localPath)
 	if err != nil {

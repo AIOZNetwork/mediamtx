@@ -22,6 +22,8 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/confwatcher"
 	"github.com/bluenviron/mediamtx/internal/database"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
+	"github.com/bluenviron/mediamtx/internal/dvr"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/grpc_service"
 	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
@@ -81,6 +83,7 @@ type Core struct {
 	recordCleaner   *recordcleaner.Cleaner
 	retryUploader   *retryuploader.RetryUploader
 	playbackServer  *playback.Server
+	dvrService      *dvr.Service
 	pathManager     *pathManager
 	rtspServer      *rtsp.Server
 	rtspsServer     *rtsp.Server
@@ -378,6 +381,23 @@ func (p *Core) createResources(initial bool) error {
 		p.playbackServer = i
 	}
 
+	if p.dvrService == nil {
+		p.dvrService = &dvr.Service{
+			Config: hlss3uploader.StorageConfig{
+				Provider:        p.conf.StorageProvider,
+				Prefix:          p.conf.S3Prefix,
+				Endpoint:        p.conf.S3Endpoint,
+				Bucket:          p.conf.S3Bucket,
+				Region:          p.conf.S3Region,
+				AccessKeyID:     p.conf.S3AccessKeyId,
+				SecretAccessKey: p.conf.S3SecretAccessKey,
+			},
+			Repository: repository.NewLiveHLSSegmentRepository(database.DB),
+			Parent:     p,
+		}
+		p.dvrService.Initialize()
+	}
+
 	if p.pathManager == nil {
 		p.pathManager = &pathManager{
 			logLevel:          p.conf.LogLevel,
@@ -389,6 +409,7 @@ func (p *Core) createResources(initial bool) error {
 			udpMaxPayloadSize: p.conf.UDPMaxPayloadSize,
 			pathConfs:         p.conf.Paths,
 			externalCmdPool:   p.externalCmdPool,
+			dvrService:        p.dvrService,
 			parent:            p,
 		}
 		p.pathManager.initialize()
@@ -557,6 +578,7 @@ func (p *Core) createResources(initial bool) error {
 			PartDuration:    p.conf.HLSPartDuration,
 			SegmentMaxSize:  p.conf.HLSSegmentMaxSize,
 			Directory:       p.conf.HLSDirectory,
+			DVRService:      p.dvrService,
 			UploadConfig: &hls.MuxerUploadConfig{
 				Storage: hlss3uploader.StorageConfig{
 					Provider:               p.conf.StorageProvider,
@@ -1026,6 +1048,11 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		p.retryUploader = nil
 	}
 
+	if newConf == nil && p.dvrService != nil {
+		p.dvrService.Close()
+		p.dvrService = nil
+	}
+
 	if closePPROF && p.pprof != nil {
 		p.pprof.Close()
 		p.pprof = nil
@@ -1064,4 +1091,3 @@ func (p *Core) APIConfigSet(conf *conf.Conf) {
 	case <-p.ctx.Done():
 	}
 }
-

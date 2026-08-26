@@ -10,6 +10,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/dvr"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
@@ -27,6 +28,7 @@ type serverGetMuxerReq struct {
 	remoteAddr     string
 	query          string
 	sourceOnDemand bool
+	abrChild       bool
 	res            chan serverGetMuxerRes
 }
 
@@ -74,6 +76,7 @@ type Server struct {
 	SegmentMaxSize  conf.StringSize
 	Directory       string
 	UploadConfig    *MuxerUploadConfig
+	DVRService      *dvr.Service
 	ReadTimeout     conf.Duration
 	MuxerCloseAfter conf.Duration
 	PathManager     serverPathManager
@@ -170,7 +173,7 @@ outer:
 			switch {
 			case ok:
 				req.res <- serverGetMuxerRes{muxer: mux}
-			case s.AlwaysRemux && !req.sourceOnDemand:
+			case s.AlwaysRemux && !req.sourceOnDemand && !req.abrChild:
 				req.res <- serverGetMuxerRes{err: fmt.Errorf("muxer is waiting to be created")}
 			default:
 				req.res <- serverGetMuxerRes{muxer: s.createMuxer(req.path, req.remoteAddr, req.query)}
