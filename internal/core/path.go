@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +20,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/recorder"
 	"github.com/bluenviron/mediamtx/internal/servers/hls/transcoder"
 	"github.com/bluenviron/mediamtx/internal/stream"
-	"strings"
 )
 
 func emptyTimer() *time.Timer {
@@ -125,6 +125,15 @@ func isHLSTranscodingOutputPath(pathName string) bool {
 
 func shouldStartHLSTranscoder(pathName string, pathConf *conf.Path) bool {
 	return pathConf != nil && pathConf.HLSTranscoding && !isHLSTranscodingOutputPath(pathName)
+}
+
+func effectiveHLSTranscoderConf(pathConf *conf.Path, sourceInfo *transcoder.SourceInfo) *conf.Path {
+	if pathConf == nil {
+		return nil
+	}
+	effective := *pathConf
+	effective.HLSTranscodingRenditions = transcoder.FilterRenditions(pathConf.HLSTranscodingRenditions, sourceInfo)
+	return &effective
 }
 
 func (pa *path) initialize() {
@@ -722,10 +731,11 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 		return err
 	}
 
+	if pa.dvrService != nil {
+		pa.dvrService.StartSession(pa.name)
+	}
+
 	if pa.conf.Record {
-		if pa.dvrService != nil && pa.conf.RecordFormat == conf.RecordFormatMPEGTS {
-			pa.dvrService.StartSession(pa.name)
-		}
 		pa.startRecording()
 	}
 
@@ -734,7 +744,26 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 
 	if shouldStartHLSTranscoder(pa.name, pa.conf) {
 		pa.Log(logger.Info, "starting transcoder for path %s with rtspAddress=%s", pa.name, pa.rtspAddress)
-		pa.transcoder = transcoder.NewTranscoder(pa.conf, pa.name, pa, pa.rtspAddress)
+
+		rtspPort := "8554"
+		_, port, err := net.SplitHostPort(pa.rtspAddress)
+		if err == nil && port != "" {
+			rtspPort = port
+		}
+		sourceURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s", rtspPort, pa.name)
+		sourceInfo, probeErr := transcoder.ProbeSource(sourceURL)
+		if probeErr != nil {
+			pa.Log(logger.Warn, "source probe failed, using all renditions: %v", probeErr)
+		} else {
+			pa.Log(logger.Info, "source probed: %dx%d, fps=%.2f, video=%s, audio=%s",
+				sourceInfo.Width, sourceInfo.Height, sourceInfo.FPS, sourceInfo.VideoCodec, sourceInfo.AudioCodec)
+		}
+
+		effectiveConf := effectiveHLSTranscoderConf(pa.conf, sourceInfo)
+		pa.Log(logger.Info, "transcoder effective renditions=%d", len(effectiveConf.HLSTranscodingRenditions))
+		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtspAddress)
+		pa.transcoder.SourceInfo = sourceInfo
+
 		if err := pa.transcoder.Start(); err != nil {
 			pa.Log(logger.Error, "failed to start transcoder: %v", err)
 		}
@@ -822,9 +851,6 @@ func (pa *path) startRecording() {
 			}
 		},
 		OnSegmentComplete: func(segmentPath string, segmentDuration time.Duration) {
-			if pa.dvrService != nil {
-				go pa.dvrService.RecordSegment(pa.name, segmentPath, segmentDuration)
-			}
 			if pa.conf.RunOnRecordSegmentComplete != "" {
 				env := pa.ExternalCmdEnv()
 				env["MTX_SEGMENT_PATH"] = segmentPath

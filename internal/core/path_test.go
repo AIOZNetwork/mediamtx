@@ -28,6 +28,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp"
 	"github.com/bluenviron/mediamtx/internal/protocols/whip"
+	"github.com/bluenviron/mediamtx/internal/servers/hls/transcoder"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
 
@@ -44,6 +45,29 @@ func TestShouldStartHLSTranscoderSkipsNestedABROutputs(t *testing.T) {
 		if shouldStartHLSTranscoder(pathName, pathConf) {
 			t.Fatalf("expected ABR output path %q to skip transcoder", pathName)
 		}
+	}
+}
+
+func TestEffectiveHLSTranscoderConfDoesNotMutateOriginal(t *testing.T) {
+	pathConf := &conf.Path{
+		HLSTranscoding: true,
+		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
+			{Name: "1080", Width: 1920, Height: 1080, VideoBitrate: "6000k"},
+			{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+			{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
+		},
+	}
+
+	effective := effectiveHLSTranscoderConf(pathConf, &transcoder.SourceInfo{Height: 720})
+	if len(effective.HLSTranscodingRenditions) != 2 {
+		t.Fatalf("expected filtered effective renditions, got %+v", effective.HLSTranscodingRenditions)
+	}
+	if len(pathConf.HLSTranscodingRenditions) != 3 {
+		t.Fatalf("original config was mutated: %+v", pathConf.HLSTranscodingRenditions)
+	}
+	effective.HLSTranscodingRenditions[0].Name = "changed"
+	if pathConf.HLSTranscodingRenditions[1].Name != "720" {
+		t.Fatalf("effective config aliases original rendition slice")
 	}
 }
 

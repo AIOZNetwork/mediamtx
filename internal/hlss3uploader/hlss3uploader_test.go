@@ -3,8 +3,12 @@ package hlss3uploader
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +22,15 @@ type mockProvider struct {
 	uploadCount int32
 	uploadErr   error
 	delay       time.Duration
+}
+
+type readableMockProvider struct {
+	mockProvider
+	body          string
+	contentType   string
+	contentLength int64
+	err           error
+	ctxErr        error
 }
 
 func (m *mockProvider) Name() string {
@@ -48,6 +61,19 @@ func (m *mockProvider) DeleteFolder(ctx context.Context, remoteKey string) error
 
 func (m *mockProvider) Close() error {
 	return nil
+}
+
+func (m *readableMockProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, string, int64, error) {
+	select {
+	case <-ctx.Done():
+		m.ctxErr = ctx.Err()
+		return nil, "", -1, ctx.Err()
+	default:
+	}
+	if m.err != nil {
+		return nil, "", -1, m.err
+	}
+	return io.NopCloser(strings.NewReader(m.body)), m.contentType, m.contentLength, nil
 }
 
 type mockSegmentRepo struct {
@@ -221,6 +247,55 @@ func TestHLSS3Uploader_FailedUploadReleasesLockForRetry(t *testing.T) {
 	// Now should be in uploadedFiles
 	if _, loaded := uploader.uploadedFiles.Load(expectedKey); !loaded {
 		t.Errorf("expected key %q to be in uploadedFiles after retry success", expectedKey)
+	}
+}
+
+func TestHLSS3UploaderProxyObjectUsesReadableProvider(t *testing.T) {
+	provider := &readableMockProvider{
+		body:          "segment-bytes",
+		contentType:   "video/mp4",
+		contentLength: int64(len("segment-bytes")),
+	}
+	uploader := &HLSS3Uploader{provider: provider}
+	req := httptest.NewRequest(http.MethodGet, "/segment.mp4", nil)
+	w := httptest.NewRecorder()
+
+	if !uploader.ProxyObject(req.Context(), w, "live/cam/segment.mp4") {
+		t.Fatalf("expected proxy success")
+	}
+
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status %d", res.StatusCode)
+	}
+	if got := res.Header.Get("Content-Type"); got != "video/mp4" {
+		t.Fatalf("unexpected content type %q", got)
+	}
+	if got := res.Header.Get("Content-Length"); got != "13" {
+		t.Fatalf("unexpected content length %q", got)
+	}
+	if got := res.Header.Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("unexpected cache-control %q", got)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "segment-bytes" {
+		t.Fatalf("unexpected body %q", body)
+	}
+}
+
+func TestHLSS3UploaderProxyObjectRequiresReadableProvider(t *testing.T) {
+	uploader := &HLSS3Uploader{provider: &mockProvider{}}
+	w := httptest.NewRecorder()
+
+	if uploader.ProxyObject(context.Background(), w, "live/cam/segment.mp4") {
+		t.Fatalf("expected proxy to be unsupported")
+	}
+	if w.Body.Len() != 0 || len(w.Header()) != 0 {
+		t.Fatalf("unexpected response write for unsupported provider")
 	}
 }
 

@@ -172,12 +172,16 @@ func (mi *muxerInstance) handleRequest(ctx *gin.Context) {
 		return
 	}
 
+	mi.Log(logger.Info, "[HLS Resolver] Local miss for %s. Proxying from remote.", fileName)
+	if mi.hlsUploader.ProxyObject(ctx.Request.Context(), ctx.Writer, remoteKey) {
+		return
+	}
+
 	url, err := mi.hlsUploader.Presign(remoteKey)
 	if err != nil {
 		ctx.Status(http.StatusBadGateway)
 		return
 	}
-
 	mi.Log(logger.Info, "[HLS Resolver] Local miss for %s. S3 fallback successful, redirecting to remote.", fileName)
 	ctx.Redirect(http.StatusFound, url)
 }

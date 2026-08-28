@@ -3,6 +3,7 @@ package dvr
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +24,22 @@ import (
 	"github.com/bluenviron/mediamtx/internal/models"
 )
 
-const Window = 2 * time.Hour
+const (
+	Window                       = 2 * time.Hour
+	defaultStoragePrefix         = "live-hls"
+	defaultTargetDurationSec     = 1
+	defaultSegmentDurationSec    = 2.0
+	defaultPresignExpires        = 15 * time.Minute
+	cacheControlNoCache          = "no-cache"
+	cacheControlImmutableSegment = "public, max-age=31536000, immutable"
+	mediaTypePlaylistM3U8        = ".m3u8"
+	mediaTypeInitKeyword         = "init"
+
+	contentTypeMP4     = "video/mp4"
+	contentTypeM4S     = "video/iso.segment"
+	contentTypeTS      = "video/mp2t"
+	contentTypeDefault = "application/octet-stream"
+)
 
 type Service struct {
 	Config     hlss3uploader.StorageConfig
@@ -33,15 +50,13 @@ type Service struct {
 	mu       sync.Mutex
 	sessions map[string]string
 	active   map[string]bool
-	seqs     map[string]int64
 }
 
 func (s *Service) Initialize() {
 	s.sessions = make(map[string]string)
 	s.active = make(map[string]bool)
-	s.seqs = make(map[string]int64)
 	if s.Config.Prefix == "" {
-		s.Config.Prefix = "live-hls"
+		s.Config.Prefix = defaultStoragePrefix
 	}
 	provider, err := hlss3uploader.NewProviderSelector().Select(context.Background(), s.Config)
 	if err != nil {
@@ -86,73 +101,17 @@ func (s *Service) IsActive(streamID string) bool {
 	return s.active[streamID]
 }
 
-func isRecordableSegment(localPath string) bool {
-	ext := strings.ToLower(filepath.Ext(localPath))
-	return ext == ".ts" || ext == ".mp4" || ext == ".m4s"
-}
-
 func contentTypeForExt(localPath string) string {
 	switch strings.ToLower(filepath.Ext(localPath)) {
 	case ".mp4":
-		return "video/mp4"
+		return contentTypeMP4
 	case ".m4s":
-		return "video/iso.segment"
+		return contentTypeM4S
 	case ".ts":
-		return "video/mp2t"
+		return contentTypeTS
 	default:
-		return "application/octet-stream"
+		return contentTypeDefault
 	}
-}
-
-func (s *Service) RecordSegment(streamID, localPath string, duration time.Duration) {
-	if s == nil || s.Repository == nil || !isRecordableSegment(localPath) {
-		return
-	}
-	info, err := os.Stat(localPath)
-	if err != nil || info.Size() == 0 {
-		return
-	}
-
-	sequence := s.nextSequence(streamID)
-	startedAt := info.ModTime().Add(-duration)
-	if duration <= 0 {
-		startedAt = info.ModTime()
-	}
-	storageKey := path.Join(strings.Trim(s.Config.Prefix, "/"), "dvr", streamID, filepath.Base(localPath))
-
-	segment := models.LiveHLSSegment{
-		StreamID:       streamID,
-		SessionID:      s.sessionID(streamID),
-		SegmentName:    filepath.Base(localPath),
-		LocalPath:      localPath,
-		StorageBackend: "local",
-		StorageKey:     storageKey,
-		StartedAt:      startedAt,
-		DurationMS:     duration.Milliseconds(),
-		SizeBytes:      info.Size(),
-		Sequence:       &sequence,
-		ContentType:    contentTypeForExt(localPath),
-	}
-
-	_ = s.Repository.UpsertLocal(segment)
-	if s.provider == nil {
-		return
-	}
-
-	segment.StorageBackend = s.provider.Name()
-	_ = s.Repository.UpsertUploading(segment)
-	uploadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	etag, err := s.provider.UploadFile(uploadCtx, localPath, storageKey, segment.ContentType)
-	cancel()
-	if err != nil {
-		_ = s.Repository.UpsertUploadFailed(segment)
-		s.log(logger.Warn, "failed to upload DVR segment %s: %v", localPath, err)
-		return
-	}
-	now := time.Now()
-	segment.StorageETag = etag
-	segment.UploadedAt = &now
-	_ = s.Repository.UpsertUploaded(segment)
 }
 
 func isFMP4Segment(name string) bool {
@@ -162,7 +121,7 @@ func isFMP4Segment(name string) bool {
 
 func isInitSegment(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.Contains(lower, "init")
+	return strings.Contains(lower, mediaTypeInitKeyword)
 }
 
 func (s *Service) RenderPlaylist(streamID string, now time.Time) ([]byte, bool, error) {
@@ -349,7 +308,10 @@ func (s *Service) ServeMedia(w http.ResponseWriter, r *http.Request, streamID, s
 	}
 
 	if storageKey != "" && s.provider != nil {
-		if signedURL, err := s.presign(storageKey); err == nil && signedURL != "" {
+		if s.proxyStorageObject(r.Context(), w, storageKey) {
+			return true
+		}
+		if signedURL, err := s.presign(r.Context(), storageKey); err == nil && signedURL != "" {
 			http.Redirect(w, r, signedURL, http.StatusFound)
 			return true
 		}
@@ -358,59 +320,62 @@ func (s *Service) ServeMedia(w http.ResponseWriter, r *http.Request, streamID, s
 	return false
 }
 
-func (s *Service) nextSequence(streamID string) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.seqs == nil {
-		s.seqs = make(map[string]int64)
-	}
-	if seq, ok := s.seqs[streamID]; ok {
-		seq++
-		s.seqs[streamID] = seq
-		return seq
-	}
-	if max, ok, err := s.Repository.MaxSequence(streamID); err == nil && ok {
-		s.seqs[streamID] = max + 1
-		return max + 1
-	}
-	seq := time.Now().UnixNano()
-	s.seqs[streamID] = seq
-	return seq
-}
-
-func (s *Service) sessionID(streamID string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.sessions == nil {
-		s.sessions = make(map[string]string)
-	}
-	if id := s.sessions[streamID]; id != "" {
-		return id
-	}
-	id := fmt.Sprintf("%s-%d", strings.ReplaceAll(streamID, "/", "_"), time.Now().UnixNano())
-	s.sessions[streamID] = id
-	return id
-}
-
 func (s *Service) currentSessionID(streamID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessions[streamID]
 }
 
-func (s *Service) presign(remoteKey string) (string, error) {
+func (s *Service) presign(ctx context.Context, remoteKey string) (string, error) {
 	s3Provider, ok := s.provider.(*hlss3uploader.S3StorageProvider)
 	if !ok {
 		return "", fmt.Errorf("provider does not support presign")
 	}
-	req, err := s3Provider.PresignClient().PresignGetObject(context.Background(), &s3.GetObjectInput{
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := s3Provider.PresignClient().PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s3Provider.Bucket()),
 		Key:    aws.String(remoteKey),
-	}, s3.WithPresignExpires(15*time.Minute))
+	}, s3.WithPresignExpires(defaultPresignExpires))
 	if err != nil {
 		return "", err
 	}
 	return req.URL, nil
+}
+
+func (s *Service) proxyStorageObject(ctx context.Context, w http.ResponseWriter, key string) bool {
+	readable, ok := s.provider.(hlss3uploader.ReadableStorageProvider)
+	if !ok {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	body, contentType, contentLength, err := readable.GetObject(ctx, key)
+	if err != nil {
+		return false
+	}
+	defer body.Close()
+
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	} else {
+		w.Header().Set("Content-Type", contentTypeForExt(key))
+	}
+	if contentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	}
+
+	if strings.HasSuffix(key, mediaTypePlaylistM3U8) {
+		w.Header().Set("Cache-Control", cacheControlNoCache)
+	} else {
+		w.Header().Set("Cache-Control", cacheControlImmutableSegment)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, body)
+	return true
 }
 
 func (s *Service) log(level logger.Level, format string, args ...interface{}) {

@@ -206,7 +206,12 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			ctx.Header("Cache-Control", "no-cache")
 			ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
 			ctx.Writer.WriteHeader(http.StatusOK)
-			ctx.Writer.Write(renderABRMasterPlaylist(pathConf.HLSTranscodingRenditions))
+			// This stateless route cannot currently access the live transcoder's
+			// probed SourceInfo, so it renders the deterministic configured output
+			// codec default unless a future state store provides per-path metadata.
+			ctx.Writer.Write(renderABRMasterPlaylist(
+				pathConf.HLSTranscodingRenditions,
+				codecStringForTranscodedOutput(pathConf, nil)))
 			return
 		}
 

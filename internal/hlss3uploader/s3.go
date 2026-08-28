@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -94,6 +95,25 @@ func (p *S3StorageProvider) UploadFile(ctx context.Context, localPath, remoteKey
 
 func (p *S3StorageProvider) Close() error {
 	return nil
+}
+
+func (p *S3StorageProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, string, int64, error) {
+	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(p.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, "", 0, err
+	}
+	contentType := ""
+	if out.ContentType != nil {
+		contentType = *out.ContentType
+	}
+	contentLength := int64(-1)
+	if out.ContentLength != nil {
+		contentLength = *out.ContentLength
+	}
+	return out.Body, contentType, contentLength, nil
 }
 
 func init() {

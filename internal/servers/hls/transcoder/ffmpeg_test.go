@@ -67,3 +67,35 @@ func TestFFmpegBuildArgsSharedAudioNestedOutputs(t *testing.T) {
 		}
 	}
 }
+
+func TestFilterRenditionsBySourceHeight(t *testing.T) {
+	renditions := []conf.HLSTranscodingRendition{
+		{Name: "1080", Width: 1920, Height: 1080, VideoBitrate: "6000k"},
+		{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+		{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
+	}
+
+	for _, ca := range []struct {
+		name   string
+		info   *SourceInfo
+		wanted []string
+	}{
+		{"1080 source", &SourceInfo{Height: 1080}, []string{"1080", "720", "480"}},
+		{"720 source", &SourceInfo{Height: 720}, []string{"720", "480"}},
+		{"unknown source", nil, []string{"1080", "720", "480"}},
+		{"zero height", &SourceInfo{}, []string{"1080", "720", "480"}},
+		{"tiny source", &SourceInfo{Height: 240}, []string{"480"}},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			got := FilterRenditions(renditions, ca.info)
+			if len(got) != len(ca.wanted) {
+				t.Fatalf("expected %d renditions, got %+v", len(ca.wanted), got)
+			}
+			for i, name := range ca.wanted {
+				if got[i].Name != name {
+					t.Fatalf("expected rendition %d to be %q, got %+v", i, name, got)
+				}
+			}
+		})
+	}
+}

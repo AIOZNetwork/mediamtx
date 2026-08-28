@@ -13,6 +13,7 @@ type Transcoder struct {
 	Parent      logger.Writer
 	rtspAddress string
 	ffmpeg      *FFmpegTranscoder
+	SourceInfo  *SourceInfo
 }
 
 func NewTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtspAddress string) *Transcoder {
@@ -30,6 +31,7 @@ func (t *Transcoder) Start() error {
 	}
 
 	t.ffmpeg = NewFFmpegTranscoder(t.Conf, t.StreamID, t.Parent, t.rtspAddress)
+	t.ffmpeg.SourceInfo = t.SourceInfo
 	return t.ffmpeg.Start()
 }
 

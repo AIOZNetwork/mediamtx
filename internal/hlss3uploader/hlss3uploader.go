@@ -3,7 +3,9 @@ package hlss3uploader
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -29,6 +31,10 @@ type StorageProvider interface {
 	Close() error
 }
 
+type ReadableStorageProvider interface {
+	GetObject(ctx context.Context, key string) (io.ReadCloser, string, int64, error)
+}
+
 // HLSS3Uploader watches local HLS directory (e.g. ./input-live),
 // uploads generated segment and playlist files to configured StorageProvider,
 // and deletes local segment files after successful upload.
@@ -51,13 +57,37 @@ type HLSS3Uploader struct {
 	uploadedFiles   sync.Map
 }
 
+const (
+	defaultStoragePrefix         = "live-hls"
+	defaultStorageDirectory      = "./input-live"
+	defaultWorkerCount           = 4
+	defaultTaskQueueSize         = 1000
+	defaultSegmentDurationMS     = 2000
+	defaultUploadTimeout         = 2 * time.Minute
+	defaultPresignExpires        = 15 * time.Minute
+	cacheControlNoCache          = "no-cache"
+	cacheControlImmutableSegment = "public, max-age=31536000, immutable"
+
+	contentTypeMP4     = "video/mp4"
+	contentTypeM4S     = "video/iso.segment"
+	contentTypeTS      = "video/mp2t"
+	contentTypeM3U8    = "application/x-mpegURL"
+	contentTypeDefault = "application/octet-stream"
+
+	extM3U8 = ".m3u8"
+	extMP4  = ".mp4"
+	extMP   = ".mp"
+	extM4S  = ".m4s"
+	extTS   = ".ts"
+)
+
 // Initialize initializes and starts the HLSS3Uploader background service using supplied Config.
 func (u *HLSS3Uploader) Initialize() error {
 	u.ctx, u.ctxCancel = context.WithCancel(context.Background())
 	u.done = make(chan struct{})
-	u.taskChan = make(chan string, 1000)
+	u.taskChan = make(chan string, defaultTaskQueueSize)
 	if u.Config.Workers <= 0 {
-		u.Config.Workers = 4
+		u.Config.Workers = defaultWorkerCount
 	}
 
 	selector := NewProviderSelector()
@@ -70,10 +100,10 @@ func (u *HLSS3Uploader) Initialize() error {
 	u.provider = provider
 
 	if u.Config.Directory == "" {
-		u.Config.Directory = "./input-live"
+		u.Config.Directory = defaultStorageDirectory
 	}
 	if u.Config.Prefix == "" {
-		u.Config.Prefix = "live-hls"
+		u.Config.Prefix = defaultStoragePrefix
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -383,18 +413,16 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 
 func getContentType(ext string) string {
 	switch ext {
-	case ".m4s":
-		return "video/iso.segment"
-	case ".mp4":
-		return "video/mp4"
-	case ".mp":
-		return "video/mp4"
-	case ".ts":
-		return "video/mp2t"
-	case ".m3u8":
-		return "application/x-mpegURL"
+	case extM4S:
+		return contentTypeM4S
+	case extMP4, extMP:
+		return contentTypeMP4
+	case extTS:
+		return contentTypeTS
+	case extM3U8:
+		return contentTypeM3U8
 	default:
-		return "application/octet-stream"
+		return contentTypeDefault
 	}
 }
 
@@ -721,11 +749,61 @@ func (u *HLSS3Uploader) Presign(remoteKey string) (string, error) {
 		req, err := s3Prov.presignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
 			Bucket: aws.String(s3Prov.bucket),
 			Key:    aws.String(remoteKey),
-		}, s3.WithPresignExpires(15*time.Minute))
+		}, s3.WithPresignExpires(defaultPresignExpires))
 		if err != nil {
 			return "", err
 		}
 		return req.URL, nil
 	}
 	return "", fmt.Errorf("provider does not support presign")
+}
+
+func contentTypeForRemoteKey(remoteKey string) string {
+	switch strings.ToLower(path.Ext(remoteKey)) {
+	case extM3U8:
+		return contentTypeM3U8
+	case extMP4, extMP:
+		return contentTypeMP4
+	case extM4S:
+		return contentTypeM4S
+	case extTS:
+		return contentTypeTS
+	default:
+		return contentTypeDefault
+	}
+}
+
+func (u *HLSS3Uploader) ProxyObject(ctx context.Context, w http.ResponseWriter, remoteKey string) bool {
+	readable, ok := u.provider.(ReadableStorageProvider)
+	if !ok {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	body, contentType, contentLength, err := readable.GetObject(ctx, remoteKey)
+	if err != nil {
+		return false
+	}
+	defer body.Close()
+
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	} else {
+		w.Header().Set("Content-Type", contentTypeForRemoteKey(remoteKey))
+	}
+	if contentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	}
+
+	if strings.HasSuffix(remoteKey, extM3U8) {
+		w.Header().Set("Cache-Control", cacheControlNoCache)
+	} else {
+		w.Header().Set("Cache-Control", cacheControlImmutableSegment)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, body)
+	return true
 }

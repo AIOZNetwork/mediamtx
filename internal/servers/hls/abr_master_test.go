@@ -12,7 +12,7 @@ func TestRenderABRMasterPlaylistSharedAudioNestedRenditions(t *testing.T) {
 		{Name: "1080", Width: 1920, Height: 1080, VideoBitrate: "6000k"},
 		{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
 		{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
-	}))
+	}, ""))
 
 	for _, expected := range []string{
 		"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n",
@@ -64,5 +64,17 @@ func TestABRChildPathHelpers(t *testing.T) {
 		if abrBasePath(ca.path) != ca.basePath {
 			t.Fatalf("unexpected base path for %q: %q", ca.path, abrBasePath(ca.path))
 		}
+	}
+}
+
+func TestCodecStringFromInfoAVCAndFallback(t *testing.T) {
+	if got := codecStringFromInfo("libx264", "High", "4.0", "aac"); got != "avc1.640028,mp4a.40.2" {
+		t.Fatalf("unexpected high 4.0 codec string %q", got)
+	}
+	if got := codecStringFromInfo("", "", "", ""); got != "avc1.640028,mp4a.40.2" {
+		t.Fatalf("unexpected default codec string %q", got)
+	}
+	if got := avcCodecString("High", "not-a-level"); got != "avc1.640028" {
+		t.Fatalf("unexpected malformed AVC fallback %q", got)
 	}
 }

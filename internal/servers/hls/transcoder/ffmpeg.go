@@ -18,6 +18,7 @@ type FFmpegTranscoder struct {
 	StreamID    string
 	Parent      logger.Writer
 	rtspAddress string
+	SourceInfo  *SourceInfo
 
 	ctx       context.Context
 	ctxCancel context.CancelFunc
@@ -73,13 +74,35 @@ func (t *FFmpegTranscoder) Start() error {
 	return nil
 }
 
+const (
+	defaultVideoCodec      = "libx264"
+	defaultAudioCodec      = "aac"
+	defaultPreset          = "veryfast"
+	defaultRTSPPort        = "8554"
+	defaultFPS             = "30"
+	defaultPixelFormat     = "yuv420p"
+	defaultGOPSize         = "60"
+	defaultKeyintMin       = "60"
+	defaultAudioBitrate    = "128k"
+	defaultAudioSampleRate = "48000"
+	defaultAudioChannels   = "2"
+	audioResampleFilter    = "aresample=async=1:first_pts=0"
+	x264ClosedGOPParams    = "scenecut=0:open_gop=0"
+	sharedAudioPathSuffix  = "audio/main"
+	videoPathPrefix        = "video"
+)
+
 // BuildArgs builds FFmpeg arguments without starting the process.
 func (t *FFmpegTranscoder) BuildArgs() []string {
 	rtspPort := t.rtspPort()
 	sourceURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s", rtspPort, t.StreamID)
 
 	renditions := t.Conf.HLSTranscodingRenditions
-	filterGraph := t.videoFilterGraph(renditions)
+	fps := defaultFPS
+	if t.SourceInfo != nil && t.SourceInfo.FPS > 0 {
+		fps = fmt.Sprintf("%.2f", t.SourceInfo.FPS)
+	}
+	filterGraph := t.videoFilterGraph(renditions, fps)
 
 	args := []string{
 		"-hide_banner",
@@ -90,21 +113,21 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		"-filter_complex", filterGraph,
 	}
 
-	videoCodec := defaultString(t.Conf.HLSTranscodingVideoCodec, "libx264")
-	preset := defaultString(t.Conf.HLSTranscodingPreset, "veryfast")
+	videoCodec := defaultString(t.Conf.HLSTranscodingVideoCodec, defaultVideoCodec)
+	preset := defaultString(t.Conf.HLSTranscodingPreset, defaultPreset)
 	for _, r := range renditions {
-		outURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s/video/%s", rtspPort, t.StreamID, r.Name)
+		outURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s/%s/%s", rtspPort, t.StreamID, videoPathPrefix, r.Name)
 		args = append(args,
 			"-map", fmt.Sprintf("[out%s]", r.Name),
 			"-an",
 			"-c:v", videoCodec,
-			"-pix_fmt", "yuv420p",
+			"-pix_fmt", defaultPixelFormat,
 			"-b:v", r.VideoBitrate,
 			"-preset", preset,
-			"-g", "60",
-			"-keyint_min", "60",
+			"-g", defaultGOPSize,
+			"-keyint_min", defaultKeyintMin,
 			"-sc_threshold", "0",
-			"-x264-params", "scenecut=0:open_gop=0",
+			"-x264-params", x264ClosedGOPParams,
 			"-f", "rtsp",
 			"-rtsp_transport", "tcp",
 			outURL,
@@ -114,14 +137,14 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 	args = append(args,
 		"-map", "0:a:0?",
 		"-vn",
-		"-af", "aresample=async=1:first_pts=0",
-		"-c:a", defaultString(t.Conf.HLSTranscodingAudioCodec, "aac"),
-		"-b:a", "128k",
-		"-ar", "48000",
-		"-ac", "2",
+		"-af", audioResampleFilter,
+		"-c:a", defaultString(t.Conf.HLSTranscodingAudioCodec, defaultAudioCodec),
+		"-b:a", defaultAudioBitrate,
+		"-ar", defaultAudioSampleRate,
+		"-ac", defaultAudioChannels,
 		"-f", "rtsp",
 		"-rtsp_transport", "tcp",
-		fmt.Sprintf("rtsp://127.0.0.1:%s/%s/audio/main", rtspPort, t.StreamID),
+		fmt.Sprintf("rtsp://127.0.0.1:%s/%s/%s", rtspPort, t.StreamID, sharedAudioPathSuffix),
 	)
 
 	return args
@@ -130,19 +153,19 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 func (t *FFmpegTranscoder) rtspPort() string {
 	_, rtspPort, err := net.SplitHostPort(t.rtspAddress)
 	if err != nil || rtspPort == "" {
-		return "8554"
+		return defaultRTSPPort
 	}
 	return rtspPort
 }
 
-func (t *FFmpegTranscoder) videoFilterGraph(renditions []conf.HLSTranscodingRendition) string {
+func (t *FFmpegTranscoder) videoFilterGraph(renditions []conf.HLSTranscodingRendition, fps string) string {
 	var splitOuts []string
 	for _, r := range renditions {
 		splitOuts = append(splitOuts, fmt.Sprintf("[v%sin]", r.Name))
 	}
 
 	var b strings.Builder
-	b.WriteString("[0:v]fps=30,setpts=PTS-STARTPTS,split=")
+	b.WriteString(fmt.Sprintf("[0:v]fps=%s,setpts=PTS-STARTPTS,split=", fps))
 	b.WriteString(strconv.Itoa(len(renditions)))
 	b.WriteString(strings.Join(splitOuts, ""))
 	b.WriteByte(';')
@@ -166,4 +189,32 @@ func defaultString(v string, def string) string {
 
 func (t *FFmpegTranscoder) Stop() {
 	t.ctxCancel()
+}
+
+// FilterRenditions removes renditions whose resolution exceeds the source.
+// This prevents wasteful upscaling when source is lower than configured maximum.
+func FilterRenditions(renditions []conf.HLSTranscodingRendition, source *SourceInfo) []conf.HLSTranscodingRendition {
+	if source == nil || source.Height == 0 {
+		return append([]conf.HLSTranscodingRendition(nil), renditions...)
+	}
+
+	var filtered []conf.HLSTranscodingRendition
+	for _, r := range renditions {
+		if r.Height <= source.Height {
+			filtered = append(filtered, r)
+		}
+	}
+	if len(filtered) == 0 {
+		if len(renditions) == 0 {
+			return nil
+		}
+		smallest := renditions[0]
+		for _, r := range renditions[1:] {
+			if r.Height < smallest.Height {
+				smallest = r
+			}
+		}
+		return []conf.HLSTranscodingRendition{smallest}
+	}
+	return filtered
 }
