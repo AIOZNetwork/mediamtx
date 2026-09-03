@@ -298,6 +298,12 @@ type Conf struct {
 	S3SecretAccessKey string `json:"s3SecretAccessKey"`
 	S3Prefix          string `json:"s3Prefix"`
 
+	// DePIN go-sdk storage settings (used when storageProvider == "depin")
+	DePINIdentityDir  string `json:"depinIdentityDir"`
+	DePINCoordPeerURL string `json:"depinCoordPeerUrl"`
+	DePINPieceKeyPath string `json:"depinPieceKeyPath"`
+	DePINLinkEndpoint string `json:"depinLinkEndpoint"`
+
 	// WebRTC server
 	WebRTC                      bool             `json:"webrtc"`
 	WebRTCDisable               *bool            `json:"webrtcDisable,omitempty"` // deprecated

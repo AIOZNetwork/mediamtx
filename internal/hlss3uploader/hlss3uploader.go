@@ -15,8 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -33,6 +31,11 @@ type StorageProvider interface {
 
 type ReadableStorageProvider interface {
 	GetObject(ctx context.Context, key string) (io.ReadCloser, string, int64, error)
+}
+
+// LinkStorageProvider is the interface for storage backends that can generate direct download/presigned links.
+type LinkStorageProvider interface {
+	GetLink(ctx context.Context, key string) (string, error)
 }
 
 // HLSS3Uploader watches local HLS directory (e.g. ./input-live),
@@ -745,17 +748,10 @@ func (u *HLSS3Uploader) IsUploaded(remoteKey string) bool {
 }
 
 func (u *HLSS3Uploader) Presign(remoteKey string) (string, error) {
-	if s3Prov, ok := u.provider.(*S3StorageProvider); ok {
-		req, err := s3Prov.presignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
-			Bucket: aws.String(s3Prov.bucket),
-			Key:    aws.String(remoteKey),
-		}, s3.WithPresignExpires(defaultPresignExpires))
-		if err != nil {
-			return "", err
-		}
-		return req.URL, nil
+	if linkProv, ok := u.provider.(LinkStorageProvider); ok {
+		return linkProv.GetLink(context.Background(), remoteKey)
 	}
-	return "", fmt.Errorf("provider does not support presign")
+	return "", fmt.Errorf("provider does not support presign or link generation")
 }
 
 func contentTypeForRemoteKey(remoteKey string) string {

@@ -16,9 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/models"
@@ -29,7 +26,6 @@ const (
 	defaultStoragePrefix         = "live-hls"
 	defaultTargetDurationSec     = 1
 	defaultSegmentDurationSec    = 2.0
-	defaultPresignExpires        = 15 * time.Minute
 	cacheControlNoCache          = "no-cache"
 	cacheControlImmutableSegment = "public, max-age=31536000, immutable"
 	mediaTypePlaylistM3U8        = ".m3u8"
@@ -295,24 +291,34 @@ func (s *Service) ServeMedia(w http.ResponseWriter, r *http.Request, streamID, s
 		}
 	}
 
-	// 2. Fallback to S3 presigned URL
+	// 2. Fallback to remote storage (Redirect Link or Proxy)
 	storageKey := ""
 	if segment != nil && segment.StorageKey != "" {
 		storageKey = segment.StorageKey
 	} else {
 		prefix := strings.Trim(s.Config.Prefix, "/")
 		if prefix == "" {
-			prefix = "live-hls"
+			prefix = defaultStoragePrefix
 		}
 		storageKey = path.Join(prefix, streamID, segmentName)
 	}
 
 	if storageKey != "" && s.provider != nil {
-		if s.proxyStorageObject(r.Context(), w, storageKey) {
+		// If segment has StorageETag (file UUID), ensure provider mapping is primed
+		if segment != nil && segment.StorageETag != "" {
+			if depinProv, ok := s.provider.(*hlss3uploader.DePINStorageProvider); ok {
+				depinProv.RegisterKeyUUID(storageKey, segment.StorageETag)
+			}
+		}
+
+		// 1. Prioritize Direct Download / Presigned Redirect Link (HTTP 302)
+		if link, err := s.presign(r.Context(), storageKey); err == nil && link != "" {
+			http.Redirect(w, r, link, http.StatusFound)
 			return true
 		}
-		if signedURL, err := s.presign(r.Context(), storageKey); err == nil && signedURL != "" {
-			http.Redirect(w, r, signedURL, http.StatusFound)
+
+		// 2. Fallback to proxy streaming if link generation is unavailable
+		if s.proxyStorageObject(r.Context(), w, storageKey) {
 			return true
 		}
 	}
@@ -327,21 +333,10 @@ func (s *Service) currentSessionID(streamID string) string {
 }
 
 func (s *Service) presign(ctx context.Context, remoteKey string) (string, error) {
-	s3Provider, ok := s.provider.(*hlss3uploader.S3StorageProvider)
-	if !ok {
-		return "", fmt.Errorf("provider does not support presign")
+	if linkProv, ok := s.provider.(hlss3uploader.LinkStorageProvider); ok {
+		return linkProv.GetLink(ctx, remoteKey)
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	req, err := s3Provider.PresignClient().PresignGetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s3Provider.Bucket()),
-		Key:    aws.String(remoteKey),
-	}, s3.WithPresignExpires(defaultPresignExpires))
-	if err != nil {
-		return "", err
-	}
-	return req.URL, nil
+	return "", fmt.Errorf("provider does not support presign or link generation")
 }
 
 func (s *Service) proxyStorageObject(ctx context.Context, w http.ResponseWriter, key string) bool {

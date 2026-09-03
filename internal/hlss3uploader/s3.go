@@ -71,6 +71,20 @@ func (p *S3StorageProvider) PresignClient() *s3.PresignClient {
 	return p.presignClient
 }
 
+func (p *S3StorageProvider) GetLink(ctx context.Context, key string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := p.presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(p.bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(defaultPresignExpires))
+	if err != nil {
+		return "", err
+	}
+	return req.URL, nil
+}
+
 func (p *S3StorageProvider) UploadFile(ctx context.Context, localPath, remoteKey, contentType string) (string, error) {
 	byts, err := os.ReadFile(localPath)
 	if err != nil {

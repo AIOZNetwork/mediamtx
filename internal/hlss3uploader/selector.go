@@ -12,7 +12,8 @@ import (
 type ProviderType string
 
 const (
-	ProviderS3 ProviderType = "s3"
+	ProviderS3    ProviderType = "s3"
+	ProviderDePIN ProviderType = "depin"
 )
 
 // StorageConfig contains settings to configure storage providers.
@@ -29,6 +30,12 @@ type StorageConfig struct {
 	SecretAccessKey        string `json:"secret_access_key" yaml:"secret_access_key"`
 	DeleteLocalAfterUpload bool   `json:"delete_local_after_upload" yaml:"delete_local_after_upload"`
 	Workers                int    `json:"workers" yaml:"workers"`
+
+	// DePIN go-sdk storage settings
+	DePINIdentityDir  string `json:"depin_identity_dir" yaml:"depin_identity_dir"`
+	DePINCoordPeerURL string `json:"depin_coord_peer_url" yaml:"depin_coord_peer_url"`
+	DePINPieceKeyPath string `json:"depin_piece_key_path" yaml:"depin_piece_key_path"`
+	DePINLinkEndpoint string `json:"depin_link_endpoint" yaml:"depin_link_endpoint"`
 }
 
 // ProviderFactory is a function signature for constructing a StorageProvider instance.

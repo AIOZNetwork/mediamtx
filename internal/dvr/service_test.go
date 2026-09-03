@@ -219,3 +219,56 @@ func TestServeMediaProxiesRemoteReadableProvider(t *testing.T) {
 		t.Fatalf("unexpected body %q", body)
 	}
 }
+
+type mockLinkProvider struct {
+	link string
+	err  error
+}
+
+func (p *mockLinkProvider) Name() string { return "link-provider" }
+func (p *mockLinkProvider) UploadFile(ctx context.Context, localPath, remoteKey, contentType string) (string, error) {
+	return "", nil
+}
+func (p *mockLinkProvider) DeleteFolder(ctx context.Context, prefix string) error { return nil }
+func (p *mockLinkProvider) Close() error                                          { return nil }
+func (p *mockLinkProvider) GetLink(ctx context.Context, key string) (string, error) {
+	if p.err != nil {
+		return "", p.err
+	}
+	return p.link, nil
+}
+
+func TestServeMediaRedirectsWhenLinkProviderPresent(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{
+		{
+			StreamID:    "cam1",
+			SegmentName: "seg10.ts",
+			StorageKey:  "live-hls/cam1/seg10.ts",
+			StorageETag: "00000000-0000-0000-0000-000000000002",
+			StartedAt:   now,
+		},
+	}}
+	expectedLink := "https://edge.aioz.network/download/00000000-0000-0000-0000-000000000002?ticket=signedToken"
+	svc := &Service{
+		Repository: repo,
+		provider: &mockLinkProvider{
+			link: expectedLink,
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/media/cam1/seg10.ts", nil)
+	w := httptest.NewRecorder()
+
+	if !svc.ServeMedia(w, req, "cam1", "seg10.ts") {
+		t.Fatalf("expected ServeMedia to return true for redirect")
+	}
+
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("unexpected status %d, expected 302 StatusFound", res.StatusCode)
+	}
+	if got := res.Header.Get("Location"); got != expectedLink {
+		t.Fatalf("unexpected Location header %q, expected %q", got, expectedLink)
+	}
+}
