@@ -39,8 +39,9 @@ const (
 
 type Service struct {
 	Config     hlss3uploader.StorageConfig
-	Repository models.LiveHLSSegmentRepository
-	Parent     logger.Writer
+	Repository   models.LiveHLSSegmentRepository
+	Parent       logger.Writer
+	SegmentCount int
 
 	provider hlss3uploader.StorageProvider
 	mu       sync.Mutex
@@ -150,6 +151,10 @@ func (s *Service) RenderPlaylist(streamID string, now time.Time) ([]byte, bool, 
 		return nil, false, nil
 	}
 
+	if s.SegmentCount > 0 && len(mediaSegments) > s.SegmentCount {
+		mediaSegments = mediaSegments[len(mediaSegments)-s.SegmentCount:]
+	}
+
 	mediaSeq := int64(0)
 	if mediaSegments[0].Sequence != nil {
 		mediaSeq = *mediaSegments[0].Sequence
@@ -202,6 +207,10 @@ func (s *Service) renderFMP4Playlist(streamID string, now time.Time) ([]byte, bo
 	}
 	if len(mediaSegments) == 0 {
 		return nil, false, nil
+	}
+
+	if s.SegmentCount > 0 && len(mediaSegments) > s.SegmentCount {
+		mediaSegments = mediaSegments[len(mediaSegments)-s.SegmentCount:]
 	}
 
 	mediaSeq := int64(0)

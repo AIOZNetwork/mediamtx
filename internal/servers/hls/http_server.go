@@ -215,7 +215,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			return
 		}
 
-		if fname == "index.m3u8" && s.parent.DVRService != nil {
+		if fname == "index.m3u8" && s.parent.DVREnabled && s.parent.DVRService != nil {
 			playlist, ok, err := s.parent.DVRService.RenderPlaylist(dir, time.Now())
 			if err != nil {
 				s.Log(logger.Warn, "DVR playlist error for %s: %v", dir, err)
@@ -299,7 +299,7 @@ func (s *httpServer) onMediaRequest(ctx *gin.Context, mediaPath string) {
 		return
 	}
 
-	if s.parent.DVRService == nil || !s.parent.DVRService.ServeMedia(ctx.Writer, ctx.Request, streamID, segmentName) {
+	if !s.parent.DVREnabled || s.parent.DVRService == nil || !s.parent.DVRService.ServeMedia(ctx.Writer, ctx.Request, streamID, segmentName) {
 		ctx.Writer.WriteHeader(http.StatusNotFound)
 	}
 }

@@ -396,10 +396,13 @@ func (p *Core) createResources(initial bool) error {
 				DePINPieceKeyPath: p.conf.DePINPieceKeyPath,
 				DePINLinkEndpoint: p.conf.DePINLinkEndpoint,
 			},
-			Repository: repository.NewLiveHLSSegmentRepository(database.DB),
-			Parent:     p,
+			Repository:   repository.NewLiveHLSSegmentRepository(database.DB),
+			Parent:       p,
+			SegmentCount: p.conf.HLSSegmentCount,
 		}
 		p.dvrService.Initialize()
+	} else {
+		p.dvrService.SegmentCount = p.conf.HLSSegmentCount
 	}
 
 	if p.pathManager == nil {
@@ -583,6 +586,7 @@ func (p *Core) createResources(initial bool) error {
 			SegmentMaxSize:  p.conf.HLSSegmentMaxSize,
 			Directory:       p.conf.HLSDirectory,
 			DVRService:      p.dvrService,
+			DVREnabled:      p.conf.HLSDVREnabled,
 			UploadConfig: &hls.MuxerUploadConfig{
 				Storage: hlss3uploader.StorageConfig{
 					Provider:               p.conf.StorageProvider,

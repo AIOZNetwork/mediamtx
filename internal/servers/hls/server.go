@@ -77,6 +77,7 @@ type Server struct {
 	Directory       string
 	UploadConfig    *MuxerUploadConfig
 	DVRService      *dvr.Service
+	DVREnabled      bool
 	ReadTimeout     conf.Duration
 	MuxerCloseAfter conf.Duration
 	PathManager     serverPathManager

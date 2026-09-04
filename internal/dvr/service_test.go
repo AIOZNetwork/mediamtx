@@ -2,9 +2,12 @@ package dvr
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -272,3 +275,208 @@ func TestServeMediaRedirectsWhenLinkProviderPresent(t *testing.T) {
 		t.Fatalf("unexpected Location header %q, expected %q", got, expectedLink)
 	}
 }
+
+func TestDVRScrubbingAndSeekingFlow(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	tmpDir := t.TempDir()
+
+	// Create local segment file on disk (recent segment)
+	localSegPath := filepath.Join(tmpDir, "seg_live.mp4")
+	if err := os.WriteFile(localSegPath, []byte("live-fmp4-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seq0 := int64(100)
+	seq1 := int64(101)
+	seqLive := int64(102)
+
+	remoteUUID0 := "00000000-0000-0000-0000-000000000001"
+	remoteUUID1 := "00000000-0000-0000-0000-000000000002"
+
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{
+		{
+			StreamID:    "cam1/video/720",
+			SegmentName: "init.mp4",
+			StorageKey:  "live-hls/cam1/video/720/init.mp4",
+			StorageETag: remoteUUID0,
+			StartedAt:   now.Add(-60 * time.Minute),
+		},
+		{
+			StreamID:        "cam1/video/720",
+			SegmentName:     "seg_45min_ago.mp4",
+			StorageKey:      "live-hls/cam1/video/720/seg_45min_ago.mp4",
+			StorageETag:     remoteUUID1,
+			StartedAt:       now.Add(-45 * time.Minute),
+			DurationMS:      2000,
+			MediaSequence:   &seq0,
+			InitSegmentName: "init.mp4",
+			MuxSessionID:    "session_1",
+		},
+		{
+			StreamID:        "cam1/video/720",
+			SegmentName:     "seg_10min_ago.mp4",
+			StorageKey:      "live-hls/cam1/video/720/seg_10min_ago.mp4",
+			StorageETag:     remoteUUID1,
+			StartedAt:       now.Add(-10 * time.Minute),
+			DurationMS:      2000,
+			MediaSequence:   &seq1,
+			InitSegmentName: "init.mp4",
+			MuxSessionID:    "session_1",
+		},
+		{
+			StreamID:        "cam1/video/720",
+			SegmentName:     "seg_live.mp4",
+			LocalPath:       localSegPath,
+			StartedAt:       now.Add(-2 * time.Second),
+			DurationMS:      2000,
+			MediaSequence:   &seqLive,
+			InitSegmentName: "init.mp4",
+			MuxSessionID:    "session_1",
+		},
+	}}
+
+	expectedRemoteLink := "https://cdn.appdemo.cyou/download/00000000-0000-0000-0000-000000000002?ticket=validToken"
+	svc := &Service{
+		Repository: repo,
+		provider: &mockLinkProvider{
+			link: expectedRemoteLink,
+		},
+	}
+
+	// 1. Test Playlist Rendering for live DVR
+	playlist, ok, err := svc.RenderPlaylist("cam1/video/720", now)
+	if err != nil || !ok {
+		t.Fatalf("RenderPlaylist failed: ok=%v err=%v", ok, err)
+	}
+	plStr := string(playlist)
+
+	// Must contain fMP4 Map
+	if !strings.Contains(plStr, `#EXT-X-MAP:URI="/media/cam1/video/720/init.mp4"`) {
+		t.Fatalf("playlist missing EXT-X-MAP:\n%s", plStr)
+	}
+	// Must contain media sequence
+	if !strings.Contains(plStr, `#EXT-X-MEDIA-SEQUENCE:100`) {
+		t.Fatalf("playlist missing media sequence:\n%s", plStr)
+	}
+	// Must contain both remote and local segments
+	if !strings.Contains(plStr, `/media/cam1/video/720/seg_45min_ago.mp4`) {
+		t.Fatalf("playlist missing 45min segment:\n%s", plStr)
+	}
+	if !strings.Contains(plStr, `/media/cam1/video/720/seg_live.mp4`) {
+		t.Fatalf("playlist missing live segment:\n%s", plStr)
+	}
+	// Must NOT contain ENDLIST since stream is live
+	if strings.Contains(plStr, `#EXT-X-ENDLIST`) {
+		t.Fatalf("live DVR playlist must not contain EXT-X-ENDLIST:\n%s", plStr)
+	}
+
+	// 2. Test Seeking back to remote segment (45 mins ago) -> HTTP 302 Redirect
+	reqRemote := httptest.NewRequest(http.MethodGet, "/media/cam1/video/720/seg_45min_ago.mp4", nil)
+	wRemote := httptest.NewRecorder()
+	if !svc.ServeMedia(wRemote, reqRemote, "cam1/video/720", "seg_45min_ago.mp4") {
+		t.Fatalf("expected ServeMedia to handle remote segment seek")
+	}
+	resRemote := wRemote.Result()
+	defer resRemote.Body.Close()
+	if resRemote.StatusCode != http.StatusFound {
+		t.Fatalf("seeking remote segment expected 302 Found, got %d", resRemote.StatusCode)
+	}
+	if loc := resRemote.Header.Get("Location"); loc != expectedRemoteLink {
+		t.Fatalf("seeking remote segment expected Location %q, got %q", expectedRemoteLink, loc)
+	}
+
+	// 3. Test Seeking to live edge (recent local segment) -> HTTP 200 ServeFile
+	reqLocal := httptest.NewRequest(http.MethodGet, "/media/cam1/video/720/seg_live.mp4", nil)
+	wLocal := httptest.NewRecorder()
+	if !svc.ServeMedia(wLocal, reqLocal, "cam1/video/720", "seg_live.mp4") {
+		t.Fatalf("expected ServeMedia to handle local segment")
+	}
+	resLocal := wLocal.Result()
+	defer resLocal.Body.Close()
+	if resLocal.StatusCode != http.StatusOK {
+		t.Fatalf("local segment expected 200 OK, got %d", resLocal.StatusCode)
+	}
+	localBody, _ := io.ReadAll(resLocal.Body)
+	if string(localBody) != "live-fmp4-bytes" {
+		t.Fatalf("local segment content mismatch, got %q", string(localBody))
+	}
+}
+
+func TestRenderPlaylistSlidingWindowSegmentCount(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	initSeg := "stream1_init.mp4"
+	var segs []models.LiveHLSSegment
+	// 20 segments from seq 100 to 119
+	for i := 0; i < 20; i++ {
+		seq := int64(100 + i)
+		segs = append(segs, models.LiveHLSSegment{
+			StreamID:        "stream1/video/720",
+			SegmentName:     fmt.Sprintf("seg%02d.mp4", i),
+			StartedAt:       now.Add(time.Duration(i*2) * time.Second),
+			DurationMS:      2000,
+			MediaSequence:   &seq,
+			InitSegmentName: initSeg,
+			MuxSessionID:    "session1",
+		})
+	}
+
+	repo := &fakeRepo{segments: segs}
+
+	// Test 1: SegmentCount = 7 (sliding window of 7 segments)
+	svc := &Service{
+		Repository:   repo,
+		SegmentCount: 7,
+	}
+
+	playlist, ok, err := svc.RenderPlaylist("stream1/video/720", now.Add(40*time.Second))
+	if err != nil || !ok {
+		t.Fatalf("expected playlist, ok=%v err=%v", ok, err)
+	}
+	body := string(playlist)
+
+	// Must contain MEDIA-SEQUENCE of the 13th segment (100 + 13 = 113)
+	if !strings.Contains(body, "#EXT-X-MEDIA-SEQUENCE:113") {
+		t.Fatalf("expected #EXT-X-MEDIA-SEQUENCE:113, got:\n%s", body)
+	}
+
+	// Must contain init map
+	if !strings.Contains(body, `#EXT-X-MAP:URI="/media/stream1/video/720/stream1_init.mp4"`) {
+		t.Fatalf("missing EXT-X-MAP tag:\n%s", body)
+	}
+
+	// Must contain exactly 7 segments (seg13.mp4 to seg19.mp4)
+	for i := 13; i < 20; i++ {
+		expectedSeg := fmt.Sprintf("seg%02d.mp4", i)
+		if !strings.Contains(body, expectedSeg) {
+			t.Fatalf("expected sliding window to contain %s, got:\n%s", expectedSeg, body)
+		}
+	}
+
+	// Must NOT contain older segments (seg00.mp4 to seg12.mp4)
+	for i := 0; i < 13; i++ {
+		unexpectedSeg := fmt.Sprintf("seg%02d.mp4", i)
+		if strings.Contains(body, unexpectedSeg) {
+			t.Fatalf("expected sliding window to exclude older %s, got:\n%s", unexpectedSeg, body)
+		}
+	}
+
+	// Count occurrences of #EXTINF
+	extinfCount := strings.Count(body, "#EXTINF:")
+	if extinfCount != 7 {
+		t.Fatalf("expected 7 #EXTINF entries, got %d:\n%s", extinfCount, body)
+	}
+
+	// Test 2: SegmentCount = 0 (unlimited window, all 20 segments)
+	svcUnlimited := &Service{
+		Repository:   repo,
+		SegmentCount: 0,
+	}
+	plUnlimited, ok, err := svcUnlimited.RenderPlaylist("stream1/video/720", now.Add(40*time.Second))
+	if err != nil || !ok {
+		t.Fatalf("expected unlimited playlist, ok=%v err=%v", ok, err)
+	}
+	if strings.Count(string(plUnlimited), "#EXTINF:") != 20 {
+		t.Fatalf("expected 20 #EXTINF entries when SegmentCount=0, got %d", strings.Count(string(plUnlimited), "#EXTINF:"))
+	}
+}
+

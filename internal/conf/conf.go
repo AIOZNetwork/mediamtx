@@ -287,6 +287,7 @@ type Conf struct {
 	HLSSegmentMaxSize  StringSize `json:"hlsSegmentMaxSize"`
 	HLSDirectory       string     `json:"hlsDirectory"`
 	HLSMuxerCloseAfter Duration   `json:"hlsMuxerCloseAfter"`
+	HLSDVREnabled      bool       `json:"hlsDvrEnabled"`
 
 
 	// Storage Provider
@@ -433,6 +434,7 @@ func (conf *Conf) setDefaults() {
 	conf.HLSPartDuration = 200 * Duration(time.Millisecond)
 	conf.HLSSegmentMaxSize = 50 * 1024 * 1024
 	conf.HLSMuxerCloseAfter = 60 * Duration(time.Second)
+	conf.HLSDVREnabled = true
 
 	// WebRTC server
 	conf.WebRTC = true
