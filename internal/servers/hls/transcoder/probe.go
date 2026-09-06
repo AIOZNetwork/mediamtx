@@ -36,7 +36,7 @@ type ffprobeStream struct {
 }
 
 const (
-	defaultProbeTimeout  = 10 * time.Second
+	defaultProbeTimeout  = 1500 * time.Millisecond
 	defaultRTSPTransport = "tcp"
 	ffprobeOutputFormat  = "json"
 	ffprobeLogLevel      = "quiet"
@@ -54,6 +54,9 @@ func ProbeSource(rtspURL string) (*SourceInfo, error) {
 		"-v", ffprobeLogLevel,
 		"-print_format", ffprobeOutputFormat,
 		"-show_streams",
+		"-analyzeduration", "500000",
+		"-probesize", "500000",
+		"-fflags", "nobuffer",
 		"-rtsp_transport", defaultRTSPTransport,
 		rtspURL,
 	)

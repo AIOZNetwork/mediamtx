@@ -92,7 +92,13 @@ func (s *httpServer) close() {
 }
 
 func (s *httpServer) middlewareOrigin(ctx *gin.Context) {
-	ctx.Header("Access-Control-Allow-Origin", s.allowOrigin)
+	origin := ctx.Request.Header.Get("Origin")
+	if origin != "" && (s.allowOrigin == "*" || s.allowOrigin == origin) {
+		ctx.Header("Access-Control-Allow-Origin", origin)
+		ctx.Header("Vary", "Origin")
+	} else {
+		ctx.Header("Access-Control-Allow-Origin", s.allowOrigin)
+	}
 	ctx.Header("Access-Control-Allow-Credentials", "true")
 
 	// preflight requests
@@ -231,6 +237,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			}
 		}
 
+		var mi *muxerInstance
 		mux, err := s.parent.getMuxer(serverGetMuxerReq{
 			path:           dir,
 			remoteAddr:     httpp.RemoteAddr(ctx),
@@ -238,25 +245,42 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			sourceOnDemand: pathConf.SourceOnDemand,
 			abrChild:       isABRChildPlaylistPath(dir),
 		})
-		if err != nil {
+		if err == nil && mux != nil {
+			mi = mux.getInstance()
+		}
+
+		if mi == nil {
 			if isABRChildPlaylistPath(dir) {
-				ctx.Writer.WriteHeader(http.StatusServiceUnavailable)
-				ctx.Writer.Write([]byte("ABR rendition is not ready"))
+				// Rendition is transcode-bound to the media stream.
+				// If warming up, return an immediate valid live playlist (200 OK) so the player
+				// gets instant TTFB without timing out/canceling, and reloads after 1-2s per RFC 8216.
+				if fname == "index.m3u8" || strings.HasSuffix(fname, ".m3u8") {
+					ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+					ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+					ctx.Writer.WriteHeader(http.StatusOK)
+					ctx.Writer.Write([]byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"))
+					return
+				}
+				ctx.Writer.WriteHeader(http.StatusNotFound)
 				return
 			}
 			ctx.Writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 
-		mi := mux.getInstance()
-		if mi == nil {
-			if isABRChildPlaylistPath(dir) {
-				ctx.Writer.WriteHeader(http.StatusServiceUnavailable)
-				ctx.Writer.Write([]byte("ABR rendition is not ready"))
-				return
+		if isABRChildPlaylistPath(dir) {
+			if fname == "index.m3u8" || strings.HasSuffix(fname, ".m3u8") {
+				if !mi.isMediaPlaylistReady() {
+					ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+					ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+					ctx.Writer.WriteHeader(http.StatusOK)
+					ctx.Writer.Write([]byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"))
+					return
+				}
+				if fname == "index.m3u8" {
+					fname = mi.primaryMediaPlaylist()
+				}
 			}
-			ctx.Writer.WriteHeader(http.StatusNotFound)
-			return
 		}
 
 		ctx.Request.URL.Path = fname

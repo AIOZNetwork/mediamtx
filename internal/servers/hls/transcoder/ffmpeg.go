@@ -87,7 +87,7 @@ const (
 	defaultAudioSampleRate = "48000"
 	defaultAudioChannels   = "2"
 	audioResampleFilter    = "aresample=async=1:first_pts=0"
-	x264ClosedGOPParams    = "scenecut=0:open_gop=0"
+	x264ClosedGOPParams    = "scenecut=0:open_gop=0:rc-lookahead=0"
 	sharedAudioPathSuffix  = "audio/main"
 	videoPathPrefix        = "video"
 )
@@ -107,7 +107,10 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "warning",
-		"-fflags", "+genpts",
+		"-fflags", "nobuffer+fastseek+genpts",
+		"-flags", "low_delay",
+		"-analyzeduration", "500000",
+		"-probesize", "500000",
 		"-rtsp_transport", "tcp",
 		"-i", sourceURL,
 		"-filter_complex", filterGraph,
@@ -124,6 +127,7 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 			"-pix_fmt", defaultPixelFormat,
 			"-b:v", r.VideoBitrate,
 			"-preset", preset,
+			"-tune", "zerolatency",
 			"-g", defaultGOPSize,
 			"-keyint_min", defaultKeyintMin,
 			"-sc_threshold", "0",

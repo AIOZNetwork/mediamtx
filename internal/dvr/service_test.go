@@ -480,3 +480,47 @@ func TestRenderPlaylistSlidingWindowSegmentCount(t *testing.T) {
 	}
 }
 
+func TestRenderPlaylistOmitProgramDateTimeWhenSeekingDisabled(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	initSeg := "stream1_init.mp4"
+	var segs []models.LiveHLSSegment
+	for i := 0; i < 10; i++ {
+		seq := int64(100 + i)
+		segs = append(segs, models.LiveHLSSegment{
+			StreamID:        "stream1/video/720",
+			SegmentName:     fmt.Sprintf("seg%02d.mp4", i),
+			StartedAt:       now.Add(time.Duration(i*2) * time.Second),
+			DurationMS:      2000,
+			MediaSequence:   &seq,
+			InitSegmentName: initSeg,
+			MuxSessionID:    "session1",
+		})
+	}
+	repo := &fakeRepo{segments: segs}
+
+	// 1. Sliding window (SegmentCount > 0 => seeking disabled) must NOT contain PROGRAM-DATE-TIME
+	svcSliding := &Service{
+		Repository:   repo,
+		SegmentCount: 5,
+	}
+	plSliding, ok, err := svcSliding.RenderPlaylist("stream1/video/720", now.Add(20*time.Second))
+	if err != nil || !ok {
+		t.Fatalf("unexpected error rendering sliding playlist: %v", err)
+	}
+	if strings.Contains(string(plSliding), "#EXT-X-PROGRAM-DATE-TIME") {
+		t.Fatalf("expected sliding window (seeking disabled) to omit #EXT-X-PROGRAM-DATE-TIME, got:\n%s", plSliding)
+	}
+
+	// 2. Full DVR (SegmentCount = 0 => seeking enabled) MUST contain PROGRAM-DATE-TIME
+	svcFullDVR := &Service{
+		Repository:   repo,
+		SegmentCount: 0,
+	}
+	plFullDVR, ok, err := svcFullDVR.RenderPlaylist("stream1/video/720", now.Add(20*time.Second))
+	if err != nil || !ok {
+		t.Fatalf("unexpected error rendering full DVR playlist: %v", err)
+	}
+	if !strings.Contains(string(plFullDVR), "#EXT-X-PROGRAM-DATE-TIME") {
+		t.Fatalf("expected full DVR (seeking enabled) to contain #EXT-X-PROGRAM-DATE-TIME, got:\n%s", plFullDVR)
+	}
+}

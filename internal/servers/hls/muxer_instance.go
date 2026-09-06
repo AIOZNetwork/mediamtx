@@ -137,6 +137,32 @@ func isHLSSegment(fileName string) bool {
 		strings.HasSuffix(fileName, ".mp")
 }
 
+func (mi *muxerInstance) primaryMediaPlaylist() string {
+	if mi.directory != "" {
+		muxerDir := filepath.Join(mi.directory, mi.pathName)
+		matches, _ := filepath.Glob(filepath.Join(muxerDir, "*_stream.m3u8"))
+		if len(matches) > 0 {
+			return filepath.Base(matches[0])
+		}
+	}
+	if mi.variant == conf.HLSVariant(gohlslib.MuxerVariantMPEGTS) {
+		return "main_stream.m3u8"
+	}
+	if strings.Contains(mi.pathName, "/audio/") {
+		return "audio1_stream.m3u8"
+	}
+	return "video1_stream.m3u8"
+}
+
+func (mi *muxerInstance) isMediaPlaylistReady() bool {
+	if mi.directory == "" {
+		return true
+	}
+	muxerDir := filepath.Join(mi.directory, mi.pathName)
+	matches, _ := filepath.Glob(filepath.Join(muxerDir, "*_stream.m3u8"))
+	return len(matches) > 0
+}
+
 func (mi *muxerInstance) handleRequest(ctx *gin.Context) {
 	fileName := path.Base(ctx.Request.URL.Path)
 
