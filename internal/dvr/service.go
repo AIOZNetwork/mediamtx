@@ -121,10 +121,6 @@ func isInitSegment(name string) bool {
 	return strings.Contains(lower, mediaTypeInitKeyword)
 }
 
-func (s *Service) shouldWriteProgramDateTime() bool {
-	return s != nil && s.SegmentCount == 0
-}
-
 func (s *Service) RenderPlaylist(streamID string, now time.Time) ([]byte, bool, error) {
 	if s == nil || s.Repository == nil {
 		return nil, false, nil
@@ -176,7 +172,7 @@ func (s *Service) RenderPlaylist(streamID string, now time.Time) ([]byte, bool, 
 	b.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", mediaSeq))
 
 	for _, seg := range mediaSegments {
-		if s.shouldWriteProgramDateTime() && !seg.StartedAt.IsZero() {
+		if !seg.StartedAt.IsZero() {
 			b.WriteString("#EXT-X-PROGRAM-DATE-TIME:")
 			b.WriteString(seg.StartedAt.UTC().Format(time.RFC3339Nano))
 			b.WriteByte('\n')
@@ -250,7 +246,7 @@ func (s *Service) renderFMP4Playlist(streamID string, now time.Time) ([]byte, bo
 		if seg.MuxSessionID != "" {
 			lastMuxSession = seg.MuxSessionID
 		}
-		if s.shouldWriteProgramDateTime() && !seg.StartedAt.IsZero() {
+		if !seg.StartedAt.IsZero() {
 			b.WriteString("#EXT-X-PROGRAM-DATE-TIME:")
 			b.WriteString(seg.StartedAt.UTC().Format(time.RFC3339Nano))
 			b.WriteByte('\n')
