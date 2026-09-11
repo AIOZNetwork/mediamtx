@@ -56,6 +56,9 @@ type HLSS3Uploader struct {
 	done     chan struct{}
 	wg       sync.WaitGroup
 
+	muClose  sync.RWMutex
+	isClosed bool
+
 	processingFiles sync.Map
 	uploadedFiles   sync.Map
 }
@@ -132,22 +135,45 @@ func (u *HLSS3Uploader) Initialize() error {
 
 // Close stops the HLSS3Uploader and waits for goroutines to exit.
 func (u *HLSS3Uploader) Close() {
-	if u.ctxCancel != nil {
-		u.ctxCancel()
+	u.FlushAndClose()
+}
+
+// FlushAndClose flushes all remaining segment/playlist files from the local directory,
+// finishes any pending uploads, and then cleanly closes all workers and providers.
+func (u *HLSS3Uploader) FlushAndClose() {
+	u.muClose.Lock()
+	if u.isClosed {
+		u.muClose.Unlock()
+		return
 	}
+	u.isClosed = true
+	u.muClose.Unlock()
+
+	// 1. Stop watching for new filesystem events
 	if u.watcher != nil {
 		u.watcher.Close()
 	}
+
+	// 2. Wait for watchLoop to exit
 	if u.done != nil {
-		// Wait for watchLoop to exit, with a timeout
 		select {
 		case <-u.done:
-		case <-time.After(5 * time.Second):
-			u.Parent.Log(logger.Warn, "[HLS Uploader Close] watchLoop did not exit in time")
+		case <-time.After(3 * time.Second):
+			if u.Parent != nil {
+				u.Parent.Log(logger.Warn, "[HLS Uploader Close] watchLoop did not exit in time")
+			}
 		}
 	}
 
-	// Wait for workers to finish, with a timeout
+	// 3. Scan directory one last time to capture the final segment and updated playlist (with #EXT-X-ENDLIST)
+	u.scanDirectory(u.Config.Directory)
+
+	// 4. Safely close task channel so workers know when all work is drained
+	u.muClose.Lock()
+	close(u.taskChan)
+	u.muClose.Unlock()
+
+	// 5. Wait for upload workers to finish all remaining queued uploads
 	waitDone := make(chan struct{})
 	go func() {
 		u.wg.Wait()
@@ -155,14 +181,21 @@ func (u *HLSS3Uploader) Close() {
 	}()
 	select {
 	case <-waitDone:
-	case <-time.After(5 * time.Second):
-		u.Parent.Log(logger.Warn, "[HLS Uploader Close] workers did not exit in time")
+	case <-time.After(15 * time.Second):
+		if u.Parent != nil {
+			u.Parent.Log(logger.Warn, "[HLS Uploader Close] workers did not exit in time")
+		}
+		if u.ctxCancel != nil {
+			u.ctxCancel()
+		}
 	}
 
-	// Note: We intentionally do NOT delete S3 segments on Close().
-	// Previous versions called provider.DeleteFolder() here, which destroyed
-	// DVR/playback history whenever a muxer restarted, hit idle timeout, or
-	// errored. S3 lifecycle policies should handle cleanup instead.
+	// 6. Cancel context to release any lingering resources
+	if u.ctxCancel != nil {
+		u.ctxCancel()
+	}
+
+	// 7. Close storage provider
 	if u.provider != nil {
 		u.provider.Close()
 	}
@@ -258,11 +291,23 @@ func (u *HLSS3Uploader) scanDirectory(dir string) {
 
 // sendToTaskChan sends filePath to the upload worker queue without blocking.
 func (u *HLSS3Uploader) sendToTaskChan(filePath string) {
+	u.muClose.RLock()
+	if u.isClosed {
+		u.muClose.RUnlock()
+		return
+	}
 	select {
 	case u.taskChan <- filePath:
+		u.muClose.RUnlock()
 	default:
+		u.muClose.RUnlock()
 		// Queue full — retry in a background goroutine.
 		go func(p string) {
+			u.muClose.RLock()
+			defer u.muClose.RUnlock()
+			if u.isClosed {
+				return
+			}
 			select {
 			case u.taskChan <- p:
 			case <-u.ctx.Done():
@@ -698,27 +743,37 @@ func secondsToMS(raw string) int64 {
 }
 
 // waitStable polls the file until its size stops changing, ensuring it is fully written.
+// A bounded timeout of 5s guarantees workers will not deadlock on stalled or empty files.
 func (u *HLSS3Uploader) waitStable(filePath string) bool {
 	var lastSize int64 = -1
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(5 * time.Second)
+
 	for {
-		info, err := os.Stat(filePath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return false
-			}
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		if info.Size() == lastSize && lastSize > 0 {
-			return true
-		}
-		lastSize = info.Size()
-
 		select {
-		case <-time.After(200 * time.Millisecond):
 		case <-u.ctx.Done():
 			return false
+		case <-timeout:
+			// Ensure worker never deadlocks on 0-byte or stalled files
+			info, err := os.Stat(filePath)
+			if err == nil && info.Size() > 0 {
+				return true
+			}
+			return false
+		case <-ticker.C:
+			info, err := os.Stat(filePath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return false
+				}
+				continue
+			}
+
+			if info.Size() == lastSize && lastSize > 0 {
+				return true
+			}
+			lastSize = info.Size()
 		}
 	}
 }

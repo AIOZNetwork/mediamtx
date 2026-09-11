@@ -172,7 +172,7 @@ func (s *Service) RenderPlaylist(streamID string, now time.Time) ([]byte, bool, 
 	b.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", mediaSeq))
 
 	for _, seg := range mediaSegments {
-		if !seg.StartedAt.IsZero() {
+		if s.SegmentCount == 0 && !seg.StartedAt.IsZero() {
 			b.WriteString("#EXT-X-PROGRAM-DATE-TIME:")
 			b.WriteString(seg.StartedAt.UTC().Format(time.RFC3339Nano))
 			b.WriteByte('\n')
@@ -246,7 +246,7 @@ func (s *Service) renderFMP4Playlist(streamID string, now time.Time) ([]byte, bo
 		if seg.MuxSessionID != "" {
 			lastMuxSession = seg.MuxSessionID
 		}
-		if !seg.StartedAt.IsZero() {
+		if s.SegmentCount == 0 && !seg.StartedAt.IsZero() {
 			b.WriteString("#EXT-X-PROGRAM-DATE-TIME:")
 			b.WriteString(seg.StartedAt.UTC().Format(time.RFC3339Nano))
 			b.WriteByte('\n')
@@ -313,10 +313,13 @@ func (s *Service) ServeMedia(w http.ResponseWriter, r *http.Request, streamID, s
 	}
 
 	if storageKey != "" && s.provider != nil {
-		// If segment has StorageETag (file UUID), ensure provider mapping is primed
+		// If segment has StorageETag (file UUID or CDN format), ensure provider mapping is primed
 		if segment != nil && segment.StorageETag != "" {
 			if depinProv, ok := s.provider.(*hlss3uploader.DePINStorageProvider); ok {
 				depinProv.RegisterKeyUUID(storageKey, segment.StorageETag)
+			}
+			if cdnProv, ok := s.provider.(*hlss3uploader.CDNStorageProvider); ok {
+				cdnProv.RegisterKeyETag(storageKey, segment.StorageETag)
 			}
 		}
 

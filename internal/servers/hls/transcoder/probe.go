@@ -8,6 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bluenviron/gortsplib/v4/pkg/description"
+	"github.com/bluenviron/gortsplib/v4/pkg/format"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 )
 
 // SourceInfo contains probed source stream information.
@@ -103,4 +108,74 @@ func parseFrameRate(rateStr string) float64 {
 		return 0
 	}
 	return num / den
+}
+
+// ExtractSourceInfo extracts stream metadata directly from description.Session in memory.
+// This avoids out-of-process ffprobe network calls and eliminates concurrency deadlocks.
+func ExtractSourceInfo(desc *description.Session) *SourceInfo {
+	if desc == nil {
+		return nil
+	}
+
+	info := &SourceInfo{}
+	for _, media := range desc.Medias {
+		for _, forma := range media.Formats {
+			switch f := forma.(type) {
+			case *format.H264:
+				info.VideoCodec = "h264"
+				sps, _ := f.SafeParams()
+				if sps != nil {
+					var spsp h264.SPS
+					if err := spsp.Unmarshal(sps); err == nil {
+						info.Width = spsp.Width()
+						info.Height = spsp.Height()
+						info.FPS = spsp.FPS()
+						if spsp.ProfileIdc != 0 {
+							info.Profile = h264ProfileString(spsp.ProfileIdc)
+						}
+						if spsp.LevelIdc != 0 {
+							major := spsp.LevelIdc / 10
+							minor := spsp.LevelIdc % 10
+							info.Level = fmt.Sprintf("%d.%d", major, minor)
+						}
+					}
+				}
+			case *format.H265:
+				info.VideoCodec = "hevc"
+				_, sps, _ := f.SafeParams()
+				if sps != nil {
+					var spsp h265.SPS
+					if err := spsp.Unmarshal(sps); err == nil {
+						info.Width = spsp.Width()
+						info.Height = spsp.Height()
+						info.FPS = spsp.FPS()
+					}
+				}
+			case *format.MPEG4Audio:
+				info.AudioCodec = "aac"
+			case *format.Opus:
+				info.AudioCodec = "opus"
+			}
+		}
+	}
+
+	if info.VideoCodec == "" && info.AudioCodec == "" && info.Width == 0 {
+		return nil
+	}
+	return info
+}
+
+func h264ProfileString(profileIdc uint8) string {
+	switch profileIdc {
+	case 66:
+		return "Baseline"
+	case 77:
+		return "Main"
+	case 100:
+		return "High"
+	case 110:
+		return "High 10"
+	default:
+		return ""
+	}
 }

@@ -745,18 +745,12 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 	if shouldStartHLSTranscoder(pa.name, pa.conf) {
 		pa.Log(logger.Info, "starting transcoder for path %s with rtspAddress=%s", pa.name, pa.rtspAddress)
 
-		rtspPort := "8554"
-		_, port, err := net.SplitHostPort(pa.rtspAddress)
-		if err == nil && port != "" {
-			rtspPort = port
-		}
-		sourceURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s", rtspPort, pa.name)
-		sourceInfo, probeErr := transcoder.ProbeSource(sourceURL)
-		if probeErr != nil {
-			pa.Log(logger.Warn, "source probe failed, using all renditions: %v", probeErr)
-		} else {
-			pa.Log(logger.Info, "source probed: %dx%d, fps=%.2f, video=%s, audio=%s",
+		sourceInfo := transcoder.ExtractSourceInfo(desc)
+		if sourceInfo != nil {
+			pa.Log(logger.Info, "source detected from description: %dx%d, fps=%.2f, video=%s, audio=%s",
 				sourceInfo.Width, sourceInfo.Height, sourceInfo.FPS, sourceInfo.VideoCodec, sourceInfo.AudioCodec)
+		} else {
+			pa.Log(logger.Info, "source info not fully in description, proceeding with configured renditions")
 		}
 
 		effectiveConf := effectiveHLSTranscoderConf(pa.conf, sourceInfo)

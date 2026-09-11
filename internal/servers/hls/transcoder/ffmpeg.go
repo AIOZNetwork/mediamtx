@@ -8,9 +8,30 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
+)
+
+const (
+	defaultVideoCodec      = "libx264"
+	defaultAudioCodec      = "aac"
+	defaultPreset          = "veryfast"
+	defaultRTSPPort        = "8554"
+	defaultFPS             = "30"
+	defaultPixelFormat     = "yuv420p"
+	defaultGOPSize         = "60"
+	defaultKeyintMin       = "60"
+	defaultAudioBitrate    = "128k"
+	defaultAudioSampleRate = "48000"
+	defaultAudioChannels   = "2"
+	audioResampleFilter    = "aresample=async=1:first_pts=0"
+	x264ClosedGOPParams    = "scenecut=0:open_gop=0:rc-lookahead=0"
+	sharedAudioPathSuffix  = "audio/main"
+	videoPathPrefix        = "video"
 )
 
 type FFmpegTranscoder struct {
@@ -22,6 +43,10 @@ type FFmpegTranscoder struct {
 
 	ctx       context.Context
 	ctxCancel context.CancelFunc
+
+	cmd      *exec.Cmd
+	cmdMutex sync.Mutex
+	done     chan struct{}
 }
 
 func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtspAddress string) *FFmpegTranscoder {
@@ -45,6 +70,7 @@ func (t *FFmpegTranscoder) Start() error {
 	args := t.BuildArgs()
 
 	cmd := exec.CommandContext(t.ctx, "ffmpeg", args...)
+	cmd.SysProcAttr = processGroupSysProcAttr()
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -55,14 +81,19 @@ func (t *FFmpegTranscoder) Start() error {
 		return err
 	}
 
+	t.cmdMutex.Lock()
+	t.cmd = cmd
+	t.done = make(chan struct{})
+	t.cmdMutex.Unlock()
+
 	go func() {
+		defer close(t.done)
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			t.Log(logger.Warn, "FFmpeg: %s", scanner.Text())
 		}
-	}()
 
-	go func() {
+		// Wait only after scanner finishes reading all stderr output (EOF)
 		err := cmd.Wait()
 		if err != nil && t.ctx.Err() == nil {
 			t.Log(logger.Error, "FFmpeg transcoder exited with error: %v", err)
@@ -73,24 +104,6 @@ func (t *FFmpegTranscoder) Start() error {
 
 	return nil
 }
-
-const (
-	defaultVideoCodec      = "libx264"
-	defaultAudioCodec      = "aac"
-	defaultPreset          = "veryfast"
-	defaultRTSPPort        = "8554"
-	defaultFPS             = "30"
-	defaultPixelFormat     = "yuv420p"
-	defaultGOPSize         = "60"
-	defaultKeyintMin       = "60"
-	defaultAudioBitrate    = "128k"
-	defaultAudioSampleRate = "48000"
-	defaultAudioChannels   = "2"
-	audioResampleFilter    = "aresample=async=1:first_pts=0"
-	x264ClosedGOPParams    = "scenecut=0:open_gop=0:rc-lookahead=0"
-	sharedAudioPathSuffix  = "audio/main"
-	videoPathPrefix        = "video"
-)
 
 // BuildArgs builds FFmpeg arguments without starting the process.
 func (t *FFmpegTranscoder) BuildArgs() []string {
@@ -105,6 +118,7 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 	filterGraph := t.videoFilterGraph(renditions, fps)
 
 	args := []string{
+		"-nostdin",
 		"-hide_banner",
 		"-loglevel", "warning",
 		"-fflags", "nobuffer+fastseek+genpts",
@@ -193,6 +207,33 @@ func defaultString(v string, def string) string {
 
 func (t *FFmpegTranscoder) Stop() {
 	t.ctxCancel()
+
+	t.cmdMutex.Lock()
+	cmd := t.cmd
+	done := t.done
+	t.cmdMutex.Unlock()
+
+	if cmd != nil && cmd.Process != nil && done != nil {
+		killProcessGroup(cmd.Process.Pid)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			forceKillProcessGroup(cmd.Process.Pid)
+			<-done
+		}
+	}
+}
+
+func processGroupSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setpgid: true}
+}
+
+func killProcessGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGINT)
+}
+
+func forceKillProcessGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 // FilterRenditions removes renditions whose resolution exceeds the source.

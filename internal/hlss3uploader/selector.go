@@ -14,6 +14,7 @@ type ProviderType string
 const (
 	ProviderS3    ProviderType = "s3"
 	ProviderDePIN ProviderType = "depin"
+	ProviderCDN   ProviderType = "cdn"
 )
 
 // StorageConfig contains settings to configure storage providers.
@@ -36,6 +37,11 @@ type StorageConfig struct {
 	DePINCoordPeerURL string `json:"depin_coord_peer_url" yaml:"depin_coord_peer_url"`
 	DePINPieceKeyPath string `json:"depin_piece_key_path" yaml:"depin_piece_key_path"`
 	DePINLinkEndpoint string `json:"depin_link_endpoint" yaml:"depin_link_endpoint"`
+
+	// CDN storage settings
+	CDNEndpoint        string `json:"cdn_endpoint" yaml:"cdn_endpoint"`
+	CDNHubURL          string `json:"cdn_hub_url" yaml:"cdn_hub_url"`
+	CDNBusinessAddress string `json:"cdn_business_address" yaml:"cdn_business_address"`
 }
 
 // ProviderFactory is a function signature for constructing a StorageProvider instance.

@@ -2,6 +2,8 @@ package dvr
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/models"
 )
 
@@ -524,3 +527,78 @@ func TestRenderPlaylistOmitProgramDateTimeWhenSeekingDisabled(t *testing.T) {
 		t.Fatalf("expected full DVR (seeking enabled) to contain #EXT-X-PROGRAM-DATE-TIME, got:\n%s", plFullDVR)
 	}
 }
+
+func TestServeMediaRedirectsWithCDNStorageProvider(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	fileID := "cdn-file-record-uuid-001"
+	offset := int64(100)
+	size := int64(1024)
+	etag := fmt.Sprintf("%s:%d:%d", fileID, offset, size)
+
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{
+		{
+			StreamID:    "stream-cdn",
+			SegmentName: "seg001.mp4",
+			StorageKey:  "live-hls/stream-cdn/seg001.mp4",
+			StorageETag: etag,
+			StartedAt:   now,
+		},
+	}}
+
+	expireAt := time.Now().Add(2 * time.Hour).UnixNano()
+	rawSig := []byte("cdn-token-signature")
+	stdSig := base64.StdEncoding.EncodeToString(rawSig)
+	urlSig := base64.RawURLEncoding.EncodeToString(rawSig)
+
+	cdnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/getFileRecord/") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ID":     fileID,
+				"status": 2,
+			})
+			return
+		}
+		if r.URL.Path == "/getTicket" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"version":        1,
+				"file_record_id": fileID,
+				"signature":      stdSig,
+				"expire_at_ns":   expireAt,
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer cdnServer.Close()
+
+	hubURL := "https://hub.aioz.network"
+	cdnProv, err := hlss3uploader.NewCDNStorageProvider(cdnServer.URL, hubURL, "")
+	if err != nil {
+		t.Fatalf("unexpected err creating cdn provider: %v", err)
+	}
+
+	svc := &Service{
+		Repository: repo,
+		provider:   cdnProv,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/media/stream-cdn/seg001.mp4", nil)
+	w := httptest.NewRecorder()
+
+	if !svc.ServeMedia(w, req, "stream-cdn", "seg001.mp4") {
+		t.Fatalf("expected ServeMedia to return true for redirect")
+	}
+
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("unexpected status %d, expected 302 StatusFound", res.StatusCode)
+	}
+
+	expectedLink := fmt.Sprintf("%s/file/%s?expire=%d&signature=%s&range=%d,%d",
+		hubURL, fileID, expireAt, urlSig, offset, size)
+	if got := res.Header.Get("Location"); got != expectedLink {
+		t.Fatalf("unexpected Location header %q, expected %q", got, expectedLink)
+	}
+}
+

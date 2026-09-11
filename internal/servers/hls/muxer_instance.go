@@ -100,18 +100,18 @@ func (mi *muxerInstance) Log(level logger.Level, format string, args ...interfac
 func (mi *muxerInstance) close() {
 	mi.stream.RemoveReader(mi)
 
-	// 1. Stop the uploader FIRST — flush pending uploads while local files still exist
-	if mi.hlsUploader != nil {
-		mi.hlsUploader.Close()
-		mi.hlsUploader = nil
-	}
-
-	// 2. Close the HLS muxer (gohlslib) — stops writing new segments
+	// 1. Close the HLS muxer (gohlslib) FIRST — flush last segment and #EXT-X-ENDLIST to disk
 	if mi.hmuxer != nil {
 		mi.hmuxer.Close()
 	}
 
-	// 3. Delete local directory last
+	// 2. Stop the uploader and flush all remaining files flushed by the muxer before cleanup
+	if mi.hlsUploader != nil {
+		mi.hlsUploader.FlushAndClose()
+		mi.hlsUploader = nil
+	}
+
+	// 3. Delete local directory last after all files are safely uploaded to storage
 	if mi.hmuxer != nil && mi.hmuxer.Directory != "" {
 		os.RemoveAll(mi.hmuxer.Directory)
 	}

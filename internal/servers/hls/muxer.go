@@ -32,7 +32,7 @@ func emptyTimer() *time.Timer {
 
 type responseWriterWithCounter struct {
 	http.ResponseWriter
-	bytesSent *uint64
+	bytesSent  *uint64
 	statusCode int
 }
 

@@ -289,7 +289,6 @@ type Conf struct {
 	HLSMuxerCloseAfter Duration   `json:"hlsMuxerCloseAfter"`
 	HLSDVREnabled      bool       `json:"hlsDvrEnabled"`
 
-
 	// Storage Provider
 	StorageProvider   string `json:"storageProvider"`
 	S3Endpoint        string `json:"s3Endpoint"`
@@ -304,6 +303,11 @@ type Conf struct {
 	DePINCoordPeerURL string `json:"depinCoordPeerUrl"`
 	DePINPieceKeyPath string `json:"depinPieceKeyPath"`
 	DePINLinkEndpoint string `json:"depinLinkEndpoint"`
+
+	// CDN storage settings (used when storageProvider == "cdn")
+	CDNEndpoint        string `json:"cdnEndpoint"`
+	CDNHubURL          string `json:"cdnHubUrl"`
+	CDNBusinessAddress string `json:"cdnBusinessAddress"`
 
 	// WebRTC server
 	WebRTC                      bool             `json:"webrtc"`

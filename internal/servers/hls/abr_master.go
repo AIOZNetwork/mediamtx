@@ -26,10 +26,10 @@ const (
 	codecLibopus = "libopus"
 
 	// HLS Codecs string standards (RFC 6381)
-	defaultAVCCodecString   = "avc1.640028"
-	defaultHEVCCodecString  = "hvc1.1.6.L120.B0"
-	defaultAACCodecString   = "mp4a.40.2"
-	defaultOpusCodecString  = "Opus"
+	defaultAVCCodecString    = "avc1.640028"
+	defaultHEVCCodecString   = "hvc1.1.6.L120.B0"
+	defaultAACCodecString    = "mp4a.40.2"
+	defaultOpusCodecString   = "Opus"
 	defaultMasterCodecString = defaultAVCCodecString + "," + defaultAACCodecString
 
 	// H.264 Profile and Level hex standards
