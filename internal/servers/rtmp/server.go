@@ -192,8 +192,8 @@ outer:
 				pathManager:         s.PathManager,
 				parent:              s,
 			}
-			c.initialize(&s.listStreamKeys)
 			s.conns[c] = struct{}{}
+			c.initialize(&s.listStreamKeys)
 
 		case c := <-s.chCloseConn:
 
