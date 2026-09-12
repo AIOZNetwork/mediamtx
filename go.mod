@@ -16,8 +16,8 @@ require (
 	github.com/bluenviron/mediacommon/v2 v2.9.4
 	github.com/datarhei/gosrt v0.11.1-0.20260812091715-a77b40bb4b76
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/gin-contrib/pprof v1.5.3
-	github.com/gin-gonic/gin v1.11.0
+	github.com/gin-contrib/pprof v1.5.4
+	github.com/gin-gonic/gin v1.12.0
 	github.com/go-git/go-billy/v5 v5.9.1
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/goccy/go-yaml v1.19.2
@@ -38,8 +38,8 @@ require (
 	github.com/pion/transport/v4 v4.1.0
 	github.com/pion/webrtc/v4 v4.2.19
 	github.com/pires/go-proxyproto v0.15.0
-	github.com/quic-go/quic-go v0.61.0
-	github.com/quic-go/webtransport-go v0.12.0
+	github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/webtransport-go v0.11.0
 	github.com/stretchr/testify v1.12.1
 	github.com/wlynxg/anet v0.0.5
 	golang.org/x/crypto v0.55.0

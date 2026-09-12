@@ -84,6 +84,7 @@ func TestConfFromFile(t *testing.T) {
 			RPICameraMJPEGQuality:      60,
 			RunOnDemandStartTimeout:    5 * Duration(time.Second),
 			RunOnDemandCloseAfter:      10 * Duration(time.Second),
+			HLSTranscodingRenditions:   []HLSTranscodingRendition{},
 		}, pa)
 	})
 
@@ -1079,6 +1080,10 @@ func TestAlwaysAvailableFileErrorMagicBytes(t *testing.T) {
 }
 
 func TestDefaultConfFile(t *testing.T) {
+	if _, err := os.Stat("../../mediamtx.yml"); err != nil {
+		t.Skip("default mediamtx.yml is intentionally absent in AIOZ branch")
+	}
+
 	func() {
 		conf1, confPath1, err := Load("../../mediamtx.yml", nil, nil)
 		require.NoError(t, err)

@@ -11,7 +11,7 @@ import (
 // ConnWebTransport is a connection built on top of WebTransport.
 type ConnWebTransport struct {
 	Session      *webtransport.Session
-	Transport    *webtransport.Transport
+	Dialer       *webtransport.Dialer
 	ResponseBody io.Closer
 }
 
@@ -23,8 +23,8 @@ func (c *ConnWebTransport) CloseWithError(code uint64, msg string) {
 		c.ResponseBody.Close() //nolint:errcheck
 	}
 
-	if c.Transport != nil {
-		c.Transport.Close() //nolint:errcheck
+	if c.Dialer != nil {
+		c.Dialer.Close() //nolint:errcheck
 	}
 }
 

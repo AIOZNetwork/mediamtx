@@ -283,7 +283,7 @@ func TestServerWebTransportSubscriptionControlStreamLifetime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	d := &webtransport.Transport{
+	d := &webtransport.Dialer{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		QUICConfig: &quic.Config{
 			EnableDatagrams:                  true,
@@ -606,7 +606,7 @@ func TestServerAuthError(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 
-				d := &webtransport.Transport{
+				d := &webtransport.Dialer{
 					TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 					QUICConfig: &quic.Config{
 						EnableDatagrams:                  true,
@@ -732,7 +732,7 @@ func TestServerErrorUnsupportedVersion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	d := &webtransport.Transport{
+	d := &webtransport.Dialer{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		QUICConfig: &quic.Config{
 			EnableDatagrams:                  true,

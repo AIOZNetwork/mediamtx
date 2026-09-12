@@ -53,6 +53,13 @@ func (pa *dummyPath) Name() string {
 	return "teststream"
 }
 
+func (pa *dummyPath) SetStreamKey(_ string) {
+}
+
+func (pa *dummyPath) GetStreamKey() string {
+	return ""
+}
+
 func (pa *dummyPath) SafeConf() *conf.Path {
 	return &conf.Path{}
 }

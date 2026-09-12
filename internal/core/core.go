@@ -358,11 +358,16 @@ func New(args []string) (*Core, bool) {
 	p.confPath = confPath
 	p.conf.Store(loadedConf)
 
-	database.MustConnectToDatabase(p.conf)
-	database.MustConnectToRedis(p.conf)
-	database.MustInitLiveStreamMulticastDatabase()
-	database.MustInitLiveStreamStatisticsDatabase()
-	database.MustInitLiveHLSSegmentDatabase()
+	if loadedConf.PostgresHost != "" && loadedConf.PostgresPort != "" {
+		database.MustConnectToDatabase(loadedConf)
+		database.MustInitLiveStreamMulticastDatabase()
+		database.MustInitLiveStreamStatisticsDatabase()
+		database.MustInitLiveHLSSegmentDatabase()
+	}
+
+	if loadedConf.RedisHost != "" && loadedConf.RedisPort != "" {
+		database.MustConnectToRedis(loadedConf)
+	}
 
 	err = p.createResources(true)
 	if err != nil {
@@ -375,13 +380,15 @@ func New(args []string) (*Core, bool) {
 		return nil, false
 	}
 
-	_, err = grpc_service.NewW3streamClient(conf.GrpcAddress)
-	if err != nil {
-		p.Log(logger.Warn, "failed to initialize gRPC client: %v", err)
-		return nil, false
-	}
+	if conf.GrpcAddress != "" {
+		_, err = grpc_service.NewW3streamClient(conf.GrpcAddress)
+		if err != nil {
+			p.Log(logger.Warn, "failed to initialize gRPC client: %v", err)
+			return nil, false
+		}
 
-	p.Log(logger.Info, "gRPC client initialized successfully at %s", conf.GrpcAddress)
+		p.Log(logger.Info, "gRPC client initialized successfully at %s", conf.GrpcAddress)
+	}
 
 	go p.run()
 
@@ -877,10 +884,11 @@ func (p *Core) createResources(initial bool) error {
 		p.hlsServer == nil {
 		i := &hls.Server{
 			Address:         currentConf.HLSAddress,
+			DumpPackets:     currentConf.DumpPackets,
 			Encryption:      currentConf.HLSEncryption,
 			ServerKey:       currentConf.HLSServerKey,
 			ServerCert:      currentConf.HLSServerCert,
-			AllowOrigin:     currentConf.HLSAllowOrigin,
+			AllowOrigins:    currentConf.HLSAllowOrigins,
 			TrustedProxies:  currentConf.HLSTrustedProxies,
 			AlwaysRemux:     currentConf.HLSAlwaysRemux,
 			Variant:         currentConf.HLSVariant,
@@ -911,22 +919,6 @@ func (p *Core) createResources(initial bool) error {
 					Workers:                4,
 				},
 			},
-			ReadTimeout:     currentConf.ReadTimeout,
-			MuxerCloseAfter: currentConf.HLSMuxerCloseAfter,
-			Address:         currentConf.HLSAddress,
-			DumpPackets:     currentConf.DumpPackets,
-			Encryption:      currentConf.HLSEncryption,
-			ServerKey:       currentConf.HLSServerKey,
-			ServerCert:      currentConf.HLSServerCert,
-			AllowOrigins:    currentConf.HLSAllowOrigins,
-			TrustedProxies:  currentConf.HLSTrustedProxies,
-			AlwaysRemux:     currentConf.HLSAlwaysRemux,
-			Variant:         currentConf.HLSVariant,
-			SegmentCount:    currentConf.HLSSegmentCount,
-			SegmentDuration: currentConf.HLSSegmentDuration,
-			PartDuration:    currentConf.HLSPartDuration,
-			SegmentMaxSize:  currentConf.HLSSegmentMaxSize,
-			Directory:       currentConf.HLSDirectory,
 			CDNSecret:       currentConf.HLSCDNSecret,
 			ReadTimeout:     currentConf.ReadTimeout,
 			WriteTimeout:    currentConf.WriteTimeout,

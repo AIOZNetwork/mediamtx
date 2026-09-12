@@ -200,7 +200,7 @@ func dialWebTransport(
 		}
 	}
 
-	transport := &webtransport.Transport{
+	dialer := &webtransport.Dialer{
 		TLSClientConfig: cfg,
 		QUICConfig: &quic.Config{
 			EnableDatagrams:                  true,
@@ -209,9 +209,9 @@ func dialWebTransport(
 		ApplicationProtocols: protocols,
 	}
 
-	res, session, err := transport.Dial(ctx, httpsURL.String(), nil)
+	res, session, err := dialer.Dial(ctx, httpsURL.String(), nil)
 	if err != nil {
-		transport.Close() //nolint:errcheck
+		dialer.Close() //nolint:errcheck
 		return nil, "", err
 	}
 
@@ -219,13 +219,13 @@ func dialWebTransport(
 	if version == "" {
 		res.Body.Close()              //nolint:errcheck
 		session.CloseWithError(0, "") //nolint:errcheck
-		transport.Close()             //nolint:errcheck
+		dialer.Close()                //nolint:errcheck
 		return nil, "", fmt.Errorf("missing negotiated MoQ version")
 	}
 
 	return &ConnWebTransport{
 		Session:      session,
-		Transport:    transport,
+		Dialer:       dialer,
 		ResponseBody: res.Body,
 	}, version, nil
 }
