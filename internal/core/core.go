@@ -717,6 +717,7 @@ func (p *Core) createResources(initial bool) error {
 			logLevel:          currentConf.LogLevel,
 			dumpPackets:       currentConf.DumpPackets,
 			rtspAddress:       currentConf.RTSPAddress,
+			rtmpAddress:       currentConf.RTMPAddress,
 			readTimeout:       currentConf.ReadTimeout,
 			writeTimeout:      currentConf.WriteTimeout,
 			writeQueueSize:    currentConf.WriteQueueSize,
@@ -1152,12 +1153,12 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 		newConf.LogLevel != currentConf.LogLevel ||
 		newConf.DumpPackets != currentConf.DumpPackets ||
 		newConf.RTSPAddress != currentConf.RTSPAddress ||
+		newConf.RTMPAddress != currentConf.RTMPAddress ||
 		newConf.ReadTimeout != currentConf.ReadTimeout ||
 		newConf.WriteTimeout != currentConf.WriteTimeout ||
 		newConf.WriteQueueSize != currentConf.WriteQueueSize ||
 		newConf.UDPReadBufferSize != currentConf.UDPReadBufferSize ||
 		newConf.UDPMaxPayloadSize != currentConf.UDPMaxPayloadSize ||
-		newConf.RTSPEncryption != currentConf.RTSPEncryption ||
 		closeMetrics ||
 		closeAuthManager ||
 		closeLogger

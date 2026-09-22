@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -128,13 +129,82 @@ func (s *httpServer) writeErrorNoLog(ctx *gin.Context, status int, err error) {
 	})
 }
 
+func (s *httpServer) findPathConf(ctx *gin.Context, dir string) (pathConf *conf.Path, abrChild bool, err error) {
+	defer func() {
+		if recover() != nil {
+			pathConf = nil
+			abrChild = false
+			err = nil
+		}
+	}()
+
+	pathConfName := dir
+	if isABRChildPlaylistPath(dir) {
+		pathConfName = abrBasePath(dir)
+		abrChild = true
+	}
+
+	req := defs.PathFindPathConfReq{
+		Author: &logger.InlineWriter{
+			Parent: s,
+			Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
+		},
+		AccessRequest: defs.PathAccessRequest{
+			Name:                 pathConfName,
+			Query:                ctx.Request.URL.RawQuery,
+			UserAgent:            ctx.Request.UserAgent(),
+			Publish:              false,
+			Proto:                auth.ProtocolHLS,
+			Credentials:          httpp.Credentials(ctx.Request),
+			IP:                   net.ParseIP(ctx.ClientIP()),
+			EnableAskCredentials: true,
+		},
+	}
+
+	res, err := s.pathManager.FindPathConf(req)
+	if err != nil && !abrChild && strings.Contains(dir, "/") {
+		basePath := abrBasePath(dir)
+		req.AccessRequest.Name = basePath
+		candidateRes, candidateErr := s.pathManager.FindPathConf(req)
+		if candidateErr == nil && isConfiguredABRChildPath(dir, candidateRes.Conf) {
+			return candidateRes.Conf, true, nil
+		}
+	}
+	if err != nil {
+		return nil, false, err
+	}
+
+	return res.Conf, abrChild, nil
+}
+
+func (s *httpServer) handleAuthError(ctx *gin.Context, err error) bool {
+	if terr, ok := errors.AsType[*auth.Error](err); ok {
+		if terr.AskCredentials {
+			ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
+		}
+		s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+		return true
+	}
+	return false
+}
+
+func writeABRWarmupPlaylist(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+	ctx.Writer.WriteHeader(http.StatusOK)
+	ctx.Writer.Write([]byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"))
+}
+
 func (s *httpServer) onRequest(ctx *gin.Context) {
 	if ctx.Request.Method != http.MethodGet {
 		return
 	}
 
-	// remove leading prefix
 	pa := ctx.Request.URL.Path[1:]
+	if strings.HasPrefix(pa, "media/") {
+		s.onMediaRequest(ctx, strings.TrimPrefix(pa, "media/"))
+		return
+	}
 
 	var dir string
 	var fname string
@@ -198,33 +268,11 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	switch contentTyp {
 	case index:
-		_, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
-			Author: &logger.InlineWriter{
-				Parent: s,
-				Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
-			},
-			AccessRequest: defs.PathAccessRequest{
-				Name:                 dir,
-				Query:                ctx.Request.URL.RawQuery,
-				Publish:              false,
-				Proto:                auth.ProtocolHLS,
-				Credentials:          httpp.Credentials(ctx.Request),
-				IP:                   net.ParseIP(ctx.ClientIP()),
-				EnableAskCredentials: true,
-			},
-		})
+		_, _, err := s.findPathConf(ctx, dir)
 		if err != nil {
-			if terr, ok := errors.AsType[*auth.Error](err); ok {
-				if terr.AskCredentials {
-					ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
-					s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
-					return
-				}
-
-				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+			if s.handleAuthError(ctx, err) {
 				return
 			}
-
 			s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 			return
 		}
@@ -235,6 +283,38 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		ctx.Writer.Write(hlsIndex)
 
 	case multivariantPlaylist:
+		pathConf, abrChild, err := s.findPathConf(ctx, dir)
+		if err != nil {
+			pathConf = nil
+			abrChild = isABRChildPlaylistPath(dir)
+		}
+
+		if shouldRenderABRMaster(dir, pathConf) {
+			ctx.Header("Cache-Control", "no-cache")
+			ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+			ctx.Writer.WriteHeader(http.StatusOK)
+			ctx.Writer.Write(renderABRMasterPlaylist(
+				pathConf.HLSTranscodingRenditions,
+				codecStringForTranscodedOutput(pathConf, nil)))
+			return
+		}
+
+		if s.parent.DVREnabled && s.parent.DVRService != nil {
+			playlist, ok, err := s.parent.DVRService.RenderPlaylist(dir, time.Now())
+			if err != nil {
+				s.Log(logger.Warn, "DVR playlist error for %s: %v", dir, err)
+				ctx.Writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if ok {
+				ctx.Header("Cache-Control", "no-cache")
+				ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+				ctx.Writer.WriteHeader(http.StatusOK)
+				ctx.Writer.Write(playlist)
+				return
+			}
+		}
+
 		if isCDN {
 			if existingMuxer, err := s.parent.getMuxer(serverGetMuxerReq{path: dir, create: false}); err == nil {
 				if sx := existingMuxer.getCDNSession(); sx != nil {
@@ -286,10 +366,20 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			return
 		}
 
+		if abrChild {
+			muxer, err := s.parent.getMuxer(serverGetMuxerReq{path: dir, create: false})
+			if err != nil {
+				writeABRWarmupPlaylist(ctx)
+				return
+			}
+			ctx.Request.URL.Path = fname
+			if err := muxer.handleRequest(ctx, false); err != nil {
+				writeABRWarmupPlaylist(ctx)
+			}
+			return
+		}
+
 		if ctx.Request.URL.Query().Get("cookieCheck") != "1" {
-			// Use exclusively partitioned cookies, which are not shared between different pages/domains.
-			// Unfortunately they are available on HTTPS only. In case of HTTP, fall back to query parameters,
-			// which are still not shared between different pages/domains but are visible in the URL.
 			http.SetCookie(ctx.Writer, &http.Cookie{
 				Name:        "cookieCheck",
 				Value:       "1",
@@ -319,16 +409,9 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			pathManager:     s.pathManager,
 			server:          s.parent,
 		}
-		err := sx.initialize(ctx)
+		err = sx.initialize(ctx)
 		if err != nil {
-			if terr, ok := errors.AsType[*auth.Error](err); ok {
-				if terr.AskCredentials {
-					ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
-					s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
-					return
-				}
-
-				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+			if s.handleAuthError(ctx, err) {
 				return
 			}
 
@@ -342,9 +425,6 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		}
 
 		if cookie, err2 := ctx.Request.Cookie("cookieCheck"); err2 == nil && cookie.Value == "1" {
-			// Use exclusively partitioned cookies for safety reasons.
-			// Unfortunately they are available on HTTPS only. In case of HTTP, fall back to query parameters,
-			// which are still not shared between different pages/domains but are visible in the URL.
 			http.SetCookie(ctx.Writer, &http.Cookie{
 				Name:        sessionCookieName,
 				Value:       sx.secret.String(),
@@ -409,5 +489,33 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 			return
 		}
+	}
+}
+
+func (s *httpServer) onMediaRequest(ctx *gin.Context, mediaPath string) {
+	idx := strings.LastIndex(mediaPath, "/")
+	if idx <= 0 || idx == len(mediaPath)-1 {
+		ctx.Writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+	streamID, err := url.PathUnescape(mediaPath[:idx])
+	if err != nil {
+		ctx.Writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	segmentName, err := url.PathUnescape(mediaPath[idx+1:])
+	if err != nil {
+		ctx.Writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	_, _, err = s.findPathConf(ctx, streamID)
+	if err != nil {
+		ctx.Writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if !s.parent.DVREnabled || s.parent.DVRService == nil || !s.parent.DVRService.ServeMedia(ctx.Writer, ctx.Request, streamID, segmentName) {
+		ctx.Writer.WriteHeader(http.StatusNotFound)
 	}
 }
