@@ -24,7 +24,7 @@ func (s *streamID) unmarshal(raw string) error {
 	// standard syntax
 	// https://github.com/Haivision/srt/blob/master/docs/features/access-control.md
 	if strings.HasPrefix(raw, "#!::") {
-		for kv := range strings.SplitSeq(raw[len("#!::"):], ",") {
+		for _, kv := range strings.Split(raw[len("#!::"):], ",") {
 			kv2 := strings.SplitN(kv, "=", 2)
 			if len(kv2) != 2 {
 				return fmt.Errorf("invalid value")
@@ -66,8 +66,6 @@ func (s *streamID) unmarshal(raw string) error {
 				"where action is either read or publish, pathname is the path name, user and pass are the credentials, " +
 				"query is an optional token containing additional information")
 		}
-
-		parts[len(parts)-1] = strings.TrimSuffix(parts[len(parts)-1], "#feedbackplay")
 
 		switch parts[0] {
 		case "read":

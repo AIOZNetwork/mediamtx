@@ -1,14 +1,16 @@
 package recorder
 
 import (
-	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4/seekablebuffer"
 
-	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/recordstore"
 )
 
 func writePart(
@@ -39,13 +41,11 @@ func writePart(
 }
 
 type formatFMP4Part struct {
-	maxPartSize     conf.StringSize
-	segmentStartDTS time.Duration
-	number          uint32
-	startDTS        time.Duration
+	s              *formatFMP4Segment
+	sequenceNumber uint32
+	startDTS       time.Duration
 
 	partTracks map[*formatFMP4Track]*fmp4.PartTrack
-	size       uint64
 	endDTS     time.Duration
 }
 
@@ -53,33 +53,48 @@ func (p *formatFMP4Part) initialize() {
 	p.partTracks = make(map[*formatFMP4Track]*fmp4.PartTrack)
 }
 
-func (p *formatFMP4Part) close(w io.Writer) error {
-	return writePart(w, p.number, p.partTracks)
+func (p *formatFMP4Part) close() error {
+	if p.s.fi == nil {
+		p.s.path = recordstore.Path{Start: p.s.startNTP}.Encode(p.s.f.ri.pathFormat)
+		p.s.f.ri.Log(logger.Debug, "creating segment %s", p.s.path)
+
+		err := os.MkdirAll(filepath.Dir(p.s.path), 0o755)
+		if err != nil {
+			return err
+		}
+
+		fi, err := os.Create(p.s.path)
+		if err != nil {
+			return err
+		}
+
+		p.s.f.ri.rec.OnSegmentCreate(p.s.path)
+
+		err = writeInit(fi, p.s.f.tracks)
+		if err != nil {
+			fi.Close()
+			return err
+		}
+
+		p.s.fi = fi
+	}
+
+	return writePart(p.s.fi, p.sequenceNumber, p.partTracks)
 }
 
-func (p *formatFMP4Part) write(track *formatFMP4Track, sample *formatFMP4Sample, dts time.Duration) error {
-	size := uint64(len(sample.Payload))
-	if (p.size + size) > uint64(p.maxPartSize) {
-		return fmt.Errorf("reached maximum part size")
-	}
-	p.size += size
-
+func (p *formatFMP4Part) write(track *formatFMP4Track, sample *sample, dtsDuration time.Duration) error {
 	partTrack, ok := p.partTracks[track]
 	if !ok {
 		partTrack = &fmp4.PartTrack{
 			ID: track.initTrack.ID,
-			BaseTime: uint64(multiplyAndDivide(int64(dts-p.segmentStartDTS),
+			BaseTime: uint64(multiplyAndDivide(int64(dtsDuration-p.s.startDTS),
 				int64(track.initTrack.TimeScale), int64(time.Second))),
 		}
 		p.partTracks[track] = partTrack
 	}
 
-	partTrack.Samples = append(partTrack.Samples, sample.Sample)
-
-	endDTS := dts + timestampToDuration(int64(sample.Duration), int(track.initTrack.TimeScale))
-	if endDTS > p.endDTS {
-		p.endDTS = endDTS
-	}
+	partTrack.Samples = append(partTrack.Samples, sample.PartSample)
+	p.endDTS = dtsDuration
 
 	return nil
 }

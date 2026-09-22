@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"reflect"
 	"sort"
 	"sync"
 
@@ -15,20 +14,17 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/certloader"
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/packetdumper"
-	"github.com/bluenviron/mediamtx/internal/protocols/proxy"
 	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
+	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
 // ErrConnNotFound is returned when a connection is not found.
 var ErrConnNotFound = errors.New("connection not found")
-
-func interfaceIsEmpty(i any) bool {
-	return reflect.ValueOf(i).Kind() != reflect.Pointer || reflect.ValueOf(i).IsNil()
-}
 
 type serverAPIConnsListRes struct {
 	data *defs.APIRTMPConnList
@@ -58,15 +54,9 @@ type serverAPIConnsKickReq struct {
 	res  chan serverAPIConnsKickRes
 }
 
-type serverMetrics interface {
-	SetRTMPSServer(defs.APIRTMPServer)
-	SetRTMPServer(defs.APIRTMPServer)
-}
-
 type serverPathManager interface {
-	FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error)
-	AddPublisher(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error)
-	AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
+	AddPublisher(req defs.PathAddPublisherReq) (defs.Path, error)
+	AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
 }
 
 type serverParent interface {
@@ -76,28 +66,26 @@ type serverParent interface {
 // Server is a RTMP server.
 type Server struct {
 	Address             string
-	DumpPackets         bool
 	ReadTimeout         conf.Duration
 	WriteTimeout        conf.Duration
-	Encryption          bool
+	IsTLS               bool
 	ServerCert          string
 	ServerKey           string
 	RTSPAddress         string
-	TrustedProxies      conf.IPNetworks
 	RunOnConnect        string
 	RunOnConnectRestart bool
 	RunOnDisconnect     string
 	ExternalCmdPool     *externalcmd.Pool
-	Metrics             serverMetrics
 	PathManager         serverPathManager
 	Parent              serverParent
 
-	ctx       context.Context
-	ctxCancel func()
-	wg        sync.WaitGroup
-	ln        net.Listener
-	conns     map[*conn]struct{}
-	loader    *certloader.CertLoader
+	ctx            context.Context
+	ctxCancel      func()
+	wg             sync.WaitGroup
+	ln             net.Listener
+	conns          map[*conn]struct{}
+	loader         *certloader.CertLoader
+	listStreamKeys map[string]bool
 
 	// in
 	chNewConn      chan net.Conn
@@ -106,101 +94,43 @@ type Server struct {
 	chAPIConnsList chan serverAPIConnsListReq
 	chAPIConnsGet  chan serverAPIConnsGetReq
 	chAPIConnsKick chan serverAPIConnsKickReq
+
+	livestreamVideoRepo *repository.LiveStreamVideoRepository
 }
 
 // Initialize initializes the server.
 func (s *Server) Initialize() error {
-	listen := func(network, address string) (net.Listener, error) {
-		ln, err := net.Listen(network, address)
-		if err != nil {
-			return nil, err
+	ln, err := func() (net.Listener, error) {
+		if !s.IsTLS {
+			return net.Listen(restrictnetwork.Restrict("tcp", s.Address))
 		}
 
-		if s.DumpPackets {
-			var proto string
-			if s.Encryption {
-				proto = "rtmps"
-			} else {
-				proto = "rtmp"
-			}
-
-			ln = &packetdumper.Listener{
-				Wrapped: ln,
-				Prefix:  proto + "_server_conn",
-			}
-		}
-
-		if len(s.TrustedProxies) > 0 {
-			pl := &proxy.Listener{
-				Wrapped:        ln,
-				TrustedProxies: s.TrustedProxies,
-			}
-			pl.Initialize()
-			ln = pl
-		}
-
-		return ln, nil
-	}
-
-	tlsListen := func(network string, laddr string, config *tls.Config) (net.Listener, error) {
-		ln, err := listen(network, laddr)
-		if err != nil {
-			return nil, err
-		}
-
-		if s.DumpPackets {
-			ln = &packetdumper.TLSListener{
-				Wrapped:   ln,
-				TLSConfig: config,
-			}
-		} else {
-			ln = tls.NewListener(ln, config)
-		}
-
-		return ln, nil
-	}
-
-	if s.Encryption {
-		s.loader = &certloader.CertLoader{
-			CertPath: s.ServerCert,
-			KeyPath:  s.ServerKey,
-			Parent:   s.Parent,
-		}
-		err := s.loader.Initialize()
-		if err != nil {
-			return err
-		}
-
-		net, addr := restrictnetwork.Restrict("tcp", s.Address)
-		s.ln, err = tlsListen(net, addr, &tls.Config{GetCertificate: s.loader.GetCertificate})
-		if err != nil {
-			return err
-		}
-	} else {
 		var err error
-		s.ln, err = listen(restrictnetwork.Restrict("tcp", s.Address))
+		s.loader, err = certloader.New(s.ServerCert, s.ServerKey, s.Parent)
 		if err != nil {
-			return err
+			return nil, err
 		}
+
+		network, address := restrictnetwork.Restrict("tcp", s.Address)
+		return tls.Listen(network, address, &tls.Config{GetCertificate: s.loader.GetCertificate()})
+	}()
+	if err != nil {
+		return err
 	}
 
 	s.ctx, s.ctxCancel = context.WithCancel(context.Background())
 
+	s.ln = ln
 	s.conns = make(map[*conn]struct{})
+	s.listStreamKeys = make(map[string]bool)
 	s.chNewConn = make(chan net.Conn)
 	s.chAcceptErr = make(chan error)
 	s.chCloseConn = make(chan *conn)
 	s.chAPIConnsList = make(chan serverAPIConnsListReq)
 	s.chAPIConnsGet = make(chan serverAPIConnsGetReq)
 	s.chAPIConnsKick = make(chan serverAPIConnsKickReq)
-
-	str := "started with listener on " + s.Address
-	if s.Encryption {
-		str += " (TCP/RTMPS)"
-	} else {
-		str += " (TCP/RTMP)"
-	}
-	s.Log(logger.Info, str)
+	s.livestreamVideoRepo = repository.NewLiveStreamVideoRepository(database.DB)
+	s.Log(logger.Info, "listener opened on %s", s.Address)
 
 	l := &listener{
 		ln:     s.ln,
@@ -212,48 +142,28 @@ func (s *Server) Initialize() error {
 	s.wg.Add(1)
 	go s.run()
 
-	if !interfaceIsEmpty(s.Metrics) {
-		if s.Encryption {
-			s.Metrics.SetRTMPSServer(s)
-		} else {
-			s.Metrics.SetRTMPServer(s)
-		}
-	}
-
 	return nil
 }
 
 // Log implements logger.Writer.
-func (s *Server) Log(level logger.Level, format string, args ...any) {
+func (s *Server) Log(level logger.Level, format string, args ...interface{}) {
 	label := func() string {
-		if s.Encryption {
+		if s.IsTLS {
 			return "RTMPS"
 		}
 		return "RTMP"
 	}()
-	s.Parent.Log(level, "[%s] "+format, append([]any{label}, args...)...)
+	s.Parent.Log(level, "[%s] "+format, append([]interface{}{label}, args...)...)
 }
 
 // Close closes the server.
 func (s *Server) Close() {
-	s.Log(logger.Info, "closing")
-
-	if !interfaceIsEmpty(s.Metrics) {
-		if s.Encryption {
-			s.Metrics.SetRTMPSServer(nil)
-		} else {
-			s.Metrics.SetRTMPServer(nil)
-		}
-	}
-
+	s.Log(logger.Info, "listener is closing")
 	s.ctxCancel()
 	s.wg.Wait()
-
 	if s.loader != nil {
 		s.loader.Close()
 	}
-
-	s.Log(logger.Debug, "closed")
 }
 
 func (s *Server) run() {
@@ -269,7 +179,7 @@ outer:
 		case nconn := <-s.chNewConn:
 			c := &conn{
 				parentCtx:           s.ctx,
-				encryption:          s.Encryption,
+				isTLS:               s.IsTLS,
 				rtspAddress:         s.RTSPAddress,
 				readTimeout:         s.ReadTimeout,
 				writeTimeout:        s.WriteTimeout,
@@ -282,19 +192,21 @@ outer:
 				pathManager:         s.PathManager,
 				parent:              s,
 			}
-			c.initialize()
 			s.conns[c] = struct{}{}
+			c.initialize(&s.listStreamKeys)
 
 		case c := <-s.chCloseConn:
+
+			delete(s.listStreamKeys, c.streamKey)
 			delete(s.conns, c)
 
 		case req := <-s.chAPIConnsList:
 			data := &defs.APIRTMPConnList{
-				Items: []defs.APIRTMPConn{},
+				Items: []*defs.APIRTMPConn{},
 			}
 
 			for c := range s.conns {
-				data.Items = append(data.Items, *c.apiItem())
+				data.Items = append(data.Items, c.apiItem())
 			}
 
 			sort.Slice(data.Items, func(i, j int) bool {
@@ -310,7 +222,16 @@ outer:
 				continue
 			}
 
-			req.res <- serverAPIConnsGetRes{data: c.apiItem()}
+			item := c.apiItem()
+
+			streamID := c.pathName
+			if streamID == "" {
+				c.Log(logger.Error, "Cannot find stream key: streamID is empty")
+				req.res <- serverAPIConnsGetRes{data: item}
+				continue
+			}
+
+			req.res <- serverAPIConnsGetRes{data: item}
 
 		case req := <-s.chAPIConnsKick:
 			c := s.findConnByUUID(req.uuid)
@@ -319,6 +240,7 @@ outer:
 				continue
 			}
 
+			delete(s.listStreamKeys, c.streamKey)
 			delete(s.conns, c)
 			c.Close()
 			req.res <- serverAPIConnsKickRes{}
@@ -367,7 +289,7 @@ func (s *Server) closeConn(c *conn) {
 	}
 }
 
-// APIConnsList implements defs.APIRTMPServer.
+// APIConnsList is called by api.
 func (s *Server) APIConnsList() (*defs.APIRTMPConnList, error) {
 	req := serverAPIConnsListReq{
 		res: make(chan serverAPIConnsListRes),
@@ -383,7 +305,7 @@ func (s *Server) APIConnsList() (*defs.APIRTMPConnList, error) {
 	}
 }
 
-// APIConnsGet implements defs.APIRTMPServer.
+// APIConnsGet is called by api.
 func (s *Server) APIConnsGet(uuid uuid.UUID) (*defs.APIRTMPConn, error) {
 	req := serverAPIConnsGetReq{
 		uuid: uuid,
@@ -400,7 +322,7 @@ func (s *Server) APIConnsGet(uuid uuid.UUID) (*defs.APIRTMPConn, error) {
 	}
 }
 
-// APIConnsKick implements defs.APIRTMPServer.
+// APIConnsKick is called by api.
 func (s *Server) APIConnsKick(uuid uuid.UUID) error {
 	req := serverAPIConnsKickReq{
 		uuid: uuid,

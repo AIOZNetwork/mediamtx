@@ -30,8 +30,8 @@ func loadEnvInternal(env map[string]string, prefix string, prv reflect.Value) er
 
 	rt := prv.Type().Elem()
 
-	if i, ok := reflect.TypeAssert[Unmarshaler](prv); ok {
-		if ev, ok2 := env[prefix]; ok2 {
+	if i, ok := prv.Interface().(Unmarshaler); ok {
+		if ev, ok := env[prefix]; ok {
 			if prv.IsNil() {
 				prv.Set(reflect.New(rt))
 				i = prv.Interface().(Unmarshaler)
@@ -124,8 +124,8 @@ func loadEnvInternal(env map[string]string, prefix string, prv reflect.Value) er
 				continue
 			}
 
-			mapKey, _, _ := strings.Cut(k[len(prefix+"_"):], "_")
-			if mapKey == "" {
+			mapKey := strings.Split(k[len(prefix+"_"):], "_")[0]
+			if len(mapKey) == 0 {
 				continue
 			}
 
@@ -156,7 +156,7 @@ func loadEnvInternal(env map[string]string, prefix string, prv reflect.Value) er
 
 	case reflect.Struct:
 		flen := rt.NumField()
-		for i := range flen {
+		for i := 0; i < flen; i++ {
 			f := rt.Field(i)
 			jsonTag := f.Tag.Get("json")
 
@@ -184,31 +184,6 @@ func loadEnvInternal(env map[string]string, prefix string, prv reflect.Value) er
 						prv.Set(reflect.New(rt))
 					}
 					prv.Elem().Set(reflect.ValueOf(strings.Split(ev, ",")))
-				}
-			}
-			return nil
-
-		case rt.Elem() == reflect.TypeOf(uint(0)):
-			if ev, ok := env[prefix]; ok {
-				if ev == "" {
-					prv.Elem().Set(reflect.MakeSlice(prv.Elem().Type(), 0, 0))
-				} else {
-					if prv.IsNil() {
-						prv.Set(reflect.New(rt))
-					}
-
-					raw := strings.Split(ev, ",")
-					vals := make([]uint, len(raw))
-
-					for i, v := range raw {
-						tmp, err := strconv.ParseUint(v, 10, 32)
-						if err != nil {
-							return err
-						}
-						vals[i] = uint(tmp)
-					}
-
-					prv.Elem().Set(reflect.ValueOf(vals))
 				}
 			}
 			return nil
@@ -244,31 +219,17 @@ func loadEnvInternal(env map[string]string, prefix string, prv reflect.Value) er
 			} else {
 				for i := 0; ; i++ {
 					itemPrefix := prefix + "_" + strconv.FormatInt(int64(i), 10)
-					if !envHasAtLeastAKeyWithPrefix(env, itemPrefix) && (prv.IsZero() || prv.Elem().Len() <= i) {
+					if !envHasAtLeastAKeyWithPrefix(env, itemPrefix) {
 						break
 					}
 
-					var elem reflect.Value
-
-					if !prv.IsZero() && prv.Elem().Len() > i {
-						elem = prv.Elem().Index(i).Addr()
-					} else {
-						elem = reflect.New(rt.Elem())
-					}
-
+					elem := reflect.New(rt.Elem())
 					err := loadEnvInternal(env, itemPrefix, elem.Elem())
 					if err != nil {
 						return err
 					}
 
-					if !prv.IsZero() && prv.Elem().Len() > i {
-						prv.Elem().Index(i).Set(elem.Elem())
-					} else {
-						if prv.IsZero() {
-							prv.Set(reflect.New(rt))
-						}
-						prv.Elem().Set(reflect.Append(prv.Elem(), elem.Elem()))
-					}
+					prv.Elem().Set(reflect.Append(prv.Elem(), elem.Elem()))
 				}
 			}
 			return nil
@@ -278,7 +239,7 @@ func loadEnvInternal(env map[string]string, prefix string, prv reflect.Value) er
 	return fmt.Errorf("unsupported type: %v", rt)
 }
 
-func loadWithEnv(env map[string]string, prefix string, v any) error {
+func loadWithEnv(env map[string]string, prefix string, v interface{}) error {
 	return loadEnvInternal(env, prefix, reflect.ValueOf(v).Elem())
 }
 
@@ -292,6 +253,6 @@ func envToMap() map[string]string {
 }
 
 // Load loads the configuration from the environment.
-func Load(prefix string, v any) error {
+func Load(prefix string, v interface{}) error {
 	return loadWithEnv(envToMap(), prefix, v)
 }

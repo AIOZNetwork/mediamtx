@@ -1,12 +1,8 @@
 # do not add .git, since it is needed to extract the tag
-# do not add /binaries, since it is needed by Docker images
-/tmp
+# do not add /tmp, since it is needed by make dockerhub
+/binaries
 /coverage*.txt
-/api/*.html
+/apidocs/*.html
 /internal/core/VERSION
 /internal/servers/hls/hls.min.js
-/internal/staticsources/rpicamera/mtxrpicam_*/
-/auto.crt
-/auto.key
-/internal/core/auto.crt
-/internal/core/auto.key
+/internal/staticsources/rpicamera/mtxrpicam_*

@@ -22,73 +22,88 @@ type Environment map[string]string
 
 // Cmd is an external command.
 type Cmd struct {
-	Pool    *Pool
-	Cmdstr  string
-	Restart bool
-	Env     Environment
-	OnExit  OnExitFunc
+	pool    *Pool
+	cmdstr  string
+	restart bool
+	env     Environment
+	onExit  func(error)
 
 	// in
 	terminate chan struct{}
 }
 
-// Start starts the command.
-func (c *Cmd) Start() {
-	if c.OnExit == nil {
-		c.OnExit = func(_ error) {}
-	}
-
-	c.terminate = make(chan struct{})
-
-	c.Pool.wg.Add(1)
-
-	go c.run()
-}
-
-// Close closes the command. It doesn't wait for the command to exit.
-func (c *Cmd) Close() {
-	close(c.terminate)
-}
-
-func expandEnv(s string, env Environment) string {
-	return os.Expand(s, func(variable string) string {
+// NewCmd allocates a Cmd.
+func NewCmd(
+	pool *Pool,
+	cmdstr string,
+	restart bool,
+	env Environment,
+	onExit OnExitFunc,
+) *Cmd {
+	// replace variables in both Linux and Windows, in order to allow using the
+	// same commands on both of them.
+	cmdstr = os.Expand(cmdstr, func(variable string) string {
 		if value, ok := env[variable]; ok {
 			return value
 		}
 		return os.Getenv(variable)
 	})
+
+	if onExit == nil {
+		onExit = func(_ error) {}
+	}
+
+	e := &Cmd{
+		pool:      pool,
+		cmdstr:    cmdstr,
+		restart:   restart,
+		env:       env,
+		onExit:    onExit,
+		terminate: make(chan struct{}),
+	}
+
+	pool.wg.Add(1)
+
+	go e.run()
+
+	return e
 }
 
-func (c *Cmd) run() {
-	defer c.Pool.wg.Done()
+// Close closes the command. It doesn't wait for the command to exit.
+func (e *Cmd) Close() {
+	close(e.terminate)
+}
+
+func (e *Cmd) run() {
+	defer e.pool.wg.Done()
 
 	env := append([]string(nil), os.Environ()...)
-	for key, val := range c.Env {
+	for key, val := range e.env {
 		env = append(env, key+"="+val)
 	}
 
 	for {
-		err := c.runOSSpecific(c.Cmdstr, env)
+		err := e.runOSSpecific(env)
 		if errors.Is(err, errTerminated) {
 			return
 		}
 
-		if !c.Restart {
+		if !e.restart {
 			if err != nil {
-				c.OnExit(err)
+				e.onExit(err)
 			}
 			return
 		}
 
 		if err != nil {
-			c.OnExit(err)
+			e.onExit(err)
 		} else {
-			c.OnExit(fmt.Errorf("command exited with code 0"))
+			e.onExit(fmt.Errorf("command exited with code 0"))
 		}
 
 		select {
 		case <-time.After(restartPause):
-		case <-c.terminate:
+		case <-e.terminate:
 			return
 		}
 	}

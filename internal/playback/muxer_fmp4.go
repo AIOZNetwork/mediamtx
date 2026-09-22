@@ -6,8 +6,6 @@ import (
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4/seekablebuffer"
-
-	"github.com/bluenviron/mediamtx/internal/recordstore"
 )
 
 const (
@@ -19,7 +17,7 @@ type muxerFMP4Track struct {
 	timeScale uint32
 	firstDTS  int64
 	lastDTS   int64
-	samples   []*fmp4.Sample
+	samples   []*fmp4.PartSample
 }
 
 func findTrack(tracks []*muxerFMP4Track, id int) *muxerFMP4Track {
@@ -72,20 +70,22 @@ func (w *muxerFMP4) writeSample(
 	}
 
 	if dts >= 0 {
-		// this is the first visible sample of this track
 		if w.curTrack.firstDTS < 0 {
 			w.curTrack.firstDTS = dts
 
-			// if sample is a IDR, remove previous GOP
+			// if frame is a IDR, remove previous GOP
 			if !isNonSyncSample {
-				w.curTrack.samples = w.curTrack.samples[:0]
+				w.curTrack.samples = nil
 			}
 		} else {
-			duration := max(dts-w.curTrack.lastDTS, 0)
-			w.curTrack.samples[len(w.curTrack.samples)-1].Duration = uint32(duration)
+			diff := dts - w.curTrack.lastDTS
+			if diff < 0 {
+				diff = 0
+			}
+			w.curTrack.samples[len(w.curTrack.samples)-1].Duration = uint32(diff)
 		}
 
-		w.curTrack.samples = append(w.curTrack.samples, &fmp4.Sample{
+		w.curTrack.samples = append(w.curTrack.samples, &fmp4.PartSample{
 			PTSOffset:       ptsOffset,
 			IsNonSyncSample: isNonSyncSample,
 			Payload:         pl,
@@ -95,28 +95,23 @@ func (w *muxerFMP4) writeSample(
 		partDurationMP4 := durationGoToMp4(partDuration, w.curTrack.timeScale)
 
 		if (w.curTrack.lastDTS - w.curTrack.firstDTS) >= partDurationMP4 {
-			err = w.innerFlush(false)
+			err := w.innerFlush(false)
 			if err != nil {
 				return err
 			}
 		}
 	} else {
-		if !isNonSyncSample { // sample is IDR
-			// create a new GOP that starts from this sample.
-			// set sample duration to zero
-			w.curTrack.samples = w.curTrack.samples[:0]
-			w.curTrack.samples = append(w.curTrack.samples, &fmp4.Sample{
+		// store GOP of the first frame, and set PTSOffset = 0 and Duration = 0 in each sample
+		if !isNonSyncSample { // if frame is a IDR, reset GOP
+			w.curTrack.samples = []*fmp4.PartSample{{
 				IsNonSyncSample: isNonSyncSample,
 				Payload:         pl,
-				PTSOffset:       ptsOffset,
-			})
-		} else { // sample is not IDR
-			// append sample to current GOP
-			// set sample duration to zero
-			w.curTrack.samples = append(w.curTrack.samples, &fmp4.Sample{
+			}}
+		} else {
+			// append frame to current GOP
+			w.curTrack.samples = append(w.curTrack.samples, &fmp4.PartSample{
 				IsNonSyncSample: isNonSyncSample,
 				Payload:         pl,
-				PTSOffset:       ptsOffset,
 			})
 		}
 	}
@@ -125,9 +120,12 @@ func (w *muxerFMP4) writeSample(
 }
 
 func (w *muxerFMP4) writeFinalDTS(dts int64) {
-	if len(w.curTrack.samples) != 0 && w.curTrack.firstDTS >= 0 {
-		duration := max(dts-w.curTrack.lastDTS, 0)
-		w.curTrack.samples[len(w.curTrack.samples)-1].Duration = uint32(duration)
+	if w.curTrack.firstDTS >= 0 {
+		diff := dts - w.curTrack.lastDTS
+		if diff < 0 {
+			diff = 0
+		}
+		w.curTrack.samples[len(w.curTrack.samples)-1].Duration = uint32(diff)
 	}
 }
 
@@ -138,7 +136,7 @@ func (w *muxerFMP4) innerFlush(final bool) error {
 		if track.firstDTS >= 0 && (len(track.samples) > 1 || (final && len(track.samples) != 0)) {
 			// do not write the final sample
 			// in order to allow changing its duration to compensate NTP-DTS differences
-			var samples []*fmp4.Sample
+			var samples []*fmp4.PartSample
 			if !final {
 				samples = track.samples[:len(track.samples)-1]
 			} else {
@@ -158,20 +156,26 @@ func (w *muxerFMP4) innerFlush(final bool) error {
 		}
 	}
 
-	// no samples to write
-	if part.Tracks == nil {
-		// if no samples has been written before, return an error
+	if part.Tracks != nil {
+		part.SequenceNumber = w.nextSequenceNumber
+		w.nextSequenceNumber++
+
 		if w.init != nil {
-			return recordstore.ErrNoSegmentsFound
+			err := w.init.Marshal(&w.outBuf)
+			if err != nil {
+				return err
+			}
+
+			_, err = w.w.Write(w.outBuf.Bytes())
+			if err != nil {
+				return err
+			}
+
+			w.init = nil
+			w.outBuf.Reset()
 		}
-		return nil
-	}
 
-	part.SequenceNumber = w.nextSequenceNumber
-	w.nextSequenceNumber++
-
-	if w.init != nil {
-		err := w.init.Marshal(&w.outBuf)
+		err := part.Marshal(&w.outBuf)
 		if err != nil {
 			return err
 		}
@@ -181,21 +185,8 @@ func (w *muxerFMP4) innerFlush(final bool) error {
 			return err
 		}
 
-		w.init = nil
 		w.outBuf.Reset()
 	}
-
-	err := part.Marshal(&w.outBuf)
-	if err != nil {
-		return err
-	}
-
-	_, err = w.w.Write(w.outBuf.Bytes())
-	if err != nil {
-		return err
-	}
-
-	w.outBuf.Reset()
 
 	return nil
 }

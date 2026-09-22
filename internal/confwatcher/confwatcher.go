@@ -16,10 +16,8 @@ const (
 
 // ConfWatcher is a configuration file watcher.
 type ConfWatcher struct {
-	FilePath string
-
-	inner        *fsnotify.Watcher
-	absolutePath string
+	inner       *fsnotify.Watcher
+	watchedPath string
 
 	// in
 	terminate chan struct{}
@@ -29,35 +27,38 @@ type ConfWatcher struct {
 	done   chan struct{}
 }
 
-// Initialize initializes a ConfWatcher.
-func (w *ConfWatcher) Initialize() error {
-	if _, err := os.Stat(w.FilePath); err != nil {
-		return err
+// New allocates a ConfWatcher.
+func New(confPath string) (*ConfWatcher, error) {
+	if _, err := os.Stat(confPath); err != nil {
+		return nil, err
 	}
 
-	var err error
-	w.inner, err = fsnotify.NewWatcher()
+	inner, err := fsnotify.NewWatcher()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// use absolute paths to support Darwin
-	w.absolutePath, _ = filepath.Abs(w.FilePath)
-	parentPath := filepath.Dir(w.absolutePath)
+	absolutePath, _ := filepath.Abs(confPath)
+	parentPath := filepath.Dir(absolutePath)
 
-	err = w.inner.Add(parentPath)
+	err = inner.Add(parentPath)
 	if err != nil {
-		w.inner.Close() //nolint:errcheck
-		return err
+		inner.Close() //nolint:errcheck
+		return nil, err
 	}
 
-	w.terminate = make(chan struct{})
-	w.signal = make(chan struct{})
-	w.done = make(chan struct{})
+	w := &ConfWatcher{
+		inner:       inner,
+		watchedPath: absolutePath,
+		terminate:   make(chan struct{}),
+		signal:      make(chan struct{}),
+		done:        make(chan struct{}),
+	}
 
 	go w.run()
 
-	return nil
+	return w, nil
 }
 
 // Close closes a ConfWatcher.
@@ -70,7 +71,7 @@ func (w *ConfWatcher) run() {
 	defer close(w.done)
 
 	var lastCalled time.Time
-	previousWatchedPath, _ := filepath.EvalSymlinks(w.absolutePath)
+	previousWatchedPath, _ := filepath.EvalSymlinks(w.watchedPath)
 
 outer:
 	for {
@@ -80,7 +81,7 @@ outer:
 				continue
 			}
 
-			currentWatchedPath, _ := filepath.EvalSymlinks(w.absolutePath)
+			currentWatchedPath, _ := filepath.EvalSymlinks(w.watchedPath)
 			eventPath, _ := filepath.Abs(event.Name)
 			eventPath, _ = filepath.EvalSymlinks(eventPath)
 

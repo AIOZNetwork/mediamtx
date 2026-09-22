@@ -6,22 +6,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluenviron/gortsplib/v5"
-	"github.com/bluenviron/gortsplib/v5/pkg/description"
-	"github.com/stretchr/testify/require"
-
+	"github.com/bluenviron/gortsplib/v4"
+	"github.com/bluenviron/gortsplib/v4/pkg/description"
 	"github.com/bluenviron/mediamtx/internal/test"
+	"github.com/stretchr/testify/require"
 )
 
-func newInstance(t *testing.T, conf string, args ...string) (*Core, bool) {
+func newInstance(conf string) (*Core, bool) {
 	if conf == "" {
-		return New(args)
+		return New([]string{})
 	}
 
-	tmpf := test.CreateTempFile(t, []byte(conf))
-	args = append(append([]string{}, args...), tmpf)
+	tmpf, err := test.CreateTempFile([]byte(conf))
+	if err != nil {
+		return nil, false
+	}
+	defer os.Remove(tmpf)
 
-	return New(args)
+	return New([]string{tmpf})
 }
 
 func TestCoreErrors(t *testing.T) {
@@ -32,8 +34,7 @@ func TestCoreErrors(t *testing.T) {
 		{
 			"logger",
 			"logDestinations: [file]\n" +
-				"logFile: /nonexisting/nonexist\n" +
-				"sysLogPrefix: /mediamtx\n",
+				"logFile: /nonexisting/nonexist\n",
 		},
 		{
 			"metrics",
@@ -87,14 +88,14 @@ func TestCoreErrors(t *testing.T) {
 		},
 	} {
 		t.Run(ca.name, func(t *testing.T) {
-			_, ok := newInstance(t, ca.conf)
+			_, ok := newInstance(ca.conf)
 			require.Equal(t, false, ok)
 		})
 	}
 }
 
 func TestCoreHotReloading(t *testing.T) {
-	confPath := filepath.Join(t.TempDir(), "rtsp-conf")
+	confPath := filepath.Join(os.TempDir(), "rtsp-conf")
 
 	err := os.WriteFile(confPath, []byte("paths:\n"+
 		"  test1:\n"+
@@ -102,6 +103,7 @@ func TestCoreHotReloading(t *testing.T) {
 		"    publishPass: mypass\n"),
 		0o644)
 	require.NoError(t, err)
+	defer os.Remove(confPath)
 
 	p, ok := New([]string{confPath})
 	require.Equal(t, true, ok)
@@ -128,73 +130,4 @@ func TestCoreHotReloading(t *testing.T) {
 		require.NoError(t, err)
 		defer conn.Close()
 	}()
-}
-
-func TestCoreHotReloadingAndLoggerError(t *testing.T) {
-	confPath := filepath.Join(t.TempDir(), "rtsp-conf")
-
-	err := os.WriteFile(confPath, []byte(""),
-		0o644)
-	require.NoError(t, err)
-
-	p, ok := New([]string{confPath})
-	require.Equal(t, true, ok)
-	defer p.Close()
-
-	err = os.WriteFile(confPath, []byte("logDestinations: [file]\n"+
-		"logFile: /nonexisting/nonexist\n"),
-		0o644)
-	require.NoError(t, err)
-
-	p.Wait()
-}
-
-func TestNewRejectsConflictingOneShotFlags(t *testing.T) {
-	_, ok := newInstance(t, "", "--version", "--validate-conf=test.yml")
-	require.Equal(t, false, ok)
-}
-
-func TestValidateConf(t *testing.T) {
-	savedDefaultConfPaths := defaultConfPaths
-	savedDefaultConfPathsNotWin := defaultConfPathsNotWin
-	t.Cleanup(func() {
-		defaultConfPaths = savedDefaultConfPaths
-		defaultConfPathsNotWin = savedDefaultConfPathsNotWin
-	})
-
-	writeTempConf := func(t *testing.T, content string) string {
-		t.Helper()
-
-		pa := filepath.Join(t.TempDir(), "mediamtx.yml")
-		err := os.WriteFile(pa, []byte(content), 0o644)
-		require.NoError(t, err)
-		return pa
-	}
-
-	t.Run("explicit valid path", func(t *testing.T) {
-		defaultConfPaths = nil
-		defaultConfPathsNotWin = nil
-
-		confPath := writeTempConf(t, "paths:\n  all_others:\n")
-
-		ok := validateConf(confPath)
-		require.Equal(t, true, ok)
-	})
-
-	t.Run("explicit invalid path", func(t *testing.T) {
-		defaultConfPaths = nil
-		defaultConfPathsNotWin = nil
-
-		ok := validateConf(writeTempConf(t, "writeQueueSize: 3\n"))
-		require.Equal(t, false, ok)
-	})
-
-	t.Run("environment variables are applied", func(t *testing.T) {
-		defaultConfPaths = nil
-		defaultConfPathsNotWin = nil
-		t.Setenv("MTX_WRITEQUEUESIZE", "3")
-
-		ok := validateConf(writeTempConf(t, "paths:\n  all_others:\n"))
-		require.Equal(t, false, ok)
-	})
 }

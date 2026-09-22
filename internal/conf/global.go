@@ -10,7 +10,7 @@ var globalValuesType = func() reflect.Type {
 	rt := reflect.TypeOf(Conf{})
 	nf := rt.NumField()
 
-	for i := range nf {
+	for i := 0; i < nf; i++ {
 		f := rt.Field(i)
 		j := f.Tag.Get("json")
 
@@ -26,13 +26,13 @@ var globalValuesType = func() reflect.Type {
 	return reflect.StructOf(fields)
 }()
 
-func newGlobalValues() any {
+func newGlobalValues() interface{} {
 	return reflect.New(globalValuesType).Interface()
 }
 
 // Global is the global part of Conf.
 type Global struct {
-	Values any
+	Values interface{}
 }
 
 // MarshalJSON implements json.Marshaler.

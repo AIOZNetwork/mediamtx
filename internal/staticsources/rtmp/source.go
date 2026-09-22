@@ -3,62 +3,33 @@ package rtmp
 
 import (
 	"context"
+	ctls "crypto/tls"
 	"fmt"
 	"net"
 	"net/url"
-	"sync"
 	"time"
 
-	"github.com/bluenviron/gortmplib"
-	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v4/pkg/description"
+	"github.com/google/uuid"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/packetdumper"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp"
-	ptls "github.com/bluenviron/mediamtx/internal/protocols/tls"
+	"github.com/bluenviron/mediamtx/internal/protocols/tls"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
-type parent interface {
-	logger.Writer
-	SetReady(req defs.PathSourceStaticSetReadyReq) defs.PathSourceStaticSetReadyRes
-	SetNotReady(req defs.PathSourceStaticSetNotReadyReq)
-}
-
 // Source is a RTMP static source.
 type Source struct {
-	DumpPackets  bool
 	ReadTimeout  conf.Duration
 	WriteTimeout conf.Duration
-	Parent       parent
-
-	mutex  sync.RWMutex
-	client *gortmplib.Client
+	Parent       defs.StaticSourceParent
 }
 
 // Log implements logger.Writer.
-func (s *Source) Log(level logger.Level, format string, args ...any) {
+func (s *Source) Log(level logger.Level, format string, args ...interface{}) {
 	s.Parent.Log(level, "[RTMP source] "+format, args...)
-}
-
-// Info returns runtime information.
-func (s *Source) Info() defs.StaticSourceInfo {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-
-	if s.client == nil {
-		return defs.StaticSourceInfo{}
-	}
-
-	return defs.StaticSourceInfo{
-		TypeSpecific: &defs.APIStaticSourceTypeSpecificRTMP{
-			RemoteAddr:    s.client.NetConn().RemoteAddr().String(),
-			InboundBytes:  s.client.BytesReceived(),
-			OutboundBytes: s.client.BytesSent(),
-		},
-	}
 }
 
 // Run implements StaticSource.
@@ -80,80 +51,59 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		}
 	}
 
-	connectCtx, connectCtxCancel := context.WithTimeout(params.Context, time.Duration(s.ReadTimeout))
+	nconn, err := func() (net.Conn, error) {
+		ctx2, cancel2 := context.WithTimeout(params.Context, time.Duration(s.ReadTimeout))
+		defer cancel2()
 
-	conn := &gortmplib.Client{
-		URL:     u,
-		Publish: false,
-	}
+		if u.Scheme == "rtmp" {
+			return (&net.Dialer{}).DialContext(ctx2, "tcp", u.Host)
+		}
 
-	tlsConfig := ptls.MakeConfig(params.Conf.SourceFingerprint)
-
-	if s.DumpPackets {
-		conn.DialContext = (&packetdumper.DialContext{
-			Prefix: u.Scheme + "_source_conn",
-		}).Do
-
-		conn.DialTLSContext = (&packetdumper.DialTLSContext{
-			DialContext: conn.DialContext,
-			TLSConfig:   tlsConfig,
-		}).Do
-	} else {
-		conn.TLSConfig = tlsConfig
-	}
-
-	err = conn.Initialize(connectCtx)
-	connectCtxCancel()
+		return (&ctls.Dialer{
+			Config: tls.ConfigForFingerprint(params.Conf.SourceFingerprint),
+		}).DialContext(ctx2, "tcp", u.Host)
+	}()
 	if err != nil {
 		return err
 	}
 
-	s.mutex.Lock()
-	s.client = conn
-	s.mutex.Unlock()
-
-	defer func() {
-		s.mutex.Lock()
-		s.client = nil
-		s.mutex.Unlock()
-	}()
-
 	readDone := make(chan error)
 	go func() {
-		readDone <- s.runReader(conn)
+		readDone <- s.runReader(u, nconn)
 	}()
 
 	for {
 		select {
-		case err = <-readDone:
-			conn.Close()
+		case err := <-readDone:
+			nconn.Close()
 			return err
 
 		case <-params.ReloadConf:
 
 		case <-params.Context.Done():
-			conn.Close()
+			nconn.Close()
 			<-readDone
 			return nil
 		}
 	}
 }
 
-func (s *Source) runReader(conn *gortmplib.Client) error {
-	conn.NetConn().SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
-	conn.NetConn().SetWriteDeadline(time.Now().Add(time.Duration(s.WriteTimeout)))
-
-	r := &gortmplib.Reader{
-		Conn: conn,
-	}
-	err := r.Initialize()
+func (s *Source) runReader(u *url.URL, nconn net.Conn) error {
+	nconn.SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
+	nconn.SetWriteDeadline(time.Now().Add(time.Duration(s.WriteTimeout)))
+	conn, err := rtmp.NewClientConn(nconn, u, false)
 	if err != nil {
 		return err
 	}
 
-	var subStream *stream.SubStream
+	r, err := rtmp.NewReader(conn, uuid.Nil)
+	if err != nil {
+		return err
+	}
 
-	medias, err := rtmp.ToStream(r, &subStream)
+	var stream *stream.Stream
+
+	medias, err := rtmp.ToStream(r, &stream, "teststream") // Skip this for now because we don't have a stream with video on demand
 	if err != nil {
 		return err
 	}
@@ -163,9 +113,8 @@ func (s *Source) runReader(conn *gortmplib.Client) error {
 	}
 
 	res := s.Parent.SetReady(defs.PathSourceStaticSetReadyReq{
-		Desc:          &description.Session{Medias: medias},
-		UseRTPPackets: false,
-		ReplaceNTP:    true,
+		Desc:               &description.Session{Medias: medias},
+		GenerateRTPPackets: true,
 	})
 	if res.Err != nil {
 		return res.Err
@@ -173,13 +122,14 @@ func (s *Source) runReader(conn *gortmplib.Client) error {
 
 	defer s.Parent.SetNotReady(defs.PathSourceStaticSetNotReadyReq{})
 
-	subStream = res.SubStream
+	stream = res.Stream
 
-	conn.NetConn().SetWriteDeadline(time.Time{})
+	// disable write deadline to allow outgoing acknowledges
+	nconn.SetWriteDeadline(time.Time{})
 
 	for {
-		conn.NetConn().SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
-		err = r.Read()
+		nconn.SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
+		err := r.Read()
 		if err != nil {
 			return err
 		}
@@ -187,9 +137,9 @@ func (s *Source) runReader(conn *gortmplib.Client) error {
 }
 
 // APISourceDescribe implements StaticSource.
-func (*Source) APISourceDescribe() *defs.APIPathSource {
-	return &defs.APIPathSource{
-		Type: defs.APIPathSourceTypeRTMPSource,
+func (*Source) APISourceDescribe() defs.APIPathSourceOrReader {
+	return defs.APIPathSourceOrReader{
+		Type: "rtmpSource",
 		ID:   "",
 	}
 }

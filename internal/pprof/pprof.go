@@ -1,8 +1,7 @@
 // Package pprof contains a pprof exporter.
-package pprof //nolint:revive
+package pprof
 
 import (
-	"fmt"
 	"net"
 	"net/http"
 	"time"
@@ -12,13 +11,13 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
+	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
 )
 
 type pprofAuthManager interface {
-	Authenticate(req *auth.Request) (string, *auth.Error)
+	Authenticate(req *auth.Request) error
 }
 
 type pprofParent interface {
@@ -28,14 +27,12 @@ type pprofParent interface {
 // PPROF is a pprof exporter.
 type PPROF struct {
 	Address        string
-	DumpPackets    bool
 	Encryption     bool
 	ServerKey      string
 	ServerCert     string
-	AllowOrigins   []string
+	AllowOrigin    string
 	TrustedProxies conf.IPNetworks
 	ReadTimeout    conf.Duration
-	WriteTimeout   conf.Duration
 	AuthManager    pprofAuthManager
 	Parent         pprofParent
 
@@ -46,55 +43,50 @@ type PPROF struct {
 func (pp *PPROF) Initialize() error {
 	router := gin.New()
 	router.SetTrustedProxies(pp.TrustedProxies.ToTrustedProxies()) //nolint:errcheck
-	router.Use(pp.middlewarePreflightRequests)
+
+	router.Use(pp.middlewareOrigin)
 	router.Use(pp.middlewareAuth)
 
 	pprof.Register(router)
 
+	network, address := restrictnetwork.Restrict("tcp", pp.Address)
+
 	pp.httpServer = &httpp.Server{
-		Address:           pp.Address,
-		DumpPackets:       pp.DumpPackets,
-		AllowOrigins:      pp.AllowOrigins,
-		DumpPacketsPrefix: "pprof_server_conn",
-		ReadTimeout:       time.Duration(pp.ReadTimeout),
-		WriteTimeout:      time.Duration(pp.WriteTimeout),
-		Encryption:        pp.Encryption,
-		ServerCert:        pp.ServerCert,
-		ServerKey:         pp.ServerKey,
-		Handler:           router,
-		Parent:            pp,
+		Network:     network,
+		Address:     address,
+		ReadTimeout: time.Duration(pp.ReadTimeout),
+		Encryption:  pp.Encryption,
+		ServerCert:  pp.ServerCert,
+		ServerKey:   pp.ServerKey,
+		Handler:     router,
+		Parent:      pp,
 	}
 	err := pp.httpServer.Initialize()
 	if err != nil {
 		return err
 	}
 
-	str := "started with listener on " + pp.Address
-	if !pp.Encryption {
-		str += " (TCP/HTTP)"
-	} else {
-		str += " (TCP/HTTPS)"
-	}
-	pp.Log(logger.Info, str)
+	pp.Log(logger.Info, "listener opened on "+address)
 
 	return nil
 }
 
 // Close closes PPROF.
 func (pp *PPROF) Close() {
-	pp.Log(logger.Info, "closing")
-
+	pp.Log(logger.Info, "listener is closing")
 	pp.httpServer.Close()
-
-	pp.Log(logger.Debug, "closed")
 }
 
 // Log implements logger.Writer.
-func (pp *PPROF) Log(level logger.Level, format string, args ...any) {
+func (pp *PPROF) Log(level logger.Level, format string, args ...interface{}) {
 	pp.Parent.Log(level, "[pprof] "+format, args...)
 }
 
-func (pp *PPROF) middlewarePreflightRequests(ctx *gin.Context) {
+func (pp *PPROF) middlewareOrigin(ctx *gin.Context) {
+	ctx.Header("Access-Control-Allow-Origin", pp.AllowOrigin)
+	ctx.Header("Access-Control-Allow-Credentials", "true")
+
+	// preflight requests
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {
 		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET")
@@ -104,36 +96,25 @@ func (pp *PPROF) middlewarePreflightRequests(ctx *gin.Context) {
 	}
 }
 
-func (pp *PPROF) writeErrorNoLog(ctx *gin.Context, status int, err error) {
-	ctx.AbortWithStatusJSON(status, &defs.APIError{
-		Status: defs.APIErrorStatusError,
-		Error:  err.Error(),
-	})
-}
-
 func (pp *PPROF) middlewareAuth(ctx *gin.Context) {
 	req := &auth.Request{
-		Action:               conf.AuthActionPprof,
-		Query:                ctx.Request.URL.RawQuery,
-		Credentials:          httpp.Credentials(ctx.Request),
-		IP:                   net.ParseIP(ctx.ClientIP()),
-		EnableAskCredentials: true,
+		IP:     net.ParseIP(ctx.ClientIP()),
+		Action: conf.AuthActionPprof,
 	}
+	req.FillFromHTTPRequest(ctx.Request)
 
-	_, err := pp.AuthManager.Authenticate(req)
+	err := pp.AuthManager.Authenticate(req)
 	if err != nil {
-		if err.AskCredentials {
+		if err.(auth.Error).AskCredentials { //nolint:errorlint
 			ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
-			pp.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+			ctx.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
 
-		auth.LogAndDelayError(&logger.InlineWriter{
-			Parent: pp,
-			Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
-		}, err)
+		// wait some seconds to mitigate brute force attacks
+		<-time.After(auth.PauseAfterError)
 
-		pp.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+		ctx.AbortWithStatus(http.StatusUnauthorized)
 		return
 	}
 }

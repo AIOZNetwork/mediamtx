@@ -10,7 +10,7 @@ import (
 // exit when there's a panic inside the HTTP handler.
 // https://github.com/golang/go/issues/16542
 type handlerExitOnPanic struct {
-	h http.Handler
+	http.Handler
 }
 
 func (h *handlerExitOnPanic) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -23,5 +23,5 @@ func (h *handlerExitOnPanic) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			os.Exit(1)
 		}
 	}()
-	h.h.ServeHTTP(w, r)
+	h.Handler.ServeHTTP(w, r)
 }

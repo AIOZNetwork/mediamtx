@@ -15,10 +15,6 @@ import (
 	"strings"
 )
 
-const (
-	maxInboundHLSJSSize = 10 * 1024 * 1024
-)
-
 func do() error {
 	buf, err := os.ReadFile("./hlsjsdownloader/VERSION")
 	if err != nil {
@@ -38,7 +34,7 @@ func do() error {
 		return fmt.Errorf("bad status code: %v", res.StatusCode)
 	}
 
-	zipBuf, err := io.ReadAll(&customLimitReader{res.Body, maxInboundHLSJSSize})
+	zipBuf, err := io.ReadAll(res.Body)
 	if err != nil {
 		return err
 	}

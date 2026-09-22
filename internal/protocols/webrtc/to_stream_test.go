@@ -1,24 +1,23 @@
-package webrtc_test
+package webrtc
 
 import (
+	"context"
 	"testing"
 	"time"
 
-	"github.com/bluenviron/gortsplib/v5/pkg/format"
-	"github.com/pion/rtp"
-	pwebrtc "github.com/pion/webrtc/v4"
-	"github.com/stretchr/testify/require"
-
+	"github.com/bluenviron/gortsplib/v4/pkg/format"
 	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/protocols/webrtc"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
+	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
+	"github.com/stretchr/testify/require"
 )
 
 func TestToStreamNoSupportedCodecs(t *testing.T) {
-	pc := &webrtc.PeerConnection{}
-	_, err := webrtc.ToStream(pc, &conf.Path{}, nil, nil)
-	require.ErrorContains(t, err, "the stream doesn't contain any supported codec")
+	pc := &PeerConnection{}
+	_, err := ToStream(pc, nil)
+	require.Equal(t, errNoSupportedCodecsTo, err)
 }
 
 // this is impossible to test since unsupported tracks cause an error
@@ -28,7 +27,7 @@ func TestToStreamNoSupportedCodecs(t *testing.T) {
 var toFromStreamCases = []struct {
 	name       string
 	in         format.Format
-	webrtcCaps pwebrtc.RTPCodecCapability
+	webrtcCaps webrtc.RTPCodecCapability
 	out        format.Format
 }{
 	{
@@ -36,7 +35,7 @@ var toFromStreamCases = []struct {
 		&format.AV1{
 			PayloadTyp: 96,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "video/AV1",
 			ClockRate: 90000,
 		},
@@ -49,7 +48,7 @@ var toFromStreamCases = []struct {
 		&format.VP9{
 			PayloadTyp: 96,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:    "video/VP9",
 			ClockRate:   90000,
 			SDPFmtpLine: "profile-id=0",
@@ -63,7 +62,7 @@ var toFromStreamCases = []struct {
 		&format.VP8{
 			PayloadTyp: 96,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "video/VP8",
 			ClockRate: 90000,
 		},
@@ -76,7 +75,7 @@ var toFromStreamCases = []struct {
 		&format.H265{
 			PayloadTyp: 96,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:    "video/H265",
 			ClockRate:   90000,
 			SDPFmtpLine: "level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST",
@@ -88,7 +87,7 @@ var toFromStreamCases = []struct {
 	{
 		"h264",
 		test.FormatH264,
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:    "video/H264",
 			ClockRate:   90000,
 			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
@@ -101,10 +100,10 @@ var toFromStreamCases = []struct {
 	{
 		"opus multichannel",
 		&format.Opus{
-			PayloadTyp:   96,
+			PayloadTyp:   112,
 			ChannelCount: 6,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:    "audio/multiopus",
 			ClockRate:   48000,
 			Channels:    6,
@@ -118,10 +117,10 @@ var toFromStreamCases = []struct {
 	{
 		"opus stereo",
 		&format.Opus{
-			PayloadTyp:   96,
+			PayloadTyp:   111,
 			ChannelCount: 2,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:    "audio/opus",
 			ClockRate:   48000,
 			Channels:    2,
@@ -135,10 +134,10 @@ var toFromStreamCases = []struct {
 	{
 		"opus mono",
 		&format.Opus{
-			PayloadTyp:   96,
+			PayloadTyp:   111,
 			ChannelCount: 1,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:    "audio/opus",
 			ClockRate:   48000,
 			Channels:    2,
@@ -152,7 +151,7 @@ var toFromStreamCases = []struct {
 	{
 		"g722",
 		&format.G722{},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/G722",
 			ClockRate: 8000,
 		},
@@ -165,7 +164,7 @@ var toFromStreamCases = []struct {
 			SampleRate:   8000,
 			ChannelCount: 1,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/PCMA",
 			ClockRate: 8000,
 		},
@@ -183,7 +182,7 @@ var toFromStreamCases = []struct {
 			SampleRate:   8000,
 			ChannelCount: 1,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/PCMU",
 			ClockRate: 8000,
 		},
@@ -201,13 +200,13 @@ var toFromStreamCases = []struct {
 			SampleRate:   8000,
 			ChannelCount: 2,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/PCMA",
 			ClockRate: 8000,
 			Channels:  2,
 		},
 		&format.G711{
-			PayloadTyp:   96,
+			PayloadTyp:   119,
 			SampleRate:   8000,
 			ChannelCount: 2,
 		},
@@ -220,14 +219,14 @@ var toFromStreamCases = []struct {
 			SampleRate:   8000,
 			ChannelCount: 2,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/PCMU",
 			ClockRate: 8000,
 			Channels:  2,
 		},
 		&format.G711{
 			MULaw:        true,
-			PayloadTyp:   96,
+			PayloadTyp:   118,
 			SampleRate:   8000,
 			ChannelCount: 2,
 		},
@@ -239,7 +238,7 @@ var toFromStreamCases = []struct {
 			SampleRate:   16000,
 			ChannelCount: 2,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/L16",
 			ClockRate: 16000,
 			Channels:  2,
@@ -259,7 +258,7 @@ var toFromStreamCases = []struct {
 			SampleRate:   16000,
 			ChannelCount: 2,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/L16",
 			ClockRate: 16000,
 			Channels:  2,
@@ -279,7 +278,7 @@ var toFromStreamCases = []struct {
 			SampleRate:   8000,
 			ChannelCount: 2,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/L16",
 			ClockRate: 8000,
 			Channels:  2,
@@ -299,7 +298,7 @@ var toFromStreamCases = []struct {
 			SampleRate:   16000,
 			ChannelCount: 2,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/L16",
 			ClockRate: 16000,
 			Channels:  2,
@@ -319,7 +318,7 @@ var toFromStreamCases = []struct {
 			SampleRate:   48000,
 			ChannelCount: 2,
 		},
-		pwebrtc.RTPCodecCapability{
+		webrtc.RTPCodecCapability{
 			MimeType:  "audio/L16",
 			ClockRate: 48000,
 			Channels:  2,
@@ -336,11 +335,13 @@ var toFromStreamCases = []struct {
 func TestToStream(t *testing.T) {
 	for _, ca := range toFromStreamCases {
 		t.Run(ca.name, func(t *testing.T) {
-			pc1 := &webrtc.PeerConnection{
-				LocalRandomUDP:    true,
-				IPsFromInterfaces: true,
-				Publish:           true,
-				OutboundTracks: []*webrtc.OutboundTrack{{
+			pc1 := &PeerConnection{
+				HandshakeTimeout:   conf.Duration(10 * time.Second),
+				TrackGatherTimeout: conf.Duration(2 * time.Second),
+				LocalRandomUDP:     true,
+				IPsFromInterfaces:  true,
+				Publish:            true,
+				OutgoingTracks: []*OutgoingTrack{{
 					Caps: ca.webrtcCaps,
 				}},
 				Log: test.NilLogger,
@@ -349,20 +350,22 @@ func TestToStream(t *testing.T) {
 			require.NoError(t, err)
 			defer pc1.Close()
 
-			pc2 := &webrtc.PeerConnection{
-				LocalRandomUDP:    true,
-				IPsFromInterfaces: true,
-				Publish:           false,
-				Log:               test.NilLogger,
+			pc2 := &PeerConnection{
+				HandshakeTimeout:   conf.Duration(10 * time.Second),
+				TrackGatherTimeout: conf.Duration(2 * time.Second),
+				LocalRandomUDP:     true,
+				IPsFromInterfaces:  true,
+				Publish:            false,
+				Log:                test.NilLogger,
 			}
 			err = pc2.Start()
 			require.NoError(t, err)
 			defer pc2.Close()
 
-			offer, err := pc1.CreatePartialOffer(false)
+			offer, err := pc1.CreatePartialOffer()
 			require.NoError(t, err)
 
-			answer, err := pc2.CreateFullAnswer(offer, false)
+			answer, err := pc2.CreateFullAnswer(context.Background(), offer)
 			require.NoError(t, err)
 
 			err = pc1.SetAnswer(answer)
@@ -375,19 +378,19 @@ func TestToStream(t *testing.T) {
 						err2 := pc2.AddRemoteCandidate(cnd)
 						require.NoError(t, err2)
 
-					case <-pc1.Connected():
+					case <-pc1.Ready():
 						return
 					}
 				}
 			}()
 
-			err = pc1.WaitUntilConnected(10 * time.Second)
+			err = pc1.WaitUntilReady(context.Background())
 			require.NoError(t, err)
 
-			err = pc2.WaitUntilConnected(10 * time.Second)
+			err = pc2.WaitUntilReady(context.Background())
 			require.NoError(t, err)
 
-			err = pc1.OutboundTracks[0].WriteRTP(&rtp.Packet{
+			err = pc1.OutgoingTracks[0].WriteRTP(&rtp.Packet{
 				Header: rtp.Header{
 					Version:        2,
 					Marker:         true,
@@ -400,11 +403,11 @@ func TestToStream(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			err = pc2.GatherInboundTracks(2 * time.Second)
+			_, err = pc2.GatherIncomingTracks(context.Background())
 			require.NoError(t, err)
 
-			var subStream *stream.SubStream
-			medias, err := webrtc.ToStream(pc2, &conf.Path{}, &subStream, nil)
+			var stream *stream.Stream
+			medias, err := ToStream(pc2, &stream)
 			require.NoError(t, err)
 			require.Equal(t, ca.out, medias[0].Formats[0])
 		})

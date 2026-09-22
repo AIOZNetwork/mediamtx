@@ -3,14 +3,13 @@ package rtmp
 import (
 	"testing"
 
-	"github.com/bluenviron/gortmplib"
 	"github.com/stretchr/testify/require"
 )
 
 func TestToStreamNoSupportedCodecs(t *testing.T) {
-	r := &gortmplib.Reader{}
+	r := &Reader{}
 
-	_, err := ToStream(r, nil)
+	_, err := ToStream(r, nil, "teststream")
 	require.Equal(t, errNoSupportedCodecsTo, err)
 }
 

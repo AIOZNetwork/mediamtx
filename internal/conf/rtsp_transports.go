@@ -6,13 +6,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bluenviron/gortsplib/v5"
-
+	"github.com/bluenviron/gortsplib/v4"
 	"github.com/bluenviron/mediamtx/internal/conf/jsonwrapper"
 )
 
 // RTSPTransports is the rtspTransports parameter.
-type RTSPTransports map[gortsplib.Protocol]struct{}
+type RTSPTransports map[gortsplib.Transport]struct{}
 
 // MarshalJSON implements json.Marshaler.
 func (d RTSPTransports) MarshalJSON() ([]byte, error) {
@@ -23,10 +22,10 @@ func (d RTSPTransports) MarshalJSON() ([]byte, error) {
 		var v string
 
 		switch p {
-		case gortsplib.ProtocolUDP:
+		case gortsplib.TransportUDP:
 			v = "udp"
 
-		case gortsplib.ProtocolUDPMulticast:
+		case gortsplib.TransportUDPMulticast:
 			v = "multicast"
 
 		default:
@@ -54,13 +53,13 @@ func (d *RTSPTransports) UnmarshalJSON(b []byte) error {
 	for _, proto := range in {
 		switch proto {
 		case "udp":
-			(*d)[gortsplib.ProtocolUDP] = struct{}{}
+			(*d)[gortsplib.TransportUDP] = struct{}{}
 
 		case "multicast":
-			(*d)[gortsplib.ProtocolUDPMulticast] = struct{}{}
+			(*d)[gortsplib.TransportUDPMulticast] = struct{}{}
 
 		case "tcp":
-			(*d)[gortsplib.ProtocolTCP] = struct{}{}
+			(*d)[gortsplib.TransportTCP] = struct{}{}
 
 		default:
 			return fmt.Errorf("invalid transport: %s", proto)
@@ -72,11 +71,6 @@ func (d *RTSPTransports) UnmarshalJSON(b []byte) error {
 
 // UnmarshalEnv implements env.Unmarshaler.
 func (d *RTSPTransports) UnmarshalEnv(_ string, v string) error {
-	if v == "" {
-		*d = make(RTSPTransports)
-		return nil
-	}
-
 	byts, _ := json.Marshal(strings.Split(v, ","))
 	return d.UnmarshalJSON(byts)
 }

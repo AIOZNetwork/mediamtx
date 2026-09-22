@@ -1,98 +1,67 @@
-package srt_test
+package srt
 
 import (
 	"bufio"
-	"context"
 	"testing"
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
-	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
-	srtlib "github.com/datarhei/gosrt"
+	srt "github.com/datarhei/gosrt"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
-	"github.com/bluenviron/mediamtx/internal/staticsources/srt"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 func TestSource(t *testing.T) {
-	ln, err := srtlib.Listen("srt", "127.0.0.1:9002", srtlib.DefaultConfig())
+	ln, err := srt.Listen("srt", "127.0.0.1:9002", srt.DefaultConfig())
 	require.NoError(t, err)
 	defer ln.Close()
 
-	p := &test.StaticSourceParent{}
-	p.Initialize()
-
-	so := &srt.Source{
-		ReadTimeout: conf.Duration(10 * time.Second),
-		Parent:      p,
-	}
-
-	done := make(chan struct{})
-	defer func() { <-done }()
-
-	ctx, ctxCancel := context.WithCancel(context.Background())
-	defer ctxCancel()
-
-	reloadConf := make(chan *conf.Path)
-
 	go func() {
-		so.Run(defs.StaticSourceRunParams{ //nolint:errcheck
-			Context:        ctx,
-			ResolvedSource: "srt://127.0.0.1:9002?streamid=sidname&passphrase=ttest1234567",
-			Conf:           &conf.Path{},
-			ReloadConf:     reloadConf,
-		})
-		close(done)
+		req, err := ln.Accept2()
+		require.NoError(t, err)
+
+		require.Equal(t, "sidname", req.StreamId())
+		err = req.SetPassphrase("ttest1234567")
+		require.NoError(t, err)
+
+		conn, err := req.Accept()
+		require.NoError(t, err)
+		defer conn.Close()
+
+		track := &mpegts.Track{
+			Codec: &mpegts.CodecH264{},
+		}
+
+		bw := bufio.NewWriter(conn)
+		w := mpegts.NewWriter(bw, []*mpegts.Track{track})
+		require.NoError(t, err)
+
+		err = w.WriteH264(track, 0, 0, [][]byte{{ // IDR
+			5, 1,
+		}})
+		require.NoError(t, err)
+
+		err = bw.Flush()
+		require.NoError(t, err)
+
+		// wait for internal SRT queue to be written
+		time.Sleep(500 * time.Millisecond)
 	}()
 
-	req, err2 := ln.Accept2()
-	require.NoError(t, err2)
+	te := test.NewSourceTester(
+		func(p defs.StaticSourceParent) defs.StaticSource {
+			return &Source{
+				ReadTimeout: conf.Duration(10 * time.Second),
+				Parent:      p,
+			}
+		},
+		"srt://127.0.0.1:9002?streamid=sidname&passphrase=ttest1234567",
+		&conf.Path{},
+	)
+	defer te.Close()
 
-	require.Equal(t, "sidname", req.StreamId())
-	err2 = req.SetPassphrase("ttest1234567")
-	require.NoError(t, err2)
-
-	conn, err2 := req.Accept()
-	require.NoError(t, err2)
-	defer conn.Close()
-
-	track := &mpegts.Track{Codec: &tscodecs.H264{}}
-
-	bw := bufio.NewWriter(conn)
-	w := &mpegts.Writer{W: bw, Tracks: []*mpegts.Track{track}}
-	err2 = w.Initialize()
-	require.NoError(t, err2)
-
-	err2 = w.WriteH264(track, 0, 0, [][]byte{{ // IDR
-		5, 1,
-	}})
-	require.NoError(t, err2)
-
-	err = bw.Flush()
-	require.NoError(t, err)
-
-	err = w.WriteH264(track, 0, 0, [][]byte{{ // non-IDR
-		5, 2,
-	}})
-	require.NoError(t, err)
-
-	err = bw.Flush()
-	require.NoError(t, err)
-
-	<-p.Unit
-
-	require.Eventually(t, func() bool {
-		info := so.Info()
-		typeSpecific, ok := info.TypeSpecific.(*defs.APIStaticSourceTypeSpecificSRT)
-		return ok && typeSpecific.RemoteAddr != "" && typeSpecific.PacketsReceived > 0
-	}, 5*time.Second, 10*time.Millisecond)
-
-	// the source must be listening on ReloadConf
-	reloadConf <- nil
-
-	// stop test reader before 2nd H264 packet is received to avoid a crash
-	p.Close()
+	<-te.Unit
 }

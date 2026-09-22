@@ -3,21 +3,16 @@ package mpegts
 import (
 	"bufio"
 	"fmt"
-	"slices"
 	"time"
 
-	"github.com/bluenviron/gortsplib/v5/pkg/description"
-	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/bluenviron/gortsplib/v4/pkg/description"
+	"github.com/bluenviron/gortsplib/v4/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/ac3"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
-	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	mcmpegts "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
-	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
-	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/substructs"
 	srt "github.com/datarhei/gosrt"
 
-	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/unit"
@@ -31,32 +26,34 @@ func multiplyAndDivide(v, m, d int64) int64 {
 
 // FromStream maps a MediaMTX stream to a MPEG-TS writer.
 func FromStream(
-	desc *description.Session,
-	r *stream.Reader,
+	strea *stream.Stream,
+	reader stream.Reader,
 	bw *bufio.Writer,
 	sconn srt.Conn,
 	writeTimeout time.Duration,
 ) error {
 	var w *mcmpegts.Writer
 	var tracks []*mcmpegts.Track
+	setuppedFormats := make(map[format.Format]struct{})
 
 	addTrack := func(
 		media *description.Media,
 		forma format.Format,
 		track *mcmpegts.Track,
-		onData stream.OnDataFunc,
+		readFunc stream.ReadFunc,
 	) {
 		tracks = append(tracks, track)
-		r.OnData(media, forma, onData)
+		setuppedFormats[forma] = struct{}{}
+		strea.AddReader(reader, media, forma, readFunc)
 	}
 
-	for _, media := range desc.Medias {
+	for _, media := range strea.Desc().Medias {
 		for _, forma := range media.Formats {
 			clockRate := forma.ClockRate()
 
 			switch forma := forma.(type) {
 			case *format.H265: //nolint:dupl
-				track := &mcmpegts.Track{Codec: &tscodecs.H265{}}
+				track := &mcmpegts.Track{Codec: &mcmpegts.CodecH265{}}
 
 				var dtsExtractor *h265.DTSExtractor
 
@@ -64,20 +61,22 @@ func FromStream(
 					media,
 					forma,
 					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
+					func(u unit.Unit) error {
+						tunit := u.(*unit.H265)
+						if tunit.AU == nil {
 							return nil
 						}
 
+						randomAccess := h265.IsRandomAccess(tunit.AU)
+
 						if dtsExtractor == nil {
-							if !h265.IsRandomAccess(u.Payload.(unit.PayloadH265)) {
+							if !randomAccess {
 								return nil
 							}
-							dtsExtractor = &h265.DTSExtractor{}
-							dtsExtractor.Initialize()
+							dtsExtractor = h265.NewDTSExtractor()
 						}
 
-						dts, err := dtsExtractor.Extract(u.Payload.(unit.PayloadH265), u.PTS)
+						dts, err := dtsExtractor.Extract(tunit.AU, tunit.PTS)
 						if err != nil {
 							return err
 						}
@@ -85,9 +84,9 @@ func FromStream(
 						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 						err = (*w).WriteH265(
 							track,
-							u.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
+							tunit.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
 							dts,
-							u.Payload.(unit.PayloadH265))
+							tunit.AU)
 						if err != nil {
 							return err
 						}
@@ -95,7 +94,7 @@ func FromStream(
 					})
 
 			case *format.H264: //nolint:dupl
-				track := &mcmpegts.Track{Codec: &tscodecs.H264{}}
+				track := &mcmpegts.Track{Codec: &mcmpegts.CodecH264{}}
 
 				var dtsExtractor *h264.DTSExtractor
 
@@ -103,22 +102,22 @@ func FromStream(
 					media,
 					forma,
 					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
+					func(u unit.Unit) error {
+						tunit := u.(*unit.H264)
+						if tunit.AU == nil {
 							return nil
 						}
 
-						idrPresent := h264.IsRandomAccess(u.Payload.(unit.PayloadH264))
+						idrPresent := h264.IsRandomAccess(tunit.AU)
 
 						if dtsExtractor == nil {
 							if !idrPresent {
 								return nil
 							}
-							dtsExtractor = &h264.DTSExtractor{}
-							dtsExtractor.Initialize()
+							dtsExtractor = h264.NewDTSExtractor()
 						}
 
-						dts, err := dtsExtractor.Extract(u.Payload.(unit.PayloadH264), u.PTS)
+						dts, err := dtsExtractor.Extract(tunit.AU, tunit.PTS)
 						if err != nil {
 							return err
 						}
@@ -126,9 +125,9 @@ func FromStream(
 						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 						err = (*w).WriteH264(
 							track,
-							u.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
+							tunit.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
 							dts,
-							u.Payload.(unit.PayloadH264))
+							tunit.AU)
 						if err != nil {
 							return err
 						}
@@ -136,7 +135,7 @@ func FromStream(
 					})
 
 			case *format.MPEG4Video:
-				track := &mcmpegts.Track{Codec: &tscodecs.MPEG4Video{}}
+				track := &mcmpegts.Track{Codec: &mcmpegts.CodecMPEG4Video{}}
 
 				firstReceived := false
 				var lastPTS int64
@@ -145,23 +144,24 @@ func FromStream(
 					media,
 					forma,
 					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
+					func(u unit.Unit) error {
+						tunit := u.(*unit.MPEG4Video)
+						if tunit.Frame == nil {
 							return nil
 						}
 
 						if !firstReceived {
 							firstReceived = true
-						} else if u.PTS < lastPTS {
+						} else if tunit.PTS < lastPTS {
 							return fmt.Errorf("MPEG-4 Video streams with B-frames are not supported (yet)")
 						}
-						lastPTS = u.PTS
+						lastPTS = tunit.PTS
 
 						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 						err := (*w).WriteMPEG4Video(
 							track,
-							u.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
-							u.Payload.(unit.PayloadMPEG4Video))
+							tunit.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
+							tunit.Frame)
 						if err != nil {
 							return err
 						}
@@ -169,7 +169,7 @@ func FromStream(
 					})
 
 			case *format.MPEG1Video:
-				track := &mcmpegts.Track{Codec: &tscodecs.MPEG1Video{}}
+				track := &mcmpegts.Track{Codec: &mcmpegts.CodecMPEG1Video{}}
 
 				firstReceived := false
 				var lastPTS int64
@@ -178,23 +178,24 @@ func FromStream(
 					media,
 					forma,
 					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
+					func(u unit.Unit) error {
+						tunit := u.(*unit.MPEG1Video)
+						if tunit.Frame == nil {
 							return nil
 						}
 
 						if !firstReceived {
 							firstReceived = true
-						} else if u.PTS < lastPTS {
-							return fmt.Errorf("MPEG-1/2 Video streams with B-frames are not supported (yet)")
+						} else if tunit.PTS < lastPTS {
+							return fmt.Errorf("MPEG-1 Video streams with B-frames are not supported (yet)")
 						}
-						lastPTS = u.PTS
+						lastPTS = tunit.PTS
 
 						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 						err := (*w).WriteMPEG1Video(
 							track,
-							u.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
-							u.Payload.(unit.PayloadMPEG1Video))
+							tunit.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
+							tunit.Frame)
 						if err != nil {
 							return err
 						}
@@ -202,50 +203,25 @@ func FromStream(
 					})
 
 			case *format.Opus:
-				track := &mcmpegts.Track{Codec: &tscodecs.Opus{
-					Desc: &substructs.OpusAudioDescriptor{
-						ChannelConfigCode: uint8(forma.ChannelCount),
-					},
+				track := &mcmpegts.Track{Codec: &mcmpegts.CodecOpus{
+					ChannelCount: forma.ChannelCount,
 				}}
 
 				addTrack(
 					media,
 					forma,
 					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
+					func(u unit.Unit) error {
+						tunit := u.(*unit.Opus)
+						if tunit.Packets == nil {
 							return nil
 						}
 
 						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 						err := (*w).WriteOpus(
 							track,
-							multiplyAndDivide(u.PTS, 90000, int64(clockRate)),
-							u.Payload.(unit.PayloadOpus))
-						if err != nil {
-							return err
-						}
-						return bw.Flush()
-					})
-
-			case *format.KLV:
-				track := &mcmpegts.Track{
-					Codec: &tscodecs.KLV{
-						Synchronous: true,
-					},
-				}
-
-				addTrack(
-					media,
-					forma,
-					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
-							return nil
-						}
-
-						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
-						err := (*w).WriteKLV(track, multiplyAndDivide(u.PTS, 90000, 90000), u.Payload.(unit.PayloadKLV))
+							multiplyAndDivide(tunit.PTS, 90000, int64(clockRate)),
+							tunit.Packets)
 						if err != nil {
 							return err
 						}
@@ -253,86 +229,27 @@ func FromStream(
 					})
 
 			case *format.MPEG4Audio:
-				track := &mcmpegts.Track{Codec: &tscodecs.MPEG4Audio{
-					Config: *forma.Config,
-				}}
+				co := forma.GetConfig()
+				if co != nil {
+					track := &mcmpegts.Track{Codec: &mcmpegts.CodecMPEG4Audio{
+						Config: *co,
+					}}
 
-				addTrack(
-					media,
-					forma,
-					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
-							return nil
-						}
-
-						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
-						err := (*w).WriteMPEG4Audio(
-							track,
-							multiplyAndDivide(u.PTS, 90000, int64(clockRate)),
-							u.Payload.(unit.PayloadMPEG4Audio))
-						if err != nil {
-							return err
-						}
-						return bw.Flush()
-					})
-
-			case *format.MPEG4AudioLATM:
-				track := &mcmpegts.Track{Codec: &tscodecs.MPEG4AudioLATM{}}
-
-				if !forma.CPresent {
 					addTrack(
 						media,
 						forma,
 						track,
-						func(u *unit.Unit) error {
-							if u.NilPayload() {
-								return nil
-							}
-
-							var elIn mpeg4audio.AudioMuxElement
-							elIn.MuxConfigPresent = false
-							elIn.StreamMuxConfig = forma.StreamMuxConfig
-							err := elIn.Unmarshal(u.Payload.(unit.PayloadMPEG4AudioLATM))
-							if err != nil {
-								return err
-							}
-
-							var elOut mpeg4audio.AudioMuxElement
-							elOut.MuxConfigPresent = true
-							elOut.StreamMuxConfig = forma.StreamMuxConfig
-							elOut.UseSameStreamMux = false
-							elOut.Payloads = elIn.Payloads
-							buf, err := elOut.Marshal()
-							if err != nil {
-								return err
-							}
-
-							sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
-							err = (*w).WriteMPEG4AudioLATM(
-								track,
-								multiplyAndDivide(u.PTS, 90000, int64(clockRate)),
-								[][]byte{buf})
-							if err != nil {
-								return err
-							}
-							return bw.Flush()
-						})
-				} else {
-					addTrack(
-						media,
-						forma,
-						track,
-						func(u *unit.Unit) error {
-							if u.NilPayload() {
+						func(u unit.Unit) error {
+							tunit := u.(*unit.MPEG4Audio)
+							if tunit.AUs == nil {
 								return nil
 							}
 
 							sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
-							err := (*w).WriteMPEG4AudioLATM(
+							err := (*w).WriteMPEG4Audio(
 								track,
-								multiplyAndDivide(u.PTS, 90000, int64(clockRate)),
-								[][]byte{u.Payload.(unit.PayloadMPEG4AudioLATM)})
+								multiplyAndDivide(tunit.PTS, 90000, int64(clockRate)),
+								tunit.AUs)
 							if err != nil {
 								return err
 							}
@@ -341,22 +258,23 @@ func FromStream(
 				}
 
 			case *format.MPEG1Audio:
-				track := &mcmpegts.Track{Codec: &tscodecs.MPEG1Audio{}}
+				track := &mcmpegts.Track{Codec: &mcmpegts.CodecMPEG1Audio{}}
 
 				addTrack(
 					media,
 					forma,
 					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
+					func(u unit.Unit) error {
+						tunit := u.(*unit.MPEG1Audio)
+						if tunit.Frames == nil {
 							return nil
 						}
 
 						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 						err := (*w).WriteMPEG1Audio(
 							track,
-							u.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
-							u.Payload.(unit.PayloadMPEG1Audio))
+							tunit.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
+							tunit.Frames)
 						if err != nil {
 							return err
 						}
@@ -364,19 +282,20 @@ func FromStream(
 					})
 
 			case *format.AC3:
-				track := &mcmpegts.Track{Codec: &tscodecs.AC3{}}
+				track := &mcmpegts.Track{Codec: &mcmpegts.CodecAC3{}}
 
 				addTrack(
 					media,
 					forma,
 					track,
-					func(u *unit.Unit) error {
-						if u.NilPayload() {
+					func(u unit.Unit) error {
+						tunit := u.(*unit.AC3)
+						if tunit.Frames == nil {
 							return nil
 						}
 
-						for i, frame := range u.Payload.(unit.PayloadAC3) {
-							framePTS := u.PTS + int64(i)*ac3.SamplesPerFrame
+						for i, frame := range tunit.Frames {
+							framePTS := tunit.PTS + int64(i)*ac3.SamplesPerFrame
 
 							sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 							err := (*w).WriteAC3(
@@ -397,18 +316,17 @@ func FromStream(
 		return errNoSupportedCodecs
 	}
 
-	setuppedFormats := r.Formats()
-
 	n := 1
-	for _, medi := range desc.Medias {
+	for _, medi := range strea.Desc().Medias {
 		for _, forma := range medi.Formats {
-			if !slices.Contains(setuppedFormats, forma) {
-				r.Parent.Log(logger.Warn, "skipping track %d (%s)", n, formatlabel.FormatToLabel(forma))
+			if _, ok := setuppedFormats[forma]; !ok {
+				reader.Log(logger.Warn, "skipping track %d (%s)", n, forma.Codec())
 			}
 			n++
 		}
 	}
 
-	w = &mcmpegts.Writer{W: bw, Tracks: tracks}
-	return w.Initialize()
+	w = mcmpegts.NewWriter(bw, tracks)
+
+	return nil
 }

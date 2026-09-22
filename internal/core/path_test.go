@@ -14,20 +14,62 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluenviron/gortmplib"
-	"github.com/bluenviron/gortsplib/v5"
-	"github.com/bluenviron/gortsplib/v5/pkg/base"
-	"github.com/bluenviron/gortsplib/v5/pkg/description"
-	"github.com/bluenviron/gortsplib/v5/pkg/headers"
+	"github.com/bluenviron/gortsplib/v4"
+	"github.com/bluenviron/gortsplib/v4/pkg/base"
+	"github.com/bluenviron/gortsplib/v4/pkg/description"
+	"github.com/bluenviron/gortsplib/v4/pkg/headers"
+	"github.com/bluenviron/gortsplib/v4/pkg/sdp"
 	srt "github.com/datarhei/gosrt"
+	"github.com/google/uuid"
 	"github.com/pion/rtp"
-	"github.com/pion/sdp/v3"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/protocols/rtmp"
 	"github.com/bluenviron/mediamtx/internal/protocols/whip"
+	"github.com/bluenviron/mediamtx/internal/servers/hls/transcoder"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
+
+func TestShouldStartHLSTranscoderSkipsNestedABROutputs(t *testing.T) {
+	pathConf := &conf.Path{HLSTranscoding: true}
+
+	for _, pathName := range []string{"cam_1", "nested/cam_1"} {
+		if !shouldStartHLSTranscoder(pathName, pathConf) {
+			t.Fatalf("expected source path %q to start transcoder", pathName)
+		}
+	}
+
+	for _, pathName := range []string{"cam_1/video/720", "cam_1/audio/main", "nested/cam_1/video/480"} {
+		if shouldStartHLSTranscoder(pathName, pathConf) {
+			t.Fatalf("expected ABR output path %q to skip transcoder", pathName)
+		}
+	}
+}
+
+func TestEffectiveHLSTranscoderConfDoesNotMutateOriginal(t *testing.T) {
+	pathConf := &conf.Path{
+		HLSTranscoding: true,
+		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
+			{Name: "1080", Width: 1920, Height: 1080, VideoBitrate: "6000k"},
+			{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+			{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
+		},
+	}
+
+	effective := effectiveHLSTranscoderConf(pathConf, &transcoder.SourceInfo{Height: 720})
+	if len(effective.HLSTranscodingRenditions) != 2 {
+		t.Fatalf("expected filtered effective renditions, got %+v", effective.HLSTranscodingRenditions)
+	}
+	if len(pathConf.HLSTranscodingRenditions) != 3 {
+		t.Fatalf("original config was mutated: %+v", pathConf.HLSTranscodingRenditions)
+	}
+	effective.HLSTranscodingRenditions[0].Name = "changed"
+	if pathConf.HLSTranscodingRenditions[1].Name != "720" {
+		t.Fatalf("effective config aliases original rendition slice")
+	}
+}
 
 type testServer struct {
 	onDescribe func(*gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error)
@@ -51,12 +93,15 @@ func (sh *testServer) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respo
 var _ defs.Path = &path{}
 
 func TestPathRunOnDemand(t *testing.T) {
+	onDemand := filepath.Join(os.TempDir(), "on_demand")
+	onUnDemand := filepath.Join(os.TempDir(), "on_undemand")
+
 	for _, ca := range []string{"describe", "setup", "describe and setup"} {
 		t.Run(ca, func(t *testing.T) {
-			onDemand := filepath.Join(t.TempDir(), "on_demand")
-			onUnDemand := filepath.Join(t.TempDir(), "on_undemand")
+			defer os.Remove(onDemand)
+			defer os.Remove(onUnDemand)
 
-			p1, ok := newInstance(t, fmt.Sprintf("rtmp: no\n"+
+			p1, ok := newInstance(fmt.Sprintf("rtmp: no\n"+
 				"hls: no\n"+
 				"webrtc: no\n"+
 				"paths:\n"+
@@ -76,8 +121,7 @@ func TestPathRunOnDemand(t *testing.T) {
 				br := bufio.NewReader(conn)
 
 				if ca == "describe" || ca == "describe and setup" {
-					var u *base.URL
-					u, err = base.ParseURL("rtsp://localhost:8554/ondemand?key1=val1&key2=val2")
+					u, err := base.ParseURL("rtsp://localhost:8554/ondemand?param=value")
 					require.NoError(t, err)
 
 					byts, _ := base.Request{
@@ -99,14 +143,13 @@ func TestPathRunOnDemand(t *testing.T) {
 					err = desc.Unmarshal(res.Body)
 					require.NoError(t, err)
 					control, _ = desc.MediaDescriptions[0].Attribute("control")
-					control = "rtsp://localhost:8554/ondemand?key1=val1&key2=val2/" + control
+					control = "rtsp://localhost:8554/ondemand?param=value/" + control
 				} else {
-					control = "rtsp://localhost:8554/ondemand?key1=val1&key2=val2/"
+					control = "rtsp://localhost:8554/ondemand?param=value/"
 				}
 
 				if ca == "setup" || ca == "describe and setup" {
-					var u *base.URL
-					u, err = base.ParseURL(control)
+					u, err := base.ParseURL(control)
 					require.NoError(t, err)
 
 					byts, _ := base.Request{
@@ -149,18 +192,26 @@ func TestPathRunOnDemand(t *testing.T) {
 }
 
 func TestPathRunOnConnect(t *testing.T) {
-	serverCertFpath := test.CreateTempFile(t, test.TLSCertPub)
-	serverKeyFpath := test.CreateTempFile(t, test.TLSCertKey)
+	serverCertFpath, err := test.CreateTempFile(test.TLSCertPub)
+	require.NoError(t, err)
+	defer os.Remove(serverCertFpath)
+
+	serverKeyFpath, err := test.CreateTempFile(test.TLSCertKey)
+	require.NoError(t, err)
+	defer os.Remove(serverKeyFpath)
 
 	for _, ca := range []string{"rtsp", "rtsps", "rtmp", "rtmps", "srt"} {
 		t.Run(ca, func(t *testing.T) {
-			onConnect := filepath.Join(t.TempDir(), "on_connect")
-			onDisconnect := filepath.Join(t.TempDir(), "on_disconnect")
+			onConnect := filepath.Join(os.TempDir(), "on_connect")
+			defer os.Remove(onConnect)
+
+			onDisconnect := filepath.Join(os.TempDir(), "on_disconnect")
+			defer os.Remove(onDisconnect)
 
 			connType := ""
 
 			func() {
-				p, ok := newInstance(t, fmt.Sprintf(
+				p, ok := newInstance(fmt.Sprintf(
 					"rtspEncryption: optional\n"+
 						"rtspServerCert: "+serverCertFpath+"\n"+
 						"rtspServerKey: "+serverKeyFpath+"\n"+
@@ -201,47 +252,40 @@ func TestPathRunOnConnect(t *testing.T) {
 				case "rtmp":
 					connType = "rtmpConn"
 
-					var u *url.URL
 					u, err := url.Parse("rtmp://127.0.0.1:1935/test")
 					require.NoError(t, err)
 
-					conn := &gortmplib.Client{
-						URL:     u,
-						Publish: true,
-					}
-					err = conn.Initialize(context.Background())
+					nconn, err := net.Dial("tcp", u.Host)
 					require.NoError(t, err)
-					defer conn.Close()
+					defer nconn.Close()
+
+					_, err = rtmp.NewClientConn(nconn, u, true)
+					require.NoError(t, err)
 
 				case "rtmps":
 					connType = "rtmpsConn"
 
-					var u *url.URL
 					u, err := url.Parse("rtmps://127.0.0.1:1936/test")
 					require.NoError(t, err)
 
-					conn := &gortmplib.Client{
-						URL:       u,
-						Publish:   true,
-						TLSConfig: &tls.Config{InsecureSkipVerify: true},
-					}
-					err = conn.Initialize(context.Background())
+					nconn, err := tls.Dial("tcp", u.Host, &tls.Config{InsecureSkipVerify: true})
 					require.NoError(t, err)
-					defer conn.Close()
+					defer nconn.Close() //nolint:errcheck
+
+					_, err = rtmp.NewClientConn(nconn, u, true)
+					require.NoError(t, err)
 
 				case "srt":
 					connType = "srtConn"
 
 					conf := srt.DefaultConfig()
-					var address string
 					address, err := conf.UnmarshalURL("srt://localhost:8890?streamid=publish:test")
 					require.NoError(t, err)
 
 					err = conf.Validate()
 					require.NoError(t, err)
 
-					var c srt.Conn
-					c, err = srt.Dial("srt", address, conf)
+					c, err := srt.Dial("srt", address, conf)
 					require.NoError(t, err)
 					defer c.Close()
 				}
@@ -249,7 +293,6 @@ func TestPathRunOnConnect(t *testing.T) {
 				time.Sleep(500 * time.Millisecond)
 			}()
 
-			var byts []byte
 			byts, err := os.ReadFile(onConnect)
 			require.NoError(t, err)
 			fields := strings.Split(string(byts[:len(byts)-1]), " ")
@@ -267,19 +310,22 @@ func TestPathRunOnConnect(t *testing.T) {
 	}
 }
 
-func TestPathRunOnAvailable(t *testing.T) {
-	onAvailable := filepath.Join(t.TempDir(), "on_available")
-	onUnavailable := filepath.Join(t.TempDir(), "on_unavailable")
+func TestPathRunOnReady(t *testing.T) {
+	onReady := filepath.Join(os.TempDir(), "on_ready")
+	defer os.Remove(onReady)
+
+	onNotReady := filepath.Join(os.TempDir(), "on_unready")
+	defer os.Remove(onNotReady)
 
 	func() {
-		p, ok := newInstance(t, fmt.Sprintf("rtmp: no\n"+
+		p, ok := newInstance(fmt.Sprintf("rtmp: no\n"+
 			"hls: no\n"+
 			"webrtc: no\n"+
 			"paths:\n"+
 			"  ~te(st):\n"+
-			"    runOnAvailable: sh -c 'echo \"$MTX_PATH $MTX_QUERY $MTX_SOURCE_TYPE $MTX_SOURCE_ID $RTSP_PORT $G1\" > %s'\n"+
-			"    runOnUnavailable: sh -c 'echo \"$MTX_PATH $MTX_QUERY $MTX_SOURCE_TYPE $MTX_SOURCE_ID $RTSP_PORT $G1\" > %s'\n",
-			onAvailable, onUnavailable))
+			"    runOnReady: sh -c 'echo \"$MTX_PATH $MTX_QUERY $MTX_SOURCE_TYPE $MTX_SOURCE_ID $RTSP_PORT $G1\" > %s'\n"+
+			"    runOnNotReady: sh -c 'echo \"$MTX_PATH $MTX_QUERY $MTX_SOURCE_TYPE $MTX_SOURCE_ID $RTSP_PORT $G1\" > %s'\n",
+			onReady, onNotReady))
 		require.Equal(t, true, ok)
 		defer p.Close()
 
@@ -294,165 +340,46 @@ func TestPathRunOnAvailable(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}()
 
-	byts, err := os.ReadFile(onAvailable)
+	byts, err := os.ReadFile(onReady)
 	require.NoError(t, err)
 	fields := strings.Split(string(byts[:len(byts)-1]), " ")
 	require.Equal(t, "test", fields[0])
-	require.Equal(t, "query%3Dvalue", fields[1])
+	require.Equal(t, "query=value", fields[1])
 	require.Equal(t, "rtspSession", fields[2])
 	require.NotEmpty(t, fields[3])
 	require.Equal(t, "8554", fields[4])
 	require.Equal(t, "st", fields[5])
 
-	byts, err = os.ReadFile(onUnavailable)
+	byts, err = os.ReadFile(onNotReady)
 	require.NoError(t, err)
 	fields = strings.Split(string(byts[:len(byts)-1]), " ")
 	require.Equal(t, "test", fields[0])
-	require.Equal(t, "query%3Dvalue", fields[1])
+	require.Equal(t, "query=value", fields[1])
 	require.Equal(t, "rtspSession", fields[2])
 	require.NotEmpty(t, fields[3])
 	require.Equal(t, "8554", fields[4])
 	require.Equal(t, "st", fields[5])
-}
-
-func TestPathRunOnAvailableQueryInjection(t *testing.T) {
-	sentinel := filepath.Join(t.TempDir(), "mediamtx_test_query_injection_sentinel")
-
-	for _, ca := range []struct {
-		name   string
-		cmdstr string
-		query  string
-	}{
-		{
-			// $(…) inside double quotes still triggers command substitution.
-			// ${IFS} expands to a space, avoiding a literal space in the query string.
-			name:   "command substitution dollar",
-			cmdstr: "sh -c 'echo \"$MTX_QUERY\"'",
-			query:  "$(touch${IFS}" + sentinel + "1)",
-		},
-		{
-			// > in an unquoted expansion redirects echo's output, creating the file.
-			name:   "redirect",
-			cmdstr: "sh -c 'echo $MTX_QUERY'",
-			query:  ">" + sentinel + "2",
-		},
-		{
-			// & in an unquoted expansion backgrounds echo and runs touch directly.
-			// ${IFS} expands to a space, avoiding a literal space in the query string.
-			name:   "and operator",
-			cmdstr: "sh -c 'echo $MTX_QUERY'",
-			query:  "&touch${IFS}" + sentinel + "3",
-		},
-	} {
-		t.Run(ca.name, func(t *testing.T) {
-			p, ok := newInstance(t, fmt.Sprintf(
-				"rtmp: no\nhls: no\nwebrtc: no\npaths:\n  test:\n    runOnAvailable: %s\n",
-				ca.cmdstr))
-			require.Equal(t, true, ok)
-			defer p.Close()
-
-			c := gortsplib.Client{}
-			err := c.StartRecording(
-				"rtsp://localhost:8554/test?"+ca.query,
-				&description.Session{Medias: []*description.Media{test.UniqueMediaH264()}})
-			require.NoError(t, err)
-			defer c.Close()
-
-			time.Sleep(500 * time.Millisecond)
-
-			_, statErr := os.Stat(sentinel)
-			require.ErrorIs(t, statErr, os.ErrNotExist)
-		})
-	}
-}
-
-func TestPathRunOnOnline(t *testing.T) {
-	onOnline := filepath.Join(t.TempDir(), "on_online")
-	onOffline := filepath.Join(t.TempDir(), "on_offline")
-
-	func() {
-		p, ok := newInstance(t, fmt.Sprintf("rtmp: no\n"+
-			"hls: no\n"+
-			"webrtc: no\n"+
-			"paths:\n"+
-			"  test:\n"+
-			"    alwaysAvailable: yes\n"+
-			"    alwaysAvailableTracks:\n"+
-			"    - codec: H264\n"+
-			"    runOnOnline: sh -c 'echo \"$MTX_PATH $MTX_QUERY $MTX_SOURCE_TYPE $MTX_SOURCE_ID $RTSP_PORT $G1\" "+
-			"> %s; while true; do sleep 1; done'\n"+
-			"    runOnOffline: sh -c 'echo \"$MTX_PATH $MTX_QUERY $MTX_SOURCE_TYPE $MTX_SOURCE_ID $RTSP_PORT $G1\" "+
-			"> %s'\n",
-			onOnline, onOffline))
-		require.Equal(t, true, ok)
-		defer p.Close()
-
-		_, err := os.Stat(onOnline)
-		require.ErrorIs(t, err, os.ErrNotExist)
-
-		c := gortsplib.Client{}
-
-		err = c.StartRecording(
-			"rtsp://localhost:8554/test?query=value",
-			&description.Session{Medias: []*description.Media{test.UniqueMediaH264()}})
-		require.NoError(t, err)
-
-		for {
-			_, err = os.Stat(onOnline)
-			if err == nil {
-				break
-			}
-			require.ErrorIs(t, err, os.ErrNotExist)
-			time.Sleep(50 * time.Millisecond)
-		}
-
-		_, err = os.Stat(onOffline)
-		require.ErrorIs(t, err, os.ErrNotExist)
-
-		c.Close()
-
-		for {
-			_, err = os.Stat(onOffline)
-			if err == nil {
-				break
-			}
-			require.ErrorIs(t, err, os.ErrNotExist)
-			time.Sleep(50 * time.Millisecond)
-		}
-	}()
-
-	byts, err := os.ReadFile(onOnline)
-	require.NoError(t, err)
-	fields := strings.Split(string(byts[:len(byts)-1]), " ")
-	require.Equal(t, "test", fields[0])
-	require.Equal(t, "query%3Dvalue", fields[1])
-	require.Equal(t, "rtspSession", fields[2])
-	require.NotEmpty(t, fields[3])
-	require.Equal(t, "8554", fields[4])
-	require.Equal(t, "", fields[5])
-
-	byts, err = os.ReadFile(onOffline)
-	require.NoError(t, err)
-	fields = strings.Split(string(byts[:len(byts)-1]), " ")
-	require.Equal(t, "test", fields[0])
-	require.Equal(t, "query%3Dvalue", fields[1])
-	require.Equal(t, "rtspSession", fields[2])
-	require.NotEmpty(t, fields[3])
-	require.Equal(t, "8554", fields[4])
-	require.Equal(t, "", fields[5])
 }
 
 func TestPathRunOnRead(t *testing.T) {
-	serverCertFpath := test.CreateTempFile(t, test.TLSCertPub)
-	serverKeyFpath := test.CreateTempFile(t, test.TLSCertKey)
+	serverCertFpath, err := test.CreateTempFile(test.TLSCertPub)
+	require.NoError(t, err)
+	defer os.Remove(serverCertFpath)
+
+	serverKeyFpath, err := test.CreateTempFile(test.TLSCertKey)
+	require.NoError(t, err)
+	defer os.Remove(serverKeyFpath)
 
 	for _, ca := range []string{"rtsp", "rtsps", "rtmp", "rtmps", "srt", "webrtc"} {
 		t.Run(ca, func(t *testing.T) {
-			onRead := filepath.Join(t.TempDir(), "on_read")
-			onUnread := filepath.Join(t.TempDir(), "on_unread")
+			onRead := filepath.Join(os.TempDir(), "on_read")
+			defer os.Remove(onRead)
+
+			onUnread := filepath.Join(os.TempDir(), "on_unread")
+			defer os.Remove(onUnread)
 
 			func() {
-				p, ok := newInstance(t, fmt.Sprintf(
+				p, ok := newInstance(fmt.Sprintf(
 					"rtspEncryption: optional\n"+
 						"rtspServerCert: "+serverCertFpath+"\n"+
 						"rtspServerKey: "+serverKeyFpath+"\n"+
@@ -510,21 +437,16 @@ func TestPathRunOnRead(t *testing.T) {
 
 				switch ca {
 				case "rtsp":
-					var u *base.URL
-					u, err = base.ParseURL("rtsp://127.0.0.1:8554/test?query=value")
+					reader := gortsplib.Client{}
+
+					u, err := base.ParseURL("rtsp://127.0.0.1:8554/test?query=value")
 					require.NoError(t, err)
 
-					reader := gortsplib.Client{
-						Scheme: u.Scheme,
-						Host:   u.Host,
-					}
-
-					err = reader.Start()
+					err = reader.Start(u.Scheme, u.Host)
 					require.NoError(t, err)
 					defer reader.Close()
 
-					var desc *description.Session
-					desc, _, err = reader.Describe(u)
+					desc, _, err := reader.Describe(u)
 					require.NoError(t, err)
 
 					err = reader.SetupAll(desc.BaseURL, desc.Medias)
@@ -534,22 +456,16 @@ func TestPathRunOnRead(t *testing.T) {
 					require.NoError(t, err)
 
 				case "rtsps":
-					var u *base.URL
-					u, err = base.ParseURL("rtsps://127.0.0.1:8322/test?query=value")
+					reader := gortsplib.Client{TLSConfig: &tls.Config{InsecureSkipVerify: true}}
+
+					u, err := base.ParseURL("rtsps://127.0.0.1:8322/test?query=value")
 					require.NoError(t, err)
 
-					reader := gortsplib.Client{
-						Scheme:    u.Scheme,
-						Host:      u.Host,
-						TLSConfig: &tls.Config{InsecureSkipVerify: true},
-					}
-
-					err = reader.Start()
+					err = reader.Start(u.Scheme, u.Host)
 					require.NoError(t, err)
 					defer reader.Close()
 
-					var desc *description.Session
-					desc, _, err = reader.Describe(u)
+					desc, _, err := reader.Describe(u)
 					require.NoError(t, err)
 
 					err = reader.SetupAll(desc.BaseURL, desc.Medias)
@@ -559,40 +475,32 @@ func TestPathRunOnRead(t *testing.T) {
 					require.NoError(t, err)
 
 				case "rtmp":
-					var u *url.URL
-					u, err = url.Parse("rtmp://127.0.0.1:1935/test?query=value")
+					u, err := url.Parse("rtmp://127.0.0.1:1935/test?query=value")
 					require.NoError(t, err)
 
-					conn := &gortmplib.Client{
-						URL:     u,
-						Publish: false,
-					}
-					err = conn.Initialize(context.Background())
+					nconn, err := net.Dial("tcp", u.Host)
 					require.NoError(t, err)
-					defer conn.Close()
+					defer nconn.Close()
 
-					r := &gortmplib.Reader{
-						Conn: conn,
-					}
-					err = r.Initialize()
+					conn, err := rtmp.NewClientConn(nconn, u, false)
+					require.NoError(t, err)
+
+					_, err = rtmp.NewReader(conn, uuid.Nil)
 					require.NoError(t, err)
 
 				case "rtmps":
-					var u *url.URL
-					u, err = url.Parse("rtmps://127.0.0.1:1936/test?query=value")
+					u, err := url.Parse("rtmps://127.0.0.1:1936/test?query=value")
 					require.NoError(t, err)
 
-					conn := &gortmplib.Client{
-						URL:       u,
-						Publish:   false,
-						TLSConfig: &tls.Config{InsecureSkipVerify: true},
-					}
-					err = conn.Initialize(context.Background())
+					nconn, err := tls.Dial("tcp", u.Host, &tls.Config{InsecureSkipVerify: true})
 					require.NoError(t, err)
-					defer conn.Close()
+					defer nconn.Close() //nolint:errcheck
+
+					conn, err := rtmp.NewClientConn(nconn, u, false)
+					require.NoError(t, err)
 
 					go func() {
-						for i := range uint16(3) {
+						for i := uint16(0); i < 3; i++ {
 							err2 := source.WritePacketRTP(media0, &rtp.Packet{
 								Header: rtp.Header{
 									Version:        2,
@@ -608,23 +516,18 @@ func TestPathRunOnRead(t *testing.T) {
 						}
 					}()
 
-					r := &gortmplib.Reader{
-						Conn: conn,
-					}
-					err = r.Initialize()
+					_, err = rtmp.NewReader(conn, uuid.Nil)
 					require.NoError(t, err)
 
 				case "srt":
 					conf := srt.DefaultConfig()
-					var address string
-					address, err = conf.UnmarshalURL("srt://localhost:8890?streamid=read:test:query=value")
+					address, err := conf.UnmarshalURL("srt://localhost:8890?streamid=read:test:query=value")
 					require.NoError(t, err)
 
 					err = conf.Validate()
 					require.NoError(t, err)
 
-					var reader srt.Conn
-					reader, err = srt.Dial("srt", address, conf)
+					reader, err := srt.Dial("srt", address, conf)
 					require.NoError(t, err)
 					defer reader.Close()
 
@@ -633,8 +536,7 @@ func TestPathRunOnRead(t *testing.T) {
 					defer tr.CloseIdleConnections()
 					hc := &http.Client{Transport: tr}
 
-					var u *url.URL
-					u, err = url.Parse("http://localhost:8889/test/whep?query=value")
+					u, err := url.Parse("http://localhost:8889/test/whep?query=value")
 					require.NoError(t, err)
 
 					c := &whip.Client{
@@ -643,7 +545,7 @@ func TestPathRunOnRead(t *testing.T) {
 						Log:        test.NilLogger,
 					}
 
-					err = c.Initialize(context.Background())
+					_, err = c.Read(context.Background())
 					require.NoError(t, err)
 					defer checkClose(t, c.Close)
 				}
@@ -668,12 +570,11 @@ func TestPathRunOnRead(t *testing.T) {
 				readerType = "webRTCSession"
 			}
 
-			var byts []byte
 			byts, err := os.ReadFile(onRead)
 			require.NoError(t, err)
 			fields := strings.Split(string(byts[:len(byts)-1]), " ")
 			require.Equal(t, "test", fields[0])
-			require.Equal(t, "query%3Dvalue", fields[1])
+			require.Equal(t, "query=value", fields[1])
 			require.Equal(t, readerType, fields[2])
 			require.NotEmpty(t, fields[3])
 			require.Equal(t, "8554", fields[4])
@@ -683,7 +584,7 @@ func TestPathRunOnRead(t *testing.T) {
 			require.NoError(t, err)
 			fields = strings.Split(string(byts[:len(byts)-1]), " ")
 			require.Equal(t, "test", fields[0])
-			require.Equal(t, "query%3Dvalue", fields[1])
+			require.Equal(t, "query=value", fields[1])
 			require.Equal(t, readerType, fields[2])
 			require.NotEmpty(t, fields[3])
 			require.Equal(t, "8554", fields[4])
@@ -693,14 +594,18 @@ func TestPathRunOnRead(t *testing.T) {
 }
 
 func TestPathRunOnRecordSegment(t *testing.T) {
-	onRecordSegmentCreate := filepath.Join(t.TempDir(), "on_record_segment_create")
-	onRecordSegmentComplete := filepath.Join(t.TempDir(), "on_record_segment_complete")
+	onRecordSegmentCreate := filepath.Join(os.TempDir(), "on_record_segment_create")
+	defer os.Remove(onRecordSegmentCreate)
 
-	recordDir := t.TempDir()
-	var err error
+	onRecordSegmentComplete := filepath.Join(os.TempDir(), "on_record_segment_complete")
+	defer os.Remove(onRecordSegmentComplete)
+
+	recordDir, err := os.MkdirTemp("", "rtsp-path-record")
+	require.NoError(t, err)
+	defer os.RemoveAll(recordDir)
 
 	func() {
-		p, ok := newInstance(t, fmt.Sprintf("record: yes\n"+
+		p, ok := newInstance(fmt.Sprintf("record: yes\n"+
 			"recordPath: %s\n"+
 			"paths:\n"+
 			"  test:\n"+
@@ -723,7 +628,7 @@ func TestPathRunOnRecordSegment(t *testing.T) {
 		require.NoError(t, err)
 		defer source.Close()
 
-		for i := range 4 {
+		for i := 0; i < 4; i++ {
 			err = source.WritePacketRTP(media0, &rtp.Packet{
 				Header: rtp.Header{
 					Version:        2,
@@ -756,8 +661,8 @@ func TestPathRunOnRecordSegment(t *testing.T) {
 }
 
 func TestPathMaxReaders(t *testing.T) {
-	p, ok := newInstance(t, "paths:\n"+
-		"  all_others:\n"+
+	p, ok := newInstance("paths:\n" +
+		"  all_others:\n" +
 		"    maxReaders: 1\n")
 	require.Equal(t, true, ok)
 	defer p.Close()
@@ -773,22 +678,17 @@ func TestPathMaxReaders(t *testing.T) {
 	require.NoError(t, err)
 	defer source.Close()
 
-	for i := range 2 {
-		var u *base.URL
-		u, err = base.ParseURL("rtsp://127.0.0.1:8554/mystream")
+	for i := 0; i < 2; i++ {
+		reader := gortsplib.Client{}
+
+		u, err := base.ParseURL("rtsp://127.0.0.1:8554/mystream")
 		require.NoError(t, err)
 
-		reader := gortsplib.Client{
-			Scheme: u.Scheme,
-			Host:   u.Host,
-		}
-
-		err = reader.Start()
+		err = reader.Start(u.Scheme, u.Host)
 		require.NoError(t, err)
 		defer reader.Close()
 
-		var desc *description.Session
-		desc, _, err = reader.Describe(u)
+		desc, _, err := reader.Describe(u)
 		require.NoError(t, err)
 
 		err = reader.SetupAll(desc.BaseURL, desc.Medias)
@@ -801,13 +701,15 @@ func TestPathMaxReaders(t *testing.T) {
 }
 
 func TestPathRecord(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "rtsp-path-record")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
 
-	p, ok := newInstance(t, "api: yes\n"+
-		"record: yes\n"+
-		"recordPath: "+filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f")+"\n"+
-		"paths:\n"+
-		"  all_others:\n"+
+	p, ok := newInstance("api: yes\n" +
+		"record: yes\n" +
+		"recordPath: " + filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f") + "\n" +
+		"paths:\n" +
+		"  all_others:\n" +
 		"    record: yes\n")
 	require.Equal(t, true, ok)
 	defer p.Close()
@@ -816,13 +718,13 @@ func TestPathRecord(t *testing.T) {
 
 	source := gortsplib.Client{}
 
-	err := source.StartRecording(
+	err = source.StartRecording(
 		"rtsp://localhost:8554/mystream",
 		&description.Session{Medias: []*description.Media{media0}})
 	require.NoError(t, err)
 	defer source.Close()
 
-	for i := range 4 {
+	for i := 0; i < 4; i++ {
 		err = source.WritePacketRTP(media0, &rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
@@ -847,13 +749,13 @@ func TestPathRecord(t *testing.T) {
 	defer tr.CloseIdleConnections()
 	hc := &http.Client{Transport: tr}
 
-	httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/paths/patch/all_others", map[string]any{
+	httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/paths/patch/all_others", map[string]interface{}{
 		"record": false,
 	}, nil)
 
 	time.Sleep(500 * time.Millisecond)
 
-	httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/paths/patch/all_others", map[string]any{
+	httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/paths/patch/all_others", map[string]interface{}{
 		"record": true,
 	}, nil)
 
@@ -888,30 +790,30 @@ func TestPathFallback(t *testing.T) {
 		"source",
 	} {
 		t.Run(ca, func(t *testing.T) {
-			var cnf string
+			var conf string
 
 			switch ca {
 			case "absolute":
-				cnf = "paths:\n" +
+				conf = "paths:\n" +
 					"  path1:\n" +
 					"    fallback: rtsp://localhost:8554/path2\n" +
 					"  path2:\n"
 
 			case "relative":
-				cnf = "paths:\n" +
+				conf = "paths:\n" +
 					"  path1:\n" +
 					"    fallback: /path2\n" +
 					"  path2:\n"
 
 			case "source":
-				cnf = "paths:\n" +
+				conf = "paths:\n" +
 					"  path1:\n" +
 					"    fallback: /path2\n" +
 					"    source: rtsp://localhost:3333/nonexistent\n" +
 					"  path2:\n"
 			}
 
-			p1, ok := newInstance(t, cnf)
+			p1, ok := newInstance(conf)
 			require.Equal(t, true, ok)
 			defer p1.Close()
 
@@ -924,12 +826,8 @@ func TestPathFallback(t *testing.T) {
 			u, err := base.ParseURL("rtsp://localhost:8554/path1")
 			require.NoError(t, err)
 
-			dest := gortsplib.Client{
-				Scheme: u.Scheme,
-				Host:   u.Host,
-			}
-
-			err = dest.Start()
+			dest := gortsplib.Client{}
+			err = dest.Start(u.Scheme, u.Host)
 			require.NoError(t, err)
 			defer dest.Close()
 
@@ -941,7 +839,7 @@ func TestPathFallback(t *testing.T) {
 }
 
 func TestPathResolveSource(t *testing.T) {
-	var strm *gortsplib.ServerStream
+	var stream *gortsplib.ServerStream
 
 	s := gortsplib.Server{
 		Handler: &testServer{
@@ -951,12 +849,12 @@ func TestPathResolveSource(t *testing.T) {
 				require.Equal(t, "/a", ctx.Path)
 				return &base.Response{
 					StatusCode: base.StatusOK,
-				}, strm, nil
+				}, stream, nil
 			},
 			onSetup: func(_ *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
 				return &base.Response{
 					StatusCode: base.StatusOK,
-				}, strm, nil
+				}, stream, nil
 			},
 			onPlay: func(_ *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
 				return &base.Response{
@@ -971,32 +869,24 @@ func TestPathResolveSource(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 
-	strm = &gortsplib.ServerStream{
-		Server: &s,
-		Desc:   &description.Session{Medias: []*description.Media{test.MediaH264}},
-	}
-	err = strm.Initialize()
-	require.NoError(t, err)
-	defer strm.Close()
+	stream = gortsplib.NewServerStream(&s, &description.Session{Medias: []*description.Media{test.MediaH264}})
+	defer stream.Close()
 
-	p, ok := newInstance(t,
-		"paths:\n"+
-			"  '~^test_(.+)$':\n"+
-			"    source: rtsp://127.0.0.1:8555/$G1?$MTX_QUERY\n"+
-			"    sourceOnDemand: yes\n"+
-			"  'all_others':\n")
+	p, ok := newInstance(
+		"paths:\n" +
+			"  '~^test_(.+)$':\n" +
+			"    source: rtsp://127.0.0.1:8555/$G1?$MTX_QUERY\n" +
+			"    sourceOnDemand: yes\n" +
+			"  'all':\n")
 	require.Equal(t, true, ok)
 	defer p.Close()
+
+	reader := gortsplib.Client{}
 
 	u, err := base.ParseURL("rtsp://127.0.0.1:8554/test_a?key=val")
 	require.NoError(t, err)
 
-	reader := gortsplib.Client{
-		Scheme: u.Scheme,
-		Host:   u.Host,
-	}
-
-	err = reader.Start()
+	err = reader.Start(u.Scheme, u.Host)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -1010,15 +900,15 @@ func TestPathOverridePublisher(t *testing.T) {
 		"disabled",
 	} {
 		t.Run(ca, func(t *testing.T) {
-			cnf := "rtmp: no\n" +
+			conf := "rtmp: no\n" +
 				"paths:\n" +
 				"  all_others:\n"
 
 			if ca == "disabled" {
-				cnf += "    overridePublisher: no\n"
+				conf += "    overridePublisher: no\n"
 			}
 
-			p, ok := newInstance(t, cnf)
+			p, ok := newInstance(conf)
 			require.Equal(t, true, ok)
 			defer p.Close()
 
@@ -1044,15 +934,12 @@ func TestPathOverridePublisher(t *testing.T) {
 
 			frameRecv := make(chan struct{})
 
+			c := gortsplib.Client{}
+
 			u, err := base.ParseURL("rtsp://localhost:8554/teststream")
 			require.NoError(t, err)
 
-			c := gortsplib.Client{
-				Scheme: u.Scheme,
-				Host:   u.Host,
-			}
-
-			err = c.Start()
+			err = c.Start(u.Scheme, u.Host)
 			require.NoError(t, err)
 			defer c.Close()
 

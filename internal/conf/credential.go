@@ -2,15 +2,14 @@ package conf
 
 import (
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
 
-	"github.com/matthewhartstonge/argon2"
-
 	"github.com/bluenviron/mediamtx/internal/conf/jsonwrapper"
+	"github.com/matthewhartstonge/argon2"
 )
 
 var (
@@ -28,6 +27,11 @@ func sha256Base64(in string) string {
 
 // Credential is a parameter that is used as username or password.
 type Credential string
+
+// MarshalJSON implements json.Marshaler.
+func (d Credential) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(d))
+}
 
 // UnmarshalJSON implements json.Unmarshaler.
 func (d *Credential) UnmarshalJSON(b []byte) error {
@@ -64,7 +68,7 @@ func (d Credential) IsHashed() bool {
 // Check returns true if the given value matches the credential.
 func (d Credential) Check(guess string) bool {
 	if d.IsSha256() {
-		return subtle.ConstantTimeCompare([]byte(string(d)[len("sha256:"):]), []byte(sha256Base64(guess))) == 1
+		return string(d)[len("sha256:"):] == sha256Base64(guess)
 	}
 
 	if d.IsArgon2() {
@@ -75,7 +79,7 @@ func (d Credential) Check(guess string) bool {
 	}
 
 	if d != "" {
-		return subtle.ConstantTimeCompare([]byte(string(d)), []byte(guess)) == 1
+		return string(d) == guess
 	}
 
 	return true

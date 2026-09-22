@@ -3,95 +3,46 @@ package hls
 
 import (
 	"net/http"
-	"net/http/cookiejar"
-	"strings"
 	"time"
 
 	"github.com/bluenviron/gohlslib/v2"
-	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v4/pkg/description"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
-	"github.com/bluenviron/mediamtx/internal/errordumper"
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/packetdumper"
 	"github.com/bluenviron/mediamtx/internal/protocols/hls"
-	ptls "github.com/bluenviron/mediamtx/internal/protocols/tls"
+	"github.com/bluenviron/mediamtx/internal/protocols/tls"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
-type parent interface {
-	logger.Writer
-	SetReady(req defs.PathSourceStaticSetReadyReq) defs.PathSourceStaticSetReadyRes
-	SetNotReady(req defs.PathSourceStaticSetNotReadyReq)
-}
-
 // Source is a HLS static source.
 type Source struct {
-	DumpPackets bool
 	ReadTimeout conf.Duration
-	Parent      parent
+	Parent      defs.StaticSourceParent
 }
 
 // Log implements logger.Writer.
-func (s *Source) Log(level logger.Level, format string, args ...any) {
+func (s *Source) Log(level logger.Level, format string, args ...interface{}) {
 	s.Parent.Log(level, "[HLS source] "+format, args...)
-}
-
-// Info returns runtime information.
-func (*Source) Info() defs.StaticSourceInfo {
-	return defs.StaticSourceInfo{}
 }
 
 // Run implements StaticSource.
 func (s *Source) Run(params defs.StaticSourceRunParams) error {
-	var subStream *stream.SubStream
+	var stream *stream.Stream
 
 	defer func() {
-		if subStream != nil {
+		if stream != nil {
 			s.Parent.SetNotReady(defs.PathSourceStaticSetNotReadyReq{})
 		}
 	}()
 
-	decodeErrors := &errordumper.Dumper{
-		OnReport: func(val uint64, last error) {
-			if val == 1 {
-				s.Log(logger.Warn, "decode error: %v", last)
-			} else {
-				s.Log(logger.Warn, "%d decode errors, last was: %v", val, last)
-			}
-		},
+	decodeErrLogger := logger.NewLimitedLogger(s)
+
+	tr := &http.Transport{
+		TLSClientConfig: tls.ConfigForFingerprint(params.Conf.SourceFingerprint),
 	}
-
-	decodeErrors.Start()
-	defer decodeErrors.Stop()
-
-	tr := &http.Transport{}
 	defer tr.CloseIdleConnections()
-
-	tlsConfig := ptls.MakeConfig(params.Conf.SourceFingerprint)
-
-	if s.DumpPackets {
-		var proto string
-		if strings.HasPrefix(params.ResolvedSource, "https") {
-			proto = "hlss"
-		} else {
-			proto = "hls"
-		}
-
-		tr.DialContext = (&packetdumper.DialContext{
-			Prefix: proto + "_source_conn",
-		}).Do
-
-		tr.DialTLSContext = (&packetdumper.DialTLSContext{
-			DialContext: tr.DialContext,
-			TLSConfig:   tlsConfig,
-		}).Do
-	} else {
-		tr.TLSClientConfig = tlsConfig
-	}
-
-	jar, _ := cookiejar.New(nil)
 
 	var c *gohlslib.Client
 	c = &gohlslib.Client{
@@ -99,7 +50,6 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		HTTPClient: &http.Client{
 			Timeout:   time.Duration(s.ReadTimeout),
 			Transport: tr,
-			Jar:       jar,
 		},
 		OnDownloadPrimaryPlaylist: func(u string) {
 			s.Log(logger.Debug, "downloading primary playlist %v", u)
@@ -114,24 +64,23 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 			s.Log(logger.Debug, "downloading part %v", u)
 		},
 		OnDecodeError: func(err error) {
-			decodeErrors.Add(err)
+			decodeErrLogger.Log(logger.Warn, err.Error())
 		},
 		OnTracks: func(tracks []*gohlslib.Track) error {
-			medias, err2 := hls.ToStream(c, tracks, params.Conf, &subStream)
-			if err2 != nil {
-				return err2
+			medias, err := hls.ToStream(c, tracks, &stream)
+			if err != nil {
+				return err
 			}
 
 			res := s.Parent.SetReady(defs.PathSourceStaticSetReadyReq{
-				Desc:          &description.Session{Medias: medias},
-				UseRTPPackets: false,
-				ReplaceNTP:    false,
+				Desc:               &description.Session{Medias: medias},
+				GenerateRTPPackets: true,
 			})
 			if res.Err != nil {
 				return res.Err
 			}
 
-			subStream = res.SubStream
+			stream = res.Stream
 
 			return nil
 		},
@@ -142,14 +91,9 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		return err
 	}
 
-	waitErr := make(chan error)
-	go func() {
-		waitErr <- c.Wait2()
-	}()
-
 	for {
 		select {
-		case err = <-waitErr:
+		case err := <-c.Wait():
 			c.Close()
 			return err
 
@@ -157,16 +101,16 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 		case <-params.Context.Done():
 			c.Close()
-			<-waitErr
+			<-c.Wait()
 			return nil
 		}
 	}
 }
 
 // APISourceDescribe implements StaticSource.
-func (*Source) APISourceDescribe() *defs.APIPathSource {
-	return &defs.APIPathSource{
-		Type: defs.APIPathSourceTypeHLSSource,
+func (*Source) APISourceDescribe() defs.APIPathSourceOrReader {
+	return defs.APIPathSourceOrReader{
+		Type: "hlsSource",
 		ID:   "",
 	}
 }

@@ -4,74 +4,64 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
-	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
-type recorderInstance struct {
-	pathFormat        string
-	format            conf.RecordFormat
-	partDuration      time.Duration
-	maxPartSize       conf.StringSize
-	segmentDuration   time.Duration
-	pathName          string
-	stream            *stream.Stream
-	onSegmentCreate   OnSegmentCreateFunc
-	onSegmentComplete OnSegmentCompleteFunc
-	parent            logger.Writer
+type sample struct {
+	*fmp4.PartSample
+	dts int64
+	ntp time.Time
+}
 
-	streamID    uuid.UUID
-	pathFormat2 string
-	format2     format
-	skip        bool
-	reader      *stream.Reader
+type recorderInstance struct {
+	rec *Recorder
+
+	pathFormat string
+	format     format
+	skip       bool
 
 	terminate chan struct{}
 	done      chan struct{}
 }
 
 // Log implements logger.Writer.
-func (ri *recorderInstance) Log(level logger.Level, format string, args ...any) {
-	ri.parent.Log(level, format, args...)
+func (ri *recorderInstance) Log(level logger.Level, format string, args ...interface{}) {
+	ri.rec.Log(level, format, args...)
 }
 
 func (ri *recorderInstance) initialize() {
-	ri.streamID = uuid.New()
-	ri.pathFormat2 = ri.pathFormat
-	ri.pathFormat2 = recordstore.PathAddExtension(
-		strings.ReplaceAll(ri.pathFormat2, "%path", ri.pathName),
-		ri.format,
+	ri.pathFormat = ri.rec.PathFormat
+
+	ri.pathFormat = recordstore.PathAddExtension(
+		strings.ReplaceAll(ri.pathFormat, "%path", ri.rec.PathName),
+		ri.rec.Format,
 	)
-	ri.reader = &stream.Reader{
-		SkipOutboundBytes: true,
-		Parent:            ri,
-	}
 
 	ri.terminate = make(chan struct{})
 	ri.done = make(chan struct{})
 
-	switch ri.format {
+	switch ri.rec.Format {
 	case conf.RecordFormatMPEGTS:
-		ri.format2 = &formatMPEGTS{
+		ri.format = &formatMPEGTS{
 			ri: ri,
 		}
-		ok := ri.format2.initialize()
+		ok := ri.format.initialize()
 		ri.skip = !ok
 
 	default:
-		ri.format2 = &formatFMP4{
+		ri.format = &formatFMP4{
 			ri: ri,
 		}
-		ok := ri.format2.initialize()
+		ok := ri.format.initialize()
 		ri.skip = !ok
 	}
 
 	if !ri.skip {
-		ri.stream.AddReader(ri.reader)
+		ri.rec.Stream.StartReader(ri)
 	}
 
 	go ri.run()
@@ -87,16 +77,16 @@ func (ri *recorderInstance) run() {
 
 	if !ri.skip {
 		select {
-		case err := <-ri.reader.Error():
+		case err := <-ri.rec.Stream.ReaderError(ri):
 			ri.Log(logger.Error, err.Error())
 
 		case <-ri.terminate:
 		}
 
-		ri.stream.RemoveReader(ri.reader)
+		ri.rec.Stream.RemoveReader(ri)
 	} else {
 		<-ri.terminate
 	}
 
-	ri.format2.close()
+	ri.format.close()
 }

@@ -6,24 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bluenviron/gortsplib/v5/pkg/description"
-	"github.com/bluenviron/gortsplib/v5/pkg/format"
-	"github.com/bluenviron/gortsplib/v5/pkg/rtptime"
+	"github.com/bluenviron/gortsplib/v4/pkg/description"
+	"github.com/bluenviron/gortsplib/v4/pkg/format"
+	"github.com/bluenviron/gortsplib/v4/pkg/rtptime"
+	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
-
-	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/stream"
-	"github.com/bluenviron/mediamtx/internal/unit"
-)
-
-type ntpState int
-
-const (
-	ntpStateInitial ntpState = iota
-	ntpStateReplace
-	ntpStateAvailable
 )
 
 var errNoSupportedCodecsTo = errors.New(
@@ -33,15 +21,12 @@ var errNoSupportedCodecsTo = errors.New(
 // ToStream maps a WebRTC connection to a MediaMTX stream.
 func ToStream(
 	pc *PeerConnection,
-	pathConf *conf.Path,
-	subStream **stream.SubStream,
-	log logger.Writer,
+	stream **stream.Stream,
 ) ([]*description.Media, error) {
 	var medias []*description.Media //nolint:prealloc
-	timeDecoder := &rtptime.GlobalDecoder{}
-	timeDecoder.Initialize()
+	timeDecoder := rtptime.NewGlobalDecoder2()
 
-	for _, track := range pc.inboundTracks {
+	for _, track := range pc.incomingTracks {
 		var typ description.MediaType
 		var forma format.Format
 
@@ -49,45 +34,45 @@ func ToStream(
 		case strings.ToLower(webrtc.MimeTypeAV1):
 			typ = description.MediaTypeVideo
 			forma = &format.AV1{
-				PayloadTyp: 96,
+				PayloadTyp: uint8(track.track.PayloadType()),
 			}
 
 		case strings.ToLower(webrtc.MimeTypeVP9):
 			typ = description.MediaTypeVideo
 			forma = &format.VP9{
-				PayloadTyp: 96,
+				PayloadTyp: uint8(track.track.PayloadType()),
 			}
 
 		case strings.ToLower(webrtc.MimeTypeVP8):
 			typ = description.MediaTypeVideo
 			forma = &format.VP8{
-				PayloadTyp: 96,
+				PayloadTyp: uint8(track.track.PayloadType()),
 			}
 
 		case strings.ToLower(webrtc.MimeTypeH265):
 			typ = description.MediaTypeVideo
 			forma = &format.H265{
-				PayloadTyp: 96,
+				PayloadTyp: uint8(track.track.PayloadType()),
 			}
 
 		case strings.ToLower(webrtc.MimeTypeH264):
 			typ = description.MediaTypeVideo
 			forma = &format.H264{
-				PayloadTyp:        96,
+				PayloadTyp:        uint8(track.track.PayloadType()),
 				PacketizationMode: 1,
 			}
 
 		case strings.ToLower(mimeTypeMultiopus):
 			typ = description.MediaTypeAudio
 			forma = &format.Opus{
-				PayloadTyp:   96,
+				PayloadTyp:   uint8(track.track.PayloadType()),
 				ChannelCount: int(track.track.Codec().Channels),
 			}
 
 		case strings.ToLower(webrtc.MimeTypeOpus):
 			typ = description.MediaTypeAudio
 			forma = &format.Opus{
-				PayloadTyp: 96,
+				PayloadTyp: uint8(track.track.PayloadType()),
 				ChannelCount: func() int {
 					if strings.Contains(track.track.Codec().SDPFmtpLine, "stereo=1") {
 						return 2
@@ -110,7 +95,7 @@ func ToStream(
 			forma = &format.G711{
 				PayloadTyp: func() uint8 {
 					if channels > 1 {
-						return 96
+						return 118
 					}
 					return 0
 				}(),
@@ -129,7 +114,7 @@ func ToStream(
 			forma = &format.G711{
 				PayloadTyp: func() uint8 {
 					if channels > 1 {
-						return 96
+						return 119
 					}
 					return 8
 				}(),
@@ -141,7 +126,7 @@ func ToStream(
 		case strings.ToLower(mimeTypeL16):
 			typ = description.MediaTypeAudio
 			forma = &format.LPCM{
-				PayloadTyp:   96,
+				PayloadTyp:   uint8(track.track.PayloadType()),
 				BitDepth:     16,
 				SampleRate:   int(track.track.Codec().ClockRate),
 				ChannelCount: int(track.track.Codec().Channels),
@@ -156,55 +141,13 @@ func ToStream(
 			Formats: []format.Format{forma},
 		}
 
-		var ntpStat ntpState
-
-		if !pathConf.UseAbsoluteTimestamp {
-			ntpStat = ntpStateReplace
-		}
-
-		handleNTP := func(pkt *rtp.Packet) (time.Time, bool) {
-			switch ntpStat {
-			case ntpStateReplace:
-				return time.Time{}, true
-
-			case ntpStateInitial:
-				ntp, avail := track.PacketNTP(pkt)
-				if !avail {
-					log.Log(logger.Warn, "received RTP packet without absolute time, skipping it")
-					return time.Time{}, false
-				}
-
-				ntpStat = ntpStateAvailable
-				return ntp, true
-
-			default: // ntpStateAvailable
-				ntp, avail := track.PacketNTP(pkt)
-				if !avail {
-					panic("should not happen")
-				}
-
-				return ntp, true
-			}
-		}
-
 		track.OnPacketRTP = func(pkt *rtp.Packet) {
-			pkt.PayloadType = forma.PayloadType()
-
 			pts, ok := timeDecoder.Decode(track, pkt)
 			if !ok {
 				return
 			}
 
-			ntp, ok := handleNTP(pkt)
-			if !ok {
-				return
-			}
-
-			(*subStream).WriteUnit(medi, forma, &unit.Unit{
-				PTS:        pts,
-				NTP:        ntp,
-				RTPPackets: []*rtp.Packet{pkt},
-			})
+			(*stream).WriteRTPPacket(medi, forma, pkt, time.Now(), pts)
 		}
 
 		medias = append(medias, medi)

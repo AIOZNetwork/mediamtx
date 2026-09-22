@@ -1,8 +1,6 @@
 package hooks
 
 import (
-	"net/url"
-
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -24,22 +22,20 @@ func OnDemand(params OnDemandParams) func(string) {
 
 	if params.Conf.RunOnDemand != "" || params.Conf.RunOnUnDemand != "" {
 		env = params.ExternalCmdEnv
-		env["MTX_QUERY"] = url.QueryEscape(params.Query)
+		env["MTX_QUERY"] = params.Query
 	}
 
 	if params.Conf.RunOnDemand != "" {
 		params.Logger.Log(logger.Info, "runOnDemand command started")
 
-		onDemandCmd = &externalcmd.Cmd{
-			Pool:    params.ExternalCmdPool,
-			Cmdstr:  params.Conf.RunOnDemand,
-			Restart: params.Conf.RunOnDemandRestart,
-			Env:     env,
-			OnExit: func(err error) {
+		onDemandCmd = externalcmd.NewCmd(
+			params.ExternalCmdPool,
+			params.Conf.RunOnDemand,
+			params.Conf.RunOnDemandRestart,
+			env,
+			func(err error) {
 				params.Logger.Log(logger.Info, "runOnDemand command exited: %v", err)
-			},
-		}
-		onDemandCmd.Start()
+			})
 	}
 
 	return func(reason string) {
@@ -50,13 +46,12 @@ func OnDemand(params OnDemandParams) func(string) {
 
 		if params.Conf.RunOnUnDemand != "" {
 			params.Logger.Log(logger.Info, "runOnUnDemand command launched")
-			cmd := &externalcmd.Cmd{
-				Pool:    params.ExternalCmdPool,
-				Cmdstr:  params.Conf.RunOnUnDemand,
-				Restart: false,
-				Env:     env,
-			}
-			cmd.Start()
+			externalcmd.NewCmd(
+				params.ExternalCmdPool,
+				params.Conf.RunOnUnDemand,
+				false,
+				env,
+				nil)
 		}
 	}
 }

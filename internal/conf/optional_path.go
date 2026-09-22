@@ -14,7 +14,7 @@ var optionalPathValuesType = func() reflect.Type {
 	rt := reflect.TypeOf(Path{})
 	nf := rt.NumField()
 
-	for i := range nf {
+	for i := 0; i < nf; i++ {
 		f := rt.Field(i)
 		j := f.Tag.Get("json")
 
@@ -39,13 +39,13 @@ var optionalPathValuesType = func() reflect.Type {
 	return reflect.StructOf(fields)
 }()
 
-func newOptionalPathValues() any {
+func newOptionalPathValues() interface{} {
 	return reflect.New(optionalPathValuesType).Interface()
 }
 
 // OptionalPath is a Path whose values can all be optional.
 type OptionalPath struct {
-	Values any
+	Values interface{}
 }
 
 // UnmarshalJSON implements json.Unmarshaler.

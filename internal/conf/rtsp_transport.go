@@ -4,28 +4,27 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/bluenviron/gortsplib/v5"
-
+	"github.com/bluenviron/gortsplib/v4"
 	"github.com/bluenviron/mediamtx/internal/conf/jsonwrapper"
 )
 
 // RTSPTransport is the rtspTransport parameter.
 type RTSPTransport struct {
-	*gortsplib.Protocol
+	*gortsplib.Transport
 }
 
 // MarshalJSON implements json.Marshaler.
 func (d RTSPTransport) MarshalJSON() ([]byte, error) {
 	var out string
 
-	if d.Protocol == nil {
+	if d.Transport == nil {
 		out = "automatic"
 	} else {
-		switch *d.Protocol {
-		case gortsplib.ProtocolUDP:
+		switch *d.Transport {
+		case gortsplib.TransportUDP:
 			out = "udp"
 
-		case gortsplib.ProtocolUDPMulticast:
+		case gortsplib.TransportUDPMulticast:
 			out = "multicast"
 
 		default:
@@ -45,16 +44,19 @@ func (d *RTSPTransport) UnmarshalJSON(b []byte) error {
 
 	switch in {
 	case "udp":
-		d.Protocol = new(gortsplib.ProtocolUDP)
+		v := gortsplib.TransportUDP
+		d.Transport = &v
 
 	case "multicast":
-		d.Protocol = new(gortsplib.ProtocolUDPMulticast)
+		v := gortsplib.TransportUDPMulticast
+		d.Transport = &v
 
 	case "tcp":
-		d.Protocol = new(gortsplib.ProtocolTCP)
+		v := gortsplib.TransportTCP
+		d.Transport = &v
 
 	case "automatic":
-		d.Protocol = nil
+		d.Transport = nil
 
 	default:
 		return fmt.Errorf("invalid transport '%s'", in)

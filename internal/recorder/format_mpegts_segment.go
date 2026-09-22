@@ -10,13 +10,9 @@ import (
 )
 
 type formatMPEGTSSegment struct {
-	pathFormat2       string
-	flush             func() error
-	onSegmentCreate   OnSegmentCreateFunc
-	onSegmentComplete OnSegmentCompleteFunc
-	startDTS          time.Duration
-	startNTP          time.Time
-	log               logger.Writer
+	f        *formatMPEGTS
+	startDTS time.Duration
+	startNTP time.Time
 
 	path      string
 	fi        *os.File
@@ -27,13 +23,14 @@ type formatMPEGTSSegment struct {
 func (s *formatMPEGTSSegment) initialize() {
 	s.lastFlush = s.startDTS
 	s.lastDTS = s.startDTS
+	s.f.dw.setTarget(s)
 }
 
 func (s *formatMPEGTSSegment) close() error {
-	err := s.flush()
+	err := s.f.bw.Flush()
 
 	if s.fi != nil {
-		s.log.Log(logger.Debug, "closing segment %s", s.path)
+		s.f.ri.Log(logger.Debug, "closing segment %s", s.path)
 		err2 := s.fi.Close()
 		if err == nil {
 			err = err2
@@ -41,7 +38,7 @@ func (s *formatMPEGTSSegment) close() error {
 
 		if err2 == nil {
 			duration := s.lastDTS - s.startDTS
-			s.onSegmentComplete(s.path, duration)
+			s.f.ri.rec.OnSegmentComplete(s.path, duration)
 		}
 	}
 
@@ -50,8 +47,8 @@ func (s *formatMPEGTSSegment) close() error {
 
 func (s *formatMPEGTSSegment) Write(p []byte) (int, error) {
 	if s.fi == nil {
-		s.path = recordstore.Path{Start: s.startNTP}.Encode(s.pathFormat2)
-		s.log.Log(logger.Debug, "creating segment %s", s.path)
+		s.path = recordstore.Path{Start: s.startNTP}.Encode(s.f.ri.pathFormat)
+		s.f.ri.Log(logger.Debug, "creating segment %s", s.path)
 
 		err := os.MkdirAll(filepath.Dir(s.path), 0o755)
 		if err != nil {
@@ -63,7 +60,7 @@ func (s *formatMPEGTSSegment) Write(p []byte) (int, error) {
 			return 0, err
 		}
 
-		s.onSegmentCreate(s.path)
+		s.f.ri.rec.OnSegmentCreate(s.path)
 
 		s.fi = fi
 	}

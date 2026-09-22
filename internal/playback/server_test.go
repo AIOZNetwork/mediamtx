@@ -1,27 +1,22 @@
 package playback
 
 import (
-	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
-	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/test"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPreflightRequest(t *testing.T) {
 	s := &Server{
-		Address:      "127.0.0.1:9996",
-		AllowOrigins: []string{"*"},
-		ReadTimeout:  conf.Duration(10 * time.Second),
-		WriteTimeout: conf.Duration(10 * time.Second),
-		Parent:       test.NilLogger,
+		Address:     "127.0.0.1:9996",
+		AllowOrigin: "*",
+		ReadTimeout: conf.Duration(10 * time.Second),
+		Parent:      test.NilLogger,
 	}
 	err := s.Initialize()
 	require.NoError(t, err)
@@ -34,7 +29,6 @@ func TestPreflightRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodOptions, "http://localhost:9996", nil)
 	require.NoError(t, err)
 
-	req.Header.Add("Origin", "http://example.com")
 	req.Header.Add("Access-Control-Request-Method", "GET")
 
 	res, err := hc.Do(req)
@@ -46,61 +40,9 @@ func TestPreflightRequest(t *testing.T) {
 	byts, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 
-	require.Equal(t, "http://example.com", res.Header.Get("Access-Control-Allow-Origin"))
+	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
+	require.Equal(t, "true", res.Header.Get("Access-Control-Allow-Credentials"))
 	require.Equal(t, "OPTIONS, GET", res.Header.Get("Access-Control-Allow-Methods"))
 	require.Equal(t, "Authorization", res.Header.Get("Access-Control-Allow-Headers"))
 	require.Equal(t, byts, []byte{})
-}
-
-func TestAuthError(t *testing.T) {
-	s := &Server{
-		Address:      "127.0.0.1:9996",
-		ReadTimeout:  conf.Duration(10 * time.Second),
-		WriteTimeout: conf.Duration(10 * time.Second),
-		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(req *auth.Request) (string, *auth.Error) {
-				if req.Credentials.User == "" {
-					return "", &auth.Error{AskCredentials: true, Wrapped: fmt.Errorf("auth error")}
-				}
-				return "", &auth.Error{Wrapped: fmt.Errorf("auth error")}
-			},
-		},
-		Parent: test.NilLogger,
-	}
-	err := s.Initialize()
-	require.NoError(t, err)
-	defer s.Close()
-
-	u, err := url.Parse("http://localhost:9996/list")
-	require.NoError(t, err)
-
-	v := url.Values{}
-	v.Set("path", "mypath")
-	u.RawQuery = v.Encode()
-
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
-	require.NoError(t, err)
-
-	res, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer res.Body.Close()
-
-	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-	require.Equal(t, `Basic realm="mediamtx"`, res.Header.Get("WWW-Authenticate"))
-
-	u, err = url.Parse("http://myuser:mypass@localhost:9996/list")
-	require.NoError(t, err)
-
-	v = url.Values{}
-	v.Set("path", "mypath")
-	u.RawQuery = v.Encode()
-
-	req, err = http.NewRequest(http.MethodGet, u.String(), nil)
-	require.NoError(t, err)
-
-	res, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer res.Body.Close()
-
-	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 }

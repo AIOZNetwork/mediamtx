@@ -21,6 +21,6 @@ const (
 )
 
 type destination interface {
-	log(time.Time, Level, string, ...any)
+	log(time.Time, Level, string, ...interface{})
 	close()
 }

@@ -44,7 +44,7 @@ func (c *Cleaner) Close() {
 }
 
 // Log implements logger.Writer.
-func (c *Cleaner) Log(level logger.Level, format string, args ...any) {
+func (c *Cleaner) Log(level logger.Level, format string, args ...interface{}) {
 	c.Parent.Log(level, "[record cleaner]"+format, args...)
 }
 

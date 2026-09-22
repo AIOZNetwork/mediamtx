@@ -14,24 +14,29 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/conf/jsonwrapper"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-
-	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/protocols/tls"
 )
 
 const (
-	maxInboundBodySize = 128 * 1024
-	jwksRefreshPeriod  = 60 * 60 * time.Second
+	// PauseAfterError is the pause to apply after an authentication failure.
+	PauseAfterError = 2 * time.Second
+
+	jwtRefreshPeriod = 60 * 60 * time.Second
 )
 
-func isHTTP(req *Request) bool {
-	return req.Protocol == ProtocolHLS || req.Protocol == ProtocolWebRTC ||
-		req.Action == conf.AuthActionPlayback ||
-		req.Action == conf.AuthActionAPI ||
-		req.Action == conf.AuthActionMetrics ||
-		req.Action == conf.AuthActionPprof
+// Error is a authentication error.
+type Error struct {
+	Wrapped        error
+	Message        string
+	AskCredentials bool
+}
+
+// Error implements the error interface.
+func (e Error) Error() string {
+	return "authentication failed: " + e.Wrapped.Error()
 }
 
 func matchesPermission(perms []conf.AuthInternalUserPermission, req *Request) bool {
@@ -62,52 +67,51 @@ func matchesPermission(perms []conf.AuthInternalUserPermission, req *Request) bo
 	return false
 }
 
-func getToken(tokenInHTTPQuery bool, req *Request) string {
-	switch {
-	case req.Credentials.Token != "":
-		return req.Credentials.Token
+type customClaims struct {
+	jwt.RegisteredClaims
+	permissionsKey string
+	permissions    []conf.AuthInternalUserPermission
+}
 
-	case req.Credentials.Pass != "":
-		return req.Credentials.Pass
-
-		// always allow passing tokens through query parameters with RTSP and RTMP since there's no alternative.
-	case req.Protocol == ProtocolRTSP || req.Protocol == ProtocolRTMP ||
-		(tokenInHTTPQuery && isHTTP(req)):
-		v, err := url.ParseQuery(req.Query)
-		if err == nil {
-			if len(v["token"]) == 1 {
-				return v["token"][0]
-			}
-
-			// legacy query key
-			if len(v["jwt"]) == 1 {
-				return v["jwt"][0]
-			}
-		}
+func (c *customClaims) UnmarshalJSON(b []byte) error {
+	err := json.Unmarshal(b, &c.RegisteredClaims)
+	if err != nil {
+		return err
 	}
 
-	return ""
+	var claimMap map[string]json.RawMessage
+	err = json.Unmarshal(b, &claimMap)
+	if err != nil {
+		return err
+	}
+
+	rawPermissions, ok := claimMap[c.permissionsKey]
+	if !ok {
+		return fmt.Errorf("claim '%s' not found inside JWT", c.permissionsKey)
+	}
+
+	err = jsonwrapper.Unmarshal(rawPermissions, &c.permissions)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Manager is the authentication manager.
 type Manager struct {
-	Method             conf.AuthMethod
-	InternalUsers      []conf.AuthInternalUser
-	HTTPAddress        string
-	HTTPFingerprint    string
-	HTTPExclude        []conf.AuthInternalUserPermission
-	JWTJWKS            string
-	JWTJWKSFingerprint string
-	JWTClaimKey        string
-	JWTExclude         []conf.AuthInternalUserPermission
-	JWTInHTTPQuery     *bool
-	JWTIssuer          string
-	JWTAudience        string
-	ReadTimeout        time.Duration
+	Method        conf.AuthMethod
+	InternalUsers []conf.AuthInternalUser
+	HTTPAddress   string
+	HTTPExclude   []conf.AuthInternalUserPermission
+	JWTJWKS       string
+	JWTClaimKey   string
+	ReadTimeout   time.Duration
 
-	mutex           sync.RWMutex
-	jwksLastRefresh time.Time
-	jwtKeyFunc      keyfunc.Keyfunc
+	mutex          sync.RWMutex
+	jwtHTTPClient  *http.Client
+	jwtLastRefresh time.Time
+	jwtKeyFunc     keyfunc.Keyfunc
 }
 
 // ReloadInternalUsers reloads InternalUsers.
@@ -118,48 +122,41 @@ func (m *Manager) ReloadInternalUsers(u []conf.AuthInternalUser) {
 }
 
 // Authenticate authenticates a request.
-// It returns the user name.
-func (m *Manager) Authenticate(req *Request) (string, *Error) {
-	var token string
-	if m.Method == conf.AuthMethodHTTP || m.Method == conf.AuthMethodJWT {
-		token = getToken(m.Method == conf.AuthMethodJWT && m.JWTInHTTPQuery != nil && *m.JWTInHTTPQuery, req)
-	}
-
-	var user string
+func (m *Manager) Authenticate(req *Request) error {
 	var err error
 
 	switch m.Method {
 	case conf.AuthMethodInternal:
-		user, err = m.authenticateInternal(req)
+		err = m.authenticateInternal(req)
 
 	case conf.AuthMethodHTTP:
-		user, err = m.authenticateHTTP(req, token)
+		err = m.authenticateHTTP(req)
 
 	default:
-		user, err = m.authenticateJWT(req, token)
+		err = m.authenticateJWT(req)
 	}
 
 	if err != nil {
-		return "", &Error{
+		return Error{
 			Wrapped:        err,
-			AskCredentials: req.EnableAskCredentials && req.Credentials.User == "" && req.Credentials.Pass == "" && token == "",
+			AskCredentials: (req.User == "" && req.Pass == ""),
 		}
 	}
 
-	return user, nil
+	return nil
 }
 
-func (m *Manager) authenticateInternal(req *Request) (string, error) {
+func (m *Manager) authenticateInternal(req *Request) error {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
 	for _, u := range m.InternalUsers {
 		if ok := m.authenticateWithUser(req, &u); ok {
-			return req.Credentials.User, nil
+			return nil
 		}
 	}
 
-	return "", fmt.Errorf("authentication failed")
+	return fmt.Errorf("authentication failed")
 }
 
 func (m *Manager) authenticateWithUser(
@@ -180,7 +177,7 @@ func (m *Manager) authenticateWithUser(
 				return false
 			}
 		} else {
-			if !u.User.Check(req.Credentials.User) || !u.Pass.Check(req.Credentials.Pass) {
+			if !u.User.Check(req.User) || !u.Pass.Check(req.Pass) {
 				return false
 			}
 		}
@@ -189,97 +186,75 @@ func (m *Manager) authenticateWithUser(
 	return true
 }
 
-func (m *Manager) authenticateHTTP(req *Request, token string) (string, error) {
+func (m *Manager) authenticateHTTP(req *Request) error {
 	if matchesPermission(m.HTTPExclude, req) {
-		return "", nil
+		return nil
 	}
 
 	enc, _ := json.Marshal(struct {
-		IP        string     `json:"ip"`
-		User      string     `json:"user"`
-		Password  string     `json:"password"`
-		Token     string     `json:"token"`
-		Action    string     `json:"action"`
-		Path      string     `json:"path"`
-		Protocol  string     `json:"protocol"`
-		ID        *uuid.UUID `json:"id"`
-		Query     string     `json:"query"`
-		UserAgent string     `json:"userAgent"`
+		IP       string     `json:"ip"`
+		User     string     `json:"user"`
+		Password string     `json:"password"`
+		Action   string     `json:"action"`
+		Path     string     `json:"path"`
+		Protocol string     `json:"protocol"`
+		ID       *uuid.UUID `json:"id"`
+		Query    string     `json:"query"`
 	}{
-		IP:        req.IP.String(),
-		User:      req.Credentials.User,
-		Password:  req.Credentials.Pass,
-		Token:     token,
-		Action:    string(req.Action),
-		Path:      req.Path,
-		Protocol:  string(req.Protocol),
-		ID:        req.ID,
-		Query:     req.Query,
-		UserAgent: req.UserAgent,
+		IP:       req.IP.String(),
+		User:     req.User,
+		Password: req.Pass,
+		Action:   string(req.Action),
+		Path:     req.Path,
+		Protocol: string(req.Protocol),
+		ID:       req.ID,
+		Query:    req.Query,
 	})
 
-	tr := &http.Transport{
-		TLSClientConfig: tls.MakeConfig(m.HTTPFingerprint),
-	}
-	defer tr.CloseIdleConnections()
-
-	httpClient := &http.Client{
-		Timeout:   m.ReadTimeout,
-		Transport: tr,
-	}
-
-	res, err := httpClient.Post(m.HTTPAddress, "application/json", bytes.NewReader(enc))
+	res, err := http.Post(m.HTTPAddress, "application/json", bytes.NewReader(enc))
 	if err != nil {
-		return "", fmt.Errorf("HTTP request failed: %w", err)
+		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		resBody, err2 := io.ReadAll(&customLimitReader{res.Body, maxInboundBodySize})
-		if err2 == nil && len(resBody) != 0 {
-			return "", fmt.Errorf("server replied with code %d: %s", res.StatusCode, string(resBody))
+		if resBody, err := io.ReadAll(res.Body); err == nil && len(resBody) != 0 {
+			return fmt.Errorf("server replied with code %d: %s", res.StatusCode, string(resBody))
 		}
 
-		return "", fmt.Errorf("server replied with code %d", res.StatusCode)
+		return fmt.Errorf("server replied with code %d", res.StatusCode)
 	}
 
-	return req.Credentials.User, nil
+	return nil
 }
 
-func (m *Manager) authenticateJWT(req *Request, token string) (string, error) {
-	if matchesPermission(m.JWTExclude, req) {
-		return "", nil
-	}
-
+func (m *Manager) authenticateJWT(req *Request) error {
 	keyfunc, err := m.pullJWTJWKS()
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	if token == "" {
-		return "", fmt.Errorf("JWT not provided")
-	}
-
-	var opts []jwt.ParserOption
-	if m.JWTIssuer != "" {
-		opts = append(opts, jwt.WithIssuer(m.JWTIssuer))
-	}
-	if m.JWTAudience != "" {
-		opts = append(opts, jwt.WithAudience(m.JWTAudience))
-	}
-
-	var cc jwtClaims
-	cc.permissionsKey = m.JWTClaimKey
-	_, err = jwt.ParseWithClaims(token, &cc, keyfunc, opts...)
+	v, err := url.ParseQuery(req.Query)
 	if err != nil {
-		return "", err
+		return err
+	}
+
+	if len(v["jwt"]) != 1 {
+		return fmt.Errorf("JWT not provided")
+	}
+
+	var cc customClaims
+	cc.permissionsKey = m.JWTClaimKey
+	_, err = jwt.ParseWithClaims(v["jwt"][0], &cc, keyfunc)
+	if err != nil {
+		return err
 	}
 
 	if !matchesPermission(cc.permissions, req) {
-		return "", fmt.Errorf("user doesn't have permission to perform action")
+		return fmt.Errorf("user doesn't have permission to perform action")
 	}
 
-	return cc.Subject, nil
+	return nil
 }
 
 func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
@@ -288,25 +263,22 @@ func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if now.Sub(m.jwksLastRefresh) >= jwksRefreshPeriod {
-		tr := &http.Transport{
-			TLSClientConfig: tls.MakeConfig(m.JWTJWKSFingerprint),
-		}
-		defer tr.CloseIdleConnections()
-
-		httpClient := &http.Client{
-			Timeout:   m.ReadTimeout,
-			Transport: tr,
+	if now.Sub(m.jwtLastRefresh) >= jwtRefreshPeriod {
+		if m.jwtHTTPClient == nil {
+			m.jwtHTTPClient = &http.Client{
+				Timeout:   (m.ReadTimeout),
+				Transport: &http.Transport{},
+			}
 		}
 
-		res, err := httpClient.Get(m.JWTJWKS)
+		res, err := m.jwtHTTPClient.Get(m.JWTJWKS)
 		if err != nil {
 			return nil, err
 		}
 		defer res.Body.Close()
 
 		var raw json.RawMessage
-		err = json.NewDecoder(&customLimitReader{res.Body, maxInboundBodySize}).Decode(&raw)
+		err = json.NewDecoder(res.Body).Decode(&raw)
 		if err != nil {
 			return nil, err
 		}
@@ -317,16 +289,8 @@ func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
 		}
 
 		m.jwtKeyFunc = tmp
-		m.jwksLastRefresh = now
+		m.jwtLastRefresh = now
 	}
 
 	return m.jwtKeyFunc.Keyfunc, nil
-}
-
-// RefreshJWTJWKS refreshes the JWT JWKS.
-func (m *Manager) RefreshJWTJWKS() {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	m.jwksLastRefresh = time.Time{}
 }

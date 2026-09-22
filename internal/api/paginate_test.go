@@ -1,4 +1,4 @@
-package api //nolint:revive
+package api
 
 import (
 	"testing"
@@ -9,7 +9,7 @@ import (
 func TestPaginate(t *testing.T) {
 	func() {
 		items := make([]int, 5)
-		for i := range 5 {
+		for i := 0; i < 5; i++ {
 			items[i] = i
 		}
 
@@ -21,7 +21,7 @@ func TestPaginate(t *testing.T) {
 
 	func() {
 		items := make([]int, 5)
-		for i := range 5 {
+		for i := 0; i < 5; i++ {
 			items[i] = i
 		}
 
@@ -33,7 +33,7 @@ func TestPaginate(t *testing.T) {
 
 	func() {
 		items := make([]int, 6)
-		for i := range 6 {
+		for i := 0; i < 6; i++ {
 			items[i] = i
 		}
 
@@ -56,7 +56,7 @@ func TestPaginate(t *testing.T) {
 func FuzzPaginate(f *testing.F) {
 	f.Fuzz(func(_ *testing.T, str1 string, str2 string) {
 		items := make([]int, 6)
-		for i := range 6 {
+		for i := 0; i < 6; i++ {
 			items[i] = i
 		}
 
