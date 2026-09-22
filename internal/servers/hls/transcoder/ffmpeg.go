@@ -20,7 +20,7 @@ const (
 	defaultVideoCodec      = "libx264"
 	defaultAudioCodec      = "aac"
 	defaultPreset          = "veryfast"
-	defaultRTSPPort        = "8554"
+	defaultRTMPAddress     = ":1935"
 	defaultFPS             = "30"
 	defaultPixelFormat     = "yuv420p"
 	defaultGOPSize         = "60"
@@ -30,15 +30,13 @@ const (
 	defaultAudioChannels   = "2"
 	audioResampleFilter    = "aresample=async=1:first_pts=0"
 	x264ClosedGOPParams    = "scenecut=0:open_gop=0:rc-lookahead=0"
-	sharedAudioPathSuffix  = "audio/main"
-	videoPathPrefix        = "video"
 )
 
 type FFmpegTranscoder struct {
 	Conf        *conf.Path
 	StreamID    string
 	Parent      logger.Writer
-	rtspAddress string
+	rtmpAddress string
 	SourceInfo  *SourceInfo
 
 	ctx       context.Context
@@ -49,13 +47,16 @@ type FFmpegTranscoder struct {
 	done     chan struct{}
 }
 
-func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtspAddress string) *FFmpegTranscoder {
+func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtmpAddress string) *FFmpegTranscoder {
 	ctx, cancel := context.WithCancel(context.Background())
+	if strings.TrimSpace(rtmpAddress) == "" {
+		rtmpAddress = defaultRTMPAddress
+	}
 	return &FFmpegTranscoder{
 		Conf:        cfg,
 		StreamID:    streamID,
 		Parent:      parent,
-		rtspAddress: rtspAddress,
+		rtmpAddress: rtmpAddress,
 		ctx:         ctx,
 		ctxCancel:   cancel,
 	}
@@ -107,8 +108,7 @@ func (t *FFmpegTranscoder) Start() error {
 
 // BuildArgs builds FFmpeg arguments without starting the process.
 func (t *FFmpegTranscoder) BuildArgs() []string {
-	rtspPort := t.rtspPort()
-	sourceURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s", rtspPort, t.StreamID)
+	sourceURL := t.rtmpURL(t.StreamID)
 
 	renditions := t.Conf.HLSTranscodingRenditions
 	fps := defaultFPS
@@ -125,15 +125,23 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		"-flags", "low_delay",
 		"-analyzeduration", "500000",
 		"-probesize", "500000",
-		"-rtsp_transport", "tcp",
 		"-i", sourceURL,
 		"-filter_complex", filterGraph,
 	}
 
 	videoCodec := defaultString(t.Conf.HLSTranscodingVideoCodec, defaultVideoCodec)
 	preset := defaultString(t.Conf.HLSTranscodingPreset, defaultPreset)
+
+	args = append(args,
+		"-map", "0:v:0?",
+		"-map", "0:a:0?",
+		"-c", "copy",
+		"-f", "flv",
+		t.rtmpURL(t.StreamID, "video", "source"),
+	)
+
 	for _, r := range renditions {
-		outURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s/%s/%s", rtspPort, t.StreamID, videoPathPrefix, r.Name)
+		outURL := t.rtmpURL(t.StreamID, "video", r.Name)
 		args = append(args,
 			"-map", fmt.Sprintf("[out%s]", r.Name),
 			"-an",
@@ -146,8 +154,7 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 			"-keyint_min", defaultKeyintMin,
 			"-sc_threshold", "0",
 			"-x264-params", x264ClosedGOPParams,
-			"-f", "rtsp",
-			"-rtsp_transport", "tcp",
+			"-f", "flv",
 			outURL,
 		)
 	}
@@ -160,20 +167,23 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		"-b:a", defaultAudioBitrate,
 		"-ar", defaultAudioSampleRate,
 		"-ac", defaultAudioChannels,
-		"-f", "rtsp",
-		"-rtsp_transport", "tcp",
-		fmt.Sprintf("rtsp://127.0.0.1:%s/%s/%s", rtspPort, t.StreamID, sharedAudioPathSuffix),
+		"-f", "flv",
+		t.rtmpURL(t.StreamID, "audio", "main"),
 	)
 
 	return args
 }
 
-func (t *FFmpegTranscoder) rtspPort() string {
-	_, rtspPort, err := net.SplitHostPort(t.rtspAddress)
-	if err != nil || rtspPort == "" {
-		return defaultRTSPPort
+func (t *FFmpegTranscoder) rtmpURL(parts ...string) string {
+	address := strings.TrimSpace(t.rtmpAddress)
+	if address == "" {
+		address = defaultRTMPAddress
 	}
-	return rtspPort
+	_, port, err := net.SplitHostPort(address)
+	if err != nil || port == "" {
+		_, port, _ = net.SplitHostPort(defaultRTMPAddress)
+	}
+	return "rtmp://127.0.0.1:" + port + "/" + strings.Join(parts, "/")
 }
 
 func (t *FFmpegTranscoder) videoFilterGraph(renditions []conf.HLSTranscodingRendition, fps string) string {

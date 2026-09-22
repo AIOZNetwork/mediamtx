@@ -68,6 +68,7 @@ type path struct {
 	parentCtx         context.Context
 	logLevel          conf.LogLevel
 	rtspAddress       string
+	rtmpAddress       string
 	readTimeout       conf.Duration
 	writeTimeout      conf.Duration
 	writeQueueSize    int
@@ -743,7 +744,7 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 		pa.conf.HLSTranscoding, pa.name, isHLSTranscodingOutputPath(pa.name), len(pa.conf.HLSTranscodingRenditions))
 
 	if shouldStartHLSTranscoder(pa.name, pa.conf) {
-		pa.Log(logger.Info, "starting transcoder for path %s with rtspAddress=%s", pa.name, pa.rtspAddress)
+		pa.Log(logger.Info, "starting transcoder for path %s with rtmpAddress=%s", pa.name, pa.rtmpAddress)
 
 		sourceInfo := transcoder.ExtractSourceInfo(desc)
 		if sourceInfo != nil {
@@ -755,7 +756,7 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 
 		effectiveConf := effectiveHLSTranscoderConf(pa.conf, sourceInfo)
 		pa.Log(logger.Info, "transcoder effective renditions=%d", len(effectiveConf.HLSTranscodingRenditions))
-		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtspAddress)
+		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtmpAddress)
 		pa.transcoder.SourceInfo = sourceInfo
 
 		if err := pa.transcoder.Start(); err != nil {

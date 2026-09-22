@@ -11,17 +11,17 @@ type Transcoder struct {
 	Conf        *conf.Path
 	StreamID    string
 	Parent      logger.Writer
-	rtspAddress string
+	rtmpAddress string
 	ffmpeg      *FFmpegTranscoder
 	SourceInfo  *SourceInfo
 }
 
-func NewTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtspAddress string) *Transcoder {
+func NewTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtmpAddress string) *Transcoder {
 	return &Transcoder{
 		Conf:        cfg,
 		StreamID:    streamID,
 		Parent:      parent,
-		rtspAddress: rtspAddress,
+		rtmpAddress: rtmpAddress,
 	}
 }
 
@@ -30,7 +30,7 @@ func (t *Transcoder) Start() error {
 		return fmt.Errorf("transcoding not enabled or no renditions configured")
 	}
 
-	t.ffmpeg = NewFFmpegTranscoder(t.Conf, t.StreamID, t.Parent, t.rtspAddress)
+	t.ffmpeg = NewFFmpegTranscoder(t.Conf, t.StreamID, t.Parent, t.rtmpAddress)
 	t.ffmpeg.SourceInfo = t.SourceInfo
 	return t.ffmpeg.Start()
 }

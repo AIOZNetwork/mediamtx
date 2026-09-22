@@ -53,6 +53,7 @@ type pathManager struct {
 	logLevel          conf.LogLevel
 	authManager       *auth.Manager
 	rtspAddress       string
+	rtmpAddress       string
 	readTimeout       conf.Duration
 	writeTimeout      conf.Duration
 	writeQueueSize    int
@@ -344,6 +345,7 @@ func (pm *pathManager) createPath(
 		parentCtx:         pm.ctx,
 		logLevel:          pm.logLevel,
 		rtspAddress:       pm.rtspAddress,
+		rtmpAddress:       pm.rtmpAddress,
 		readTimeout:       pm.readTimeout,
 		writeTimeout:      pm.writeTimeout,
 		writeQueueSize:    pm.writeQueueSize,

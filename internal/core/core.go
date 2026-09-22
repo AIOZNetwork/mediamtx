@@ -413,6 +413,7 @@ func (p *Core) createResources(initial bool) error {
 			logLevel:          p.conf.LogLevel,
 			authManager:       p.authManager,
 			rtspAddress:       p.conf.RTSPAddress,
+			rtmpAddress:       p.conf.RTMPAddress,
 			readTimeout:       p.conf.ReadTimeout,
 			writeTimeout:      p.conf.WriteTimeout,
 			writeQueueSize:    p.conf.WriteQueueSize,
@@ -799,6 +800,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	closePathManager := newConf == nil ||
 		newConf.LogLevel != p.conf.LogLevel ||
 		newConf.RTSPAddress != p.conf.RTSPAddress ||
+		newConf.RTMPAddress != p.conf.RTMPAddress ||
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.WriteQueueSize != p.conf.WriteQueueSize ||

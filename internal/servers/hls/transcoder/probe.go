@@ -41,17 +41,16 @@ type ffprobeStream struct {
 }
 
 const (
-	defaultProbeTimeout  = 1500 * time.Millisecond
-	defaultRTSPTransport = "tcp"
-	ffprobeOutputFormat  = "json"
-	ffprobeLogLevel      = "quiet"
-	codecTypeVideo       = "video"
-	codecTypeAudio       = "audio"
+	defaultProbeTimeout = 1500 * time.Millisecond
+	ffprobeOutputFormat = "json"
+	ffprobeLogLevel     = "quiet"
+	codecTypeVideo      = "video"
+	codecTypeAudio      = "audio"
 )
 
-// ProbeSource runs ffprobe against an RTSP source URL and returns stream info.
+// ProbeSource runs ffprobe against a source URL and returns stream info.
 // Times out after defaultProbeTimeout.
-func ProbeSource(rtspURL string) (*SourceInfo, error) {
+func ProbeSource(sourceURL string) (*SourceInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultProbeTimeout)
 	defer cancel()
 
@@ -62,8 +61,7 @@ func ProbeSource(rtspURL string) (*SourceInfo, error) {
 		"-analyzeduration", "500000",
 		"-probesize", "500000",
 		"-fflags", "nobuffer",
-		"-rtsp_transport", defaultRTSPTransport,
-		rtspURL,
+		sourceURL,
 	)
 	out, err := cmd.Output()
 	if err != nil {

@@ -163,8 +163,10 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 	}
 
 	pathConfName := dir
+	abrChild := false
 	if isABRChildPlaylistPath(dir) {
 		pathConfName = abrBasePath(dir)
+		abrChild = true
 	}
 
 	req := defs.PathAccessRequest{
@@ -178,6 +180,19 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 	pathConf, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
 		AccessRequest: req,
 	})
+	if err != nil && !abrChild && strings.Contains(dir, "/") {
+		basePath := abrBasePath(dir)
+		req.Name = basePath
+		candidatePathConf, candidateErr := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+			AccessRequest: req,
+		})
+		if candidateErr == nil && isConfiguredABRChildPath(dir, candidatePathConf) {
+			pathConfName = basePath
+			pathConf = candidatePathConf
+			err = nil
+			abrChild = true
+		}
+	}
 	if err != nil {
 		var terr auth.Error
 		if errors.As(err, &terr) {
@@ -243,14 +258,14 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			remoteAddr:     httpp.RemoteAddr(ctx),
 			query:          ctx.Request.URL.RawQuery,
 			sourceOnDemand: pathConf.SourceOnDemand,
-			abrChild:       isABRChildPlaylistPath(dir),
+			abrChild:       abrChild,
 		})
 		if err == nil && mux != nil {
 			mi = mux.getInstance()
 		}
 
 		if mi == nil {
-			if isABRChildPlaylistPath(dir) {
+			if abrChild {
 				// Rendition is transcode-bound to the media stream.
 				// If warming up, return an immediate valid live playlist (200 OK) so the player
 				// gets instant TTFB without timing out/canceling, and reloads after 1-2s per RFC 8216.
@@ -268,7 +283,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			return
 		}
 
-		if isABRChildPlaylistPath(dir) {
+		if abrChild {
 			if fname == "index.m3u8" || strings.HasSuffix(fname, ".m3u8") {
 				if !mi.isMediaPlaylistReady() {
 					ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -306,8 +321,10 @@ func (s *httpServer) onMediaRequest(ctx *gin.Context, mediaPath string) {
 	}
 
 	pathConfName := streamID
+	abrChild := false
 	if isABRChildPlaylistPath(streamID) {
 		pathConfName = abrBasePath(streamID)
+		abrChild = true
 	}
 
 	req := defs.PathAccessRequest{
@@ -318,6 +335,15 @@ func (s *httpServer) onMediaRequest(ctx *gin.Context, mediaPath string) {
 	}
 	req.FillFromHTTPRequest(ctx.Request)
 	_, err = s.pathManager.FindPathConf(defs.PathFindPathConfReq{AccessRequest: req})
+	if err != nil && !abrChild && strings.Contains(streamID, "/") {
+		basePath := abrBasePath(streamID)
+		req.Name = basePath
+		candidatePathConf, candidateErr := s.pathManager.FindPathConf(defs.PathFindPathConfReq{AccessRequest: req})
+		if candidateErr == nil && isConfiguredABRChildPath(streamID, candidatePathConf) {
+			err = nil
+			abrChild = true
+		}
+	}
 	if err != nil {
 		ctx.Writer.WriteHeader(http.StatusNotFound)
 		return
