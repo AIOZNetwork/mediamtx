@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,9 +12,10 @@ import (
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
+	"github.com/gin-gonic/gin"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
-	"github.com/gin-gonic/gin"
 )
 
 type listEntryDuration time.Duration
@@ -83,6 +85,21 @@ func parseSegments(segments []*recordstore.Segment) ([]*parsedSegment, error) {
 	return parsed, err
 }
 
+func urlScheme(ctx *gin.Context, trustedProxies conf.IPNetworks, encryption bool) string {
+	if trustedProxies.Contains(net.ParseIP(ctx.RemoteIP())) {
+		xForwardedProto := ctx.Request.Header.Get("X-Forwarded-Proto")
+		if xForwardedProto != "" {
+			return xForwardedProto
+		}
+	}
+
+	if encryption {
+		return "https"
+	}
+
+	return "http"
+}
+
 type listEntry struct {
 	Start    time.Time         `json:"start"`
 	Duration listEntryDuration `json:"duration"`
@@ -134,6 +151,13 @@ func parseAndConcatenate(
 
 func (s *Server) onList(ctx *gin.Context) {
 	pathName := ctx.Query("path")
+
+	// validate path name before passing it to the authentication manager
+	err := conf.IsValidPathName(pathName)
+	if err != nil {
+		s.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid path name: %w (%s)", err, pathName))
+		return
+	}
 
 	if !s.doAuth(ctx, pathName) {
 		return
@@ -212,12 +236,7 @@ func (s *Server) onList(ctx *gin.Context) {
 		}
 	}
 
-	var scheme string
-	if s.Encryption {
-		scheme = "https"
-	} else {
-		scheme = "http"
-	}
+	scheme := urlScheme(ctx, s.TrustedProxies, s.Encryption)
 
 	for i := range entries {
 		v := url.Values{}

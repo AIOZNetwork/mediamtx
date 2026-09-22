@@ -6,10 +6,10 @@ import (
 
 // set the Server header.
 type handlerServerHeader struct {
-	http.Handler
+	h http.Handler
 }
 
 func (h *handlerServerHeader) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Server", "AIOZ")
-	h.Handler.ServeHTTP(w, r)
+	w.Header().Set("Server", "mediamtx")
+	h.h.ServeHTTP(w, r)
 }

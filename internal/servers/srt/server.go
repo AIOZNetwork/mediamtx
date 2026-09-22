@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/bluenviron/gortsplib/v5/pkg/readbuffer"
 	srt "github.com/datarhei/gosrt"
 	"github.com/google/uuid"
 
@@ -16,11 +19,14 @@ import (
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
 // ErrConnNotFound is returned when a connection is not found.
 var ErrConnNotFound = errors.New("connection not found")
+
+func interfaceIsEmpty(i any) bool {
+	return reflect.ValueOf(i).Kind() != reflect.Pointer || reflect.ValueOf(i).IsNil()
+}
 
 func srtMaxPayloadSize(u int) int {
 	return ((u - 16) / 188) * 188 // 16 = SRT header, 188 = MPEG-TS packet
@@ -54,9 +60,14 @@ type serverAPIConnsKickReq struct {
 	res  chan serverAPIConnsKickRes
 }
 
+type serverMetrics interface {
+	SetSRTServer(defs.APISRTServer)
+}
+
 type serverPathManager interface {
-	AddPublisher(req defs.PathAddPublisherReq) (defs.Path, error)
-	AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
+	FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error)
+	AddPublisher(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error)
+	AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
 }
 
 type serverParent interface {
@@ -70,10 +81,12 @@ type Server struct {
 	ReadTimeout         conf.Duration
 	WriteTimeout        conf.Duration
 	UDPMaxPayloadSize   int
+	UDPReadBufferSize   uint
 	RunOnConnect        string
 	RunOnConnectRestart bool
 	RunOnDisconnect     string
 	ExternalCmdPool     *externalcmd.Pool
+	Metrics             serverMetrics
 	PathManager         serverPathManager
 	Parent              serverParent
 
@@ -96,7 +109,15 @@ type Server struct {
 func (s *Server) Initialize() error {
 	conf := srt.DefaultConfig()
 	conf.ConnectionTimeout = time.Duration(s.ReadTimeout)
+	conf.PeerIdleTimeout = time.Duration(s.ReadTimeout)
 	conf.PayloadSize = uint32(srtMaxPayloadSize(s.UDPMaxPayloadSize))
+
+	if s.UDPReadBufferSize > 0 {
+		bufSize := int(s.UDPReadBufferSize)
+		conf.ListenerControl = func(_, _ string, rawConn syscall.RawConn) error {
+			return readbuffer.SetReadBufferRaw(rawConn, bufSize)
+		}
+	}
 
 	var err error
 	s.ln, err = srt.Listen("srt", s.Address, conf)
@@ -114,7 +135,7 @@ func (s *Server) Initialize() error {
 	s.chAPIConnsGet = make(chan serverAPIConnsGetReq)
 	s.chAPIConnsKick = make(chan serverAPIConnsKickReq)
 
-	s.Log(logger.Info, "listener opened on "+s.Address+" (UDP)")
+	s.Log(logger.Info, "started with listener on "+s.Address+" (UDP/SRT)")
 
 	l := &listener{
 		ln:     s.ln,
@@ -126,19 +147,30 @@ func (s *Server) Initialize() error {
 	s.wg.Add(1)
 	go s.run()
 
+	if !interfaceIsEmpty(s.Metrics) {
+		s.Metrics.SetSRTServer(s)
+	}
+
 	return nil
 }
 
 // Log implements logger.Writer.
-func (s *Server) Log(level logger.Level, format string, args ...interface{}) {
+func (s *Server) Log(level logger.Level, format string, args ...any) {
 	s.Parent.Log(level, "[SRT] "+format, args...)
 }
 
 // Close closes the server.
 func (s *Server) Close() {
-	s.Log(logger.Info, "listener is closing")
+	s.Log(logger.Info, "closing")
+
+	if !interfaceIsEmpty(s.Metrics) {
+		s.Metrics.SetSRTServer(nil)
+	}
+
 	s.ctxCancel()
 	s.wg.Wait()
+
+	s.Log(logger.Debug, "closed")
 }
 
 func (s *Server) run() {
@@ -175,11 +207,11 @@ outer:
 
 		case req := <-s.chAPIConnsList:
 			data := &defs.APISRTConnList{
-				Items: []*defs.APISRTConn{},
+				Items: []defs.APISRTConn{},
 			}
 
 			for c := range s.conns {
-				data.Items = append(data.Items, c.apiItem())
+				data.Items = append(data.Items, *c.apiItem())
 			}
 
 			sort.Slice(data.Items, func(i, j int) bool {
@@ -252,7 +284,7 @@ func (s *Server) closeConn(c *conn) {
 	}
 }
 
-// APIConnsList is called by api.
+// APIConnsList implements defs.APISRTServer.
 func (s *Server) APIConnsList() (*defs.APISRTConnList, error) {
 	req := serverAPIConnsListReq{
 		res: make(chan serverAPIConnsListRes),
@@ -268,7 +300,7 @@ func (s *Server) APIConnsList() (*defs.APISRTConnList, error) {
 	}
 }
 
-// APIConnsGet is called by api.
+// APIConnsGet implements defs.APISRTServer.
 func (s *Server) APIConnsGet(uuid uuid.UUID) (*defs.APISRTConn, error) {
 	req := serverAPIConnsGetReq{
 		uuid: uuid,
@@ -285,7 +317,7 @@ func (s *Server) APIConnsGet(uuid uuid.UUID) (*defs.APISRTConn, error) {
 	}
 }
 
-// APIConnsKick is called by api.
+// APIConnsKick implements defs.APISRTServer.
 func (s *Server) APIConnsKick(uuid uuid.UUID) error {
 	req := serverAPIConnsKickReq{
 		uuid: uuid,

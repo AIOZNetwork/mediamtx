@@ -9,6 +9,10 @@ import (
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
+const (
+	ntpDriftTolerance = 5 * time.Second
+)
+
 // OnSegmentCreateFunc is the prototype of the function passed as OnSegmentCreate
 type OnSegmentCreateFunc = func(path string)
 
@@ -20,6 +24,7 @@ type Recorder struct {
 	PathFormat        string
 	Format            conf.RecordFormat
 	PartDuration      time.Duration
+	MaxPartSize       conf.StringSize
 	SegmentDuration   time.Duration
 	PathName          string
 	Stream            *stream.Stream
@@ -53,7 +58,16 @@ func (r *Recorder) Initialize() {
 	r.done = make(chan struct{})
 
 	r.currentInstance = &recorderInstance{
-		rec: r,
+		pathFormat:        r.PathFormat,
+		format:            r.Format,
+		partDuration:      r.PartDuration,
+		maxPartSize:       r.MaxPartSize,
+		segmentDuration:   r.SegmentDuration,
+		pathName:          r.PathName,
+		stream:            r.Stream,
+		onSegmentCreate:   r.OnSegmentCreate,
+		onSegmentComplete: r.OnSegmentComplete,
+		parent:            r,
 	}
 	r.currentInstance.initialize()
 
@@ -61,7 +75,7 @@ func (r *Recorder) Initialize() {
 }
 
 // Log implements logger.Writer.
-func (r *Recorder) Log(level logger.Level, format string, args ...interface{}) {
+func (r *Recorder) Log(level logger.Level, format string, args ...any) {
 	r.Parent.Log(level, "[recorder] "+format, args...)
 }
 
@@ -91,7 +105,16 @@ func (r *Recorder) run() {
 		}
 
 		r.currentInstance = &recorderInstance{
-			rec: r,
+			pathFormat:        r.PathFormat,
+			format:            r.Format,
+			partDuration:      r.PartDuration,
+			maxPartSize:       r.MaxPartSize,
+			segmentDuration:   r.SegmentDuration,
+			pathName:          r.PathName,
+			stream:            r.Stream,
+			onSegmentCreate:   r.OnSegmentCreate,
+			onSegmentComplete: r.OnSegmentComplete,
+			parent:            r,
 		}
 		r.currentInstance.initialize()
 	}

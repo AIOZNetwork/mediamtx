@@ -5,23 +5,24 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/bluenviron/gortsplib/v4"
-	"github.com/bluenviron/gortsplib/v4/pkg/description"
+	"github.com/bluenviron/gortmplib"
+	rtmpcodecs "github.com/bluenviron/gortmplib/pkg/codecs"
+	"github.com/bluenviron/gortsplib/v5"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
+	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
 	srt "github.com/datarhei/gosrt"
 	"github.com/pion/rtp"
 	pwebrtc "github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bluenviron/mediamtx/internal/protocols/rtmp"
 	"github.com/bluenviron/mediamtx/internal/protocols/webrtc"
 	"github.com/bluenviron/mediamtx/internal/protocols/whip"
 	"github.com/bluenviron/mediamtx/internal/test"
@@ -43,26 +44,21 @@ func httpPullFile(t *testing.T, hc *http.Client, u string) []byte {
 }
 
 func TestMetrics(t *testing.T) {
-	serverCertFpath, err := test.CreateTempFile(test.TLSCertPub)
-	require.NoError(t, err)
-	defer os.Remove(serverCertFpath)
+	serverCertFpath := test.CreateTempFile(t, test.TLSCertPub)
+	serverKeyFpath := test.CreateTempFile(t, test.TLSCertKey)
 
-	serverKeyFpath, err := test.CreateTempFile(test.TLSCertKey)
-	require.NoError(t, err)
-	defer os.Remove(serverKeyFpath)
-
-	p, ok := newInstance("api: yes\n" +
-		"hlsAlwaysRemux: yes\n" +
-		"metrics: yes\n" +
-		"webrtcServerCert: " + serverCertFpath + "\n" +
-		"webrtcServerKey: " + serverKeyFpath + "\n" +
-		"rtspEncryption: optional\n" +
-		"rtspServerCert: " + serverCertFpath + "\n" +
-		"rtspServerKey: " + serverKeyFpath + "\n" +
-		"rtmpEncryption: optional\n" +
-		"rtmpServerCert: " + serverCertFpath + "\n" +
-		"rtmpServerKey: " + serverKeyFpath + "\n" +
-		"paths:\n" +
+	p, ok := newInstance(t, "api: yes\n"+
+		"hlsAlwaysRemux: yes\n"+
+		"metrics: yes\n"+
+		"webrtcServerCert: "+serverCertFpath+"\n"+
+		"webrtcServerKey: "+serverKeyFpath+"\n"+
+		"rtspEncryption: optional\n"+
+		"rtspServerCert: "+serverCertFpath+"\n"+
+		"rtspServerKey: "+serverKeyFpath+"\n"+
+		"rtmpEncryption: optional\n"+
+		"rtmpServerCert: "+serverCertFpath+"\n"+
+		"rtmpServerKey: "+serverKeyFpath+"\n"+
+		"paths:\n"+
 		"  all_others:\n")
 	require.Equal(t, true, ok)
 	defer p.Close()
@@ -74,13 +70,56 @@ func TestMetrics(t *testing.T) {
 	t.Run("initial", func(t *testing.T) {
 		bo := httpPullFile(t, hc, "http://localhost:9998/metrics")
 
-		require.Equal(t, `paths 0
+		require.Equal(t, `# Paths
+paths 0
+paths_inbound_bytes 0
+paths_outbound_bytes 0
+paths_inbound_frames_in_error 0
+
+# Paths (deprecated)
+paths_bytes_received 0
+paths_bytes_sent 0
+paths_readers 0
+
+# HLS sessions
+# The remoteAddr label is deprecated.
+hls_sessions 0
+hls_sessions_outbound_bytes 0
+
+# HLS muxers
 hls_muxers 0
+hls_muxers_outbound_bytes 0
+hls_muxers_outbound_frames_discarded 0
+
+# HLS muxers (deprecated)
 hls_muxers_bytes_sent 0
+
+# RTSP connections
 rtsp_conns 0
+rtsp_conns_inbound_bytes 0
+rtsp_conns_outbound_bytes 0
+
+# RTSP connections (deprecated)
 rtsp_conns_bytes_received 0
 rtsp_conns_bytes_sent 0
+
+# RTSP sessions
+# The remoteAddr label is deprecated.
 rtsp_sessions 0
+rtsp_sessions_inbound_bytes 0
+rtsp_sessions_inbound_rtp_packets 0
+rtsp_sessions_inbound_rtp_packets_lost 0
+rtsp_sessions_inbound_rtp_packets_in_error 0
+rtsp_sessions_inbound_rtp_packets_jitter 0
+rtsp_sessions_inbound_rtcp_packets 0
+rtsp_sessions_inbound_rtcp_packets_in_error 0
+rtsp_sessions_outbound_bytes 0
+rtsp_sessions_outbound_rtp_packets 0
+rtsp_sessions_outbound_rtp_packets_reported_lost 0
+rtsp_sessions_outbound_rtp_packets_discarded 0
+rtsp_sessions_outbound_rtcp_packets 0
+
+# RTSP sessions (deprecated)
 rtsp_sessions_bytes_received 0
 rtsp_sessions_bytes_sent 0
 rtsp_sessions_rtp_packets_received 0
@@ -91,10 +130,33 @@ rtsp_sessions_rtp_packets_jitter 0
 rtsp_sessions_rtcp_packets_received 0
 rtsp_sessions_rtcp_packets_sent 0
 rtsp_sessions_rtcp_packets_in_error 0
+
+# RTSPS connections
 rtsps_conns 0
+rtsps_conns_inbound_bytes 0
+rtsps_conns_outbound_bytes 0
+
+# RTSPS connections (deprecated)
 rtsps_conns_bytes_received 0
 rtsps_conns_bytes_sent 0
+
+# RTSPS sessions
+# The remoteAddr label is deprecated.
 rtsps_sessions 0
+rtsps_sessions_inbound_bytes 0
+rtsps_sessions_inbound_rtp_packets 0
+rtsps_sessions_inbound_rtp_packets_lost 0
+rtsps_sessions_inbound_rtp_packets_in_error 0
+rtsps_sessions_inbound_rtp_packets_jitter 0
+rtsps_sessions_inbound_rtcp_packets 0
+rtsps_sessions_inbound_rtcp_packets_in_error 0
+rtsps_sessions_outbound_bytes 0
+rtsps_sessions_outbound_rtp_packets 0
+rtsps_sessions_outbound_rtp_packets_reported_lost 0
+rtsps_sessions_outbound_rtp_packets_discarded 0
+rtsps_sessions_outbound_rtcp_packets 0
+
+# RTSPS sessions (deprecated)
 rtsps_sessions_bytes_received 0
 rtsps_sessions_bytes_sent 0
 rtsps_sessions_rtp_packets_received 0
@@ -105,12 +167,31 @@ rtsps_sessions_rtp_packets_jitter 0
 rtsps_sessions_rtcp_packets_received 0
 rtsps_sessions_rtcp_packets_sent 0
 rtsps_sessions_rtcp_packets_in_error 0
+
+# RTMP connections
+# The remoteAddr label is deprecated.
 rtmp_conns 0
+rtmp_conns_inbound_bytes 0
+rtmp_conns_outbound_bytes 0
+rtmp_conns_outbound_frames_discarded 0
+
+# RTMP connections (deprecated)
 rtmp_conns_bytes_received 0
 rtmp_conns_bytes_sent 0
+
+# RTMPS connections
+# The remoteAddr label is deprecated.
 rtmps_conns 0
+rtmps_conns_inbound_bytes 0
+rtmps_conns_outbound_bytes 0
+rtmps_conns_outbound_frames_discarded 0
+
+# RTMPS connections (deprecated)
 rtmps_conns_bytes_received 0
 rtmps_conns_bytes_sent 0
+
+# SRT connections
+# The remoteAddr label is deprecated.
 srt_conns 0
 srt_conns_packets_sent 0
 srt_conns_packets_received 0
@@ -127,6 +208,7 @@ srt_conns_packets_received_nak 0
 srt_conns_packets_sent_km 0
 srt_conns_packets_received_km 0
 srt_conns_us_snd_duration 0
+srt_conns_packets_received_belated 0
 srt_conns_packets_send_drop 0
 srt_conns_packets_received_drop 0
 srt_conns_packets_received_undecrypt 0
@@ -137,6 +219,7 @@ srt_conns_bytes_received_unique 0
 srt_conns_bytes_received_loss 0
 srt_conns_bytes_retrans 0
 srt_conns_bytes_received_retrans 0
+srt_conns_bytes_received_belated 0
 srt_conns_bytes_send_drop 0
 srt_conns_bytes_received_drop 0
 srt_conns_bytes_received_undecrypt 0
@@ -163,9 +246,37 @@ srt_conns_packets_reorder_tolerance 0
 srt_conns_packets_received_avg_belated_time 0
 srt_conns_packets_send_loss_rate 0
 srt_conns_packets_received_loss_rate 0
+srt_conns_outbound_frames_discarded 0
+
+# WebRTC sessions
+# The remoteAddr label is deprecated.
 webrtc_sessions 0
+webrtc_sessions_inbound_bytes 0
+webrtc_sessions_inbound_rtp_packets 0
+webrtc_sessions_inbound_rtp_packets_lost 0
+webrtc_sessions_inbound_rtp_packets_jitter 0
+webrtc_sessions_inbound_rtcp_packets 0
+webrtc_sessions_outbound_bytes 0
+webrtc_sessions_outbound_rtp_packets 0
+webrtc_sessions_outbound_rtcp_packets 0
+webrtc_sessions_outbound_frames_discarded 0
+
+# WebRTC sessions (deprecated)
 webrtc_sessions_bytes_received 0
 webrtc_sessions_bytes_sent 0
+webrtc_sessions_rtp_packets_received 0
+webrtc_sessions_rtp_packets_sent 0
+webrtc_sessions_rtp_packets_lost 0
+webrtc_sessions_rtp_packets_jitter 0
+webrtc_sessions_rtcp_packets_received 0
+webrtc_sessions_rtcp_packets_sent 0
+
+# MoQ sessions
+# The remoteAddr label is deprecated.
+moq_sessions 0
+moq_sessions_inbound_bytes 0
+moq_sessions_outbound_bytes 0
+
 `, string(bo))
 	})
 
@@ -177,9 +288,9 @@ webrtc_sessions_bytes_sent 0
 		go func() {
 			defer wg.Done()
 			source := gortsplib.Client{}
-			err := source.StartRecording("rtsp://localhost:8554/rtsp_path",
+			err2 := source.StartRecording("rtsp://localhost:8554/rtsp_path",
 				&description.Session{Medias: []*description.Media{test.UniqueMediaH264()}})
-			require.NoError(t, err)
+			require.NoError(t, err2)
 			defer source.Close()
 			<-terminate
 		}()
@@ -187,72 +298,93 @@ webrtc_sessions_bytes_sent 0
 		go func() {
 			defer wg.Done()
 			source2 := gortsplib.Client{TLSConfig: &tls.Config{InsecureSkipVerify: true}}
-			err := source2.StartRecording("rtsps://localhost:8322/rtsps_path",
+			err2 := source2.StartRecording("rtsps://localhost:8322/rtsps_path",
 				&description.Session{Medias: []*description.Media{test.UniqueMediaH264()}})
-			require.NoError(t, err)
+			require.NoError(t, err2)
 			defer source2.Close()
 			<-terminate
 		}()
 
 		go func() {
 			defer wg.Done()
-			u, err := url.Parse("rtmp://localhost:1935/rtmp_path")
-			require.NoError(t, err)
 
-			nconn, err := net.Dial("tcp", u.Host)
-			require.NoError(t, err)
-			defer nconn.Close()
+			u, err2 := url.Parse("rtmp://localhost:1935/rtmp_path")
+			require.NoError(t, err2)
 
-			conn, err := rtmp.NewClientConn(nconn, u, true)
-			require.NoError(t, err)
+			conn := &gortmplib.Client{
+				URL:     u,
+				Publish: true,
+			}
+			err2 = conn.Initialize(context.Background())
+			require.NoError(t, err2)
+			defer conn.Close()
 
-			w, err := rtmp.NewWriter(conn, test.FormatH264, nil)
-			require.NoError(t, err)
-
-			err = w.WriteH264(2*time.Second, 2*time.Second, [][]byte{{5, 2, 3, 4}})
-			require.NoError(t, err)
-
-			<-terminate
-		}()
-
-		go func() {
-			defer wg.Done()
-			u, err := url.Parse("rtmps://localhost:1936/rtmps_path")
-			require.NoError(t, err)
-
-			nconn, err := tls.Dial("tcp", u.Host, &tls.Config{InsecureSkipVerify: true})
-			require.NoError(t, err)
-			defer nconn.Close() //nolint:errcheck
-
-			conn, err := rtmp.NewClientConn(nconn, u, true)
-			require.NoError(t, err)
-
-			w, err := rtmp.NewWriter(conn, test.FormatH264, nil)
-			require.NoError(t, err)
-
-			err = w.WriteH264(2*time.Second, 2*time.Second, [][]byte{{5, 2, 3, 4}})
-			require.NoError(t, err)
-
-			<-terminate
-		}()
-
-		go func() {
-			defer wg.Done()
-
-			su, err := url.Parse("http://localhost:8889/webrtc_path/whip")
-			require.NoError(t, err)
-
-			tr := &http.Transport{}
-			defer tr.CloseIdleConnections()
-			hc2 := &http.Client{Transport: tr}
-
-			s := &whip.Client{
-				HTTPClient: hc2,
-				URL:        su,
-				Log:        test.NilLogger,
+			track := &gortmplib.Track{
+				Codec: &rtmpcodecs.H264{
+					SPS: test.FormatH264.SPS,
+					PPS: test.FormatH264.PPS,
+				},
 			}
 
-			track := &webrtc.OutgoingTrack{
+			w := &gortmplib.Writer{
+				Conn:   conn,
+				Tracks: []*gortmplib.Track{track},
+			}
+			err2 = w.Initialize()
+			require.NoError(t, err2)
+
+			err2 = w.WriteH264(track, 2*time.Second, 2*time.Second, [][]byte{{5, 2, 3, 4}})
+			require.NoError(t, err2)
+
+			<-terminate
+		}()
+
+		go func() {
+			defer wg.Done()
+
+			u, err2 := url.Parse("rtmps://localhost:1936/rtmps_path")
+			require.NoError(t, err2)
+
+			conn := &gortmplib.Client{
+				URL:       u,
+				TLSConfig: &tls.Config{InsecureSkipVerify: true},
+				Publish:   true,
+			}
+			err2 = conn.Initialize(context.Background())
+			require.NoError(t, err2)
+			defer conn.Close()
+
+			track := &gortmplib.Track{
+				Codec: &rtmpcodecs.H264{
+					SPS: test.FormatH264.SPS,
+					PPS: test.FormatH264.PPS,
+				},
+			}
+
+			w := &gortmplib.Writer{
+				Conn:   conn,
+				Tracks: []*gortmplib.Track{track},
+			}
+			err2 = w.Initialize()
+			require.NoError(t, err2)
+
+			err2 = w.WriteH264(track, 2*time.Second, 2*time.Second, [][]byte{{5, 2, 3, 4}})
+			require.NoError(t, err2)
+
+			<-terminate
+		}()
+
+		go func() {
+			defer wg.Done()
+
+			su, err2 := url.Parse("http://localhost:8889/webrtc_path/whip")
+			require.NoError(t, err2)
+
+			tr2 := &http.Transport{}
+			defer tr2.CloseIdleConnections()
+			hc2 := &http.Client{Transport: tr2}
+
+			track := &webrtc.OutboundTrack{
 				Caps: pwebrtc.RTPCodecCapability{
 					MimeType:    pwebrtc.MimeTypeH264,
 					ClockRate:   90000,
@@ -260,11 +392,19 @@ webrtc_sessions_bytes_sent 0
 				},
 			}
 
-			err = s.Publish(context.Background(), []*webrtc.OutgoingTrack{track})
-			require.NoError(t, err)
+			s := &whip.Client{
+				HTTPClient:     hc2,
+				URL:            su,
+				Log:            test.NilLogger,
+				Publish:        true,
+				OutboundTracks: []*webrtc.OutboundTrack{track},
+			}
+
+			err2 = s.Initialize(context.Background())
+			require.NoError(t, err2)
 			defer checkClose(t, s.Close)
 
-			err = track.WriteRTP(&rtp.Packet{
+			err2 = track.WriteRTP(&rtp.Packet{
 				Header: rtp.Header{
 					Version:        2,
 					Marker:         true,
@@ -275,7 +415,7 @@ webrtc_sessions_bytes_sent 0
 				},
 				Payload: []byte{1},
 			})
-			require.NoError(t, err)
+			require.NoError(t, err2)
 			<-terminate
 		}()
 
@@ -283,169 +423,83 @@ webrtc_sessions_bytes_sent 0
 			defer wg.Done()
 
 			srtConf := srt.DefaultConfig()
-			address, err := srtConf.UnmarshalURL("srt://localhost:8890?streamid=publish:srt_path")
-			require.NoError(t, err)
+			address, err2 := srtConf.UnmarshalURL("srt://localhost:8890?streamid=publish:srt_path")
+			require.NoError(t, err2)
 
-			err = srtConf.Validate()
-			require.NoError(t, err)
+			err2 = srtConf.Validate()
+			require.NoError(t, err2)
 
-			publisher, err := srt.Dial("srt", address, srtConf)
-			require.NoError(t, err)
+			publisher, err2 := srt.Dial("srt", address, srtConf)
+			require.NoError(t, err2)
 			defer publisher.Close()
 
 			track := &mpegts.Track{
-				Codec: &mpegts.CodecH264{},
+				Codec: &tscodecs.H264{},
 			}
 
 			bw := bufio.NewWriter(publisher)
-			w := mpegts.NewWriter(bw, []*mpegts.Track{track})
-			require.NoError(t, err)
+			w := &mpegts.Writer{W: bw, Tracks: []*mpegts.Track{track}}
+			err2 = w.Initialize()
+			require.NoError(t, err2)
 
-			err = w.WriteH264(track, 0, 0, [][]byte{
+			err2 = w.WriteH264(track, 0, 0, [][]byte{
 				test.FormatH264.SPS,
 				test.FormatH264.PPS,
 				{0x05, 1}, // IDR
 			})
-			require.NoError(t, err)
+			require.NoError(t, err2)
 
-			err = bw.Flush()
-			require.NoError(t, err)
+			err2 = bw.Flush()
+			require.NoError(t, err2)
 			<-terminate
 		}()
 
-		time.Sleep(500*time.Millisecond + 2*time.Second)
+		var boStr string
+		require.Eventually(t, func() bool {
+			boStr = string(httpPullFile(t, hc, "http://localhost:9998/metrics"))
 
-		bo := httpPullFile(t, hc, "http://localhost:9998/metrics")
+			return strings.Contains(boStr, "paths{name=\"rtmp_path\",state=\"ready\"} 1\n") &&
+				strings.Contains(boStr, "paths{name=\"rtmps_path\",state=\"ready\"} 1\n") &&
+				strings.Contains(boStr, "paths{name=\"rtsp_path\",state=\"ready\"} 1\n") &&
+				strings.Contains(boStr, "paths{name=\"rtsps_path\",state=\"ready\"} 1\n") &&
+				strings.Contains(boStr, "paths{name=\"srt_path\",state=\"ready\"} 1\n") &&
+				strings.Contains(boStr, "paths{name=\"webrtc_path\",state=\"ready\"} 1\n") &&
+				strings.Contains(boStr, "hls_muxers{name=\"webrtc_path\"} 1\n") &&
+				strings.Contains(boStr, "webrtc_sessions{") &&
+				strings.Contains(boStr, "path=\"webrtc_path\"")
+		}, 10*time.Second, 100*time.Millisecond)
 
-		require.Regexp(t,
-			`^paths\{name=".*?",state="ready"\} 1`+"\n"+
-				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths\{name=".*?",state="ready"\} 1`+"\n"+
-				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths\{name=".*?",state="ready"\} 1`+"\n"+
-				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths\{name=".*?",state="ready"\} 1`+"\n"+
-				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths\{name=".*?",state="ready"\} 1`+"\n"+
-				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths\{name=".*?",state="ready"\} 1`+"\n"+
-				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
-				`hls_muxers\{name=".*?"\} 1`+"\n"+
-				`hls_muxers_bytes_sent\{name=".*?"\} 0`+"\n"+
-				`hls_muxers\{name=".*?"\} 1`+"\n"+
-				`hls_muxers_bytes_sent\{name=".*?"\} 0`+"\n"+
-				`hls_muxers\{name=".*?"\} 1`+"\n"+
-				`hls_muxers_bytes_sent\{name=".*?"\} 0`+"\n"+
-				`hls_muxers\{name=".*?"\} 1`+"\n"+
-				`hls_muxers_bytes_sent\{name=".*?"\} 0`+"\n"+
-				`hls_muxers\{name=".*?"\} 1`+"\n"+
-				`hls_muxers_bytes_sent\{name=".*?"\} 0`+"\n"+
-				`hls_muxers\{name=".*?"\} 1`+"\n"+
-				`hls_muxers_bytes_sent\{name=".*?"\} 0`+"\n"+
-				`rtsp_conns\{id=".*?"\} 1`+"\n"+
-				`rtsp_conns_bytes_received\{id=".*?"\} [0-9]+`+"\n"+
-				`rtsp_conns_bytes_sent\{id=".*?"\} [0-9]+`+"\n"+
-				`rtsp_sessions\{id=".*?",state="publish"\} 1`+"\n"+
-				`rtsp_sessions_bytes_received\{id=".*?",state="publish"\} 0`+"\n"+
-				`rtsp_sessions_bytes_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsp_sessions_rtp_packets_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsp_sessions_rtp_packets_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsp_sessions_rtp_packets_lost\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsp_sessions_rtp_packets_in_error\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsp_sessions_rtp_packets_jitter\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsp_sessions_rtcp_packets_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsp_sessions_rtcp_packets_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsp_sessions_rtcp_packets_in_error\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_conns\{id=".*?"\} 1`+"\n"+
-				`rtsps_conns_bytes_received\{id=".*?"\} [0-9]+`+"\n"+
-				`rtsps_conns_bytes_sent\{id=".*?"\} [0-9]+`+"\n"+
-				`rtsps_sessions\{id=".*?",state="publish"\} 1`+"\n"+
-				`rtsps_sessions_bytes_received\{id=".*?",state="publish"\} 0`+"\n"+
-				`rtsps_sessions_bytes_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_sessions_rtp_packets_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_sessions_rtp_packets_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_sessions_rtp_packets_lost\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_sessions_rtp_packets_in_error\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_sessions_rtp_packets_jitter\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_sessions_rtcp_packets_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_sessions_rtcp_packets_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtsps_sessions_rtcp_packets_in_error\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtmp_conns\{id=".*?",state="publish"\} 1`+"\n"+
-				`rtmp_conns_bytes_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtmp_conns_bytes_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtmps_conns\{id=".*?",state="publish"\} 1`+"\n"+
-				`rtmps_conns_bytes_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`rtmps_conns_bytes_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns\{id=".*?",state="publish"\} 1`+"\n"+
-				`srt_conns_packets_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_sent_unique\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_unique\{id=".*?",state="publish"\} 1`+"\n"+
-				`srt_conns_packets_send_loss\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_loss\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_retrans\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_retrans\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_sent_ack\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_ack\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_sent_nak\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_nak\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_sent_km\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_km\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_us_snd_duration\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_send_drop\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_drop\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_undecrypt\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_sent\{id=".*?",state="publish"\} 0`+"\n"+
-				`srt_conns_bytes_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_sent_unique\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_received_unique\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_received_loss\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_retrans\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_received_retrans\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_send_drop\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_received_drop\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_received_undecrypt\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_us_packets_send_period\{id=".*?",state="publish"\} \d+\.\d+`+"\n"+
-				`srt_conns_packets_flow_window\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_flight_size\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_ms_rtt\{id=".*?",state="publish"\} \d+\.\d+`+"\n"+
-				`srt_conns_mbps_send_rate\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_mbps_receive_rate\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_mbps_link_capacity\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_avail_send_buf\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_avail_receive_buf\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_mbps_max_bw\{id=".*?",state="publish"\} -1`+"\n"+
-				`srt_conns_bytes_mss\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_send_buf\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_send_buf\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_ms_send_buf\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_ms_send_tsb_pd_delay\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_receive_buf\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_bytes_receive_buf\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_ms_receive_buf\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_ms_receive_tsb_pd_delay\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_reorder_tolerance\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_avg_belated_time\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_send_loss_rate\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`srt_conns_packets_received_loss_rate\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`webrtc_sessions\{id=".*?",state="publish"\} 1`+"\n"+
-				`webrtc_sessions_bytes_received\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				`webrtc_sessions_bytes_sent\{id=".*?",state="publish"\} [0-9]+`+"\n"+
-				"$",
-			string(bo))
+		require.Contains(t, boStr, "paths{name=\"rtmp_path\",state=\"ready\"} 1\n")
+		require.Contains(t, boStr, "paths{name=\"rtmps_path\",state=\"ready\"} 1\n")
+		require.Contains(t, boStr, "paths{name=\"rtsp_path\",state=\"ready\"} 1\n")
+		require.Contains(t, boStr, "paths{name=\"rtsps_path\",state=\"ready\"} 1\n")
+		require.Contains(t, boStr, "paths{name=\"srt_path\",state=\"ready\"} 1\n")
+		require.Contains(t, boStr, "paths{name=\"webrtc_path\",state=\"ready\"} 1\n")
+		require.Contains(t, boStr, "hls_muxers{name=\"rtmp_path\"} 1\n")
+		require.Contains(t, boStr, "hls_muxers{name=\"rtmps_path\"} 1\n")
+		require.Contains(t, boStr, "hls_muxers{name=\"rtsp_path\"} 1\n")
+		require.Contains(t, boStr, "hls_muxers{name=\"rtsps_path\"} 1\n")
+		require.Contains(t, boStr, "hls_muxers{name=\"srt_path\"} 1\n")
+		require.Contains(t, boStr, "hls_muxers{name=\"webrtc_path\"} 1\n")
+		require.Regexp(t, `(?m)^rtsp_conns\{id=".*?"\} 1$`, boStr)
+		require.Regexp(t, `(?m)^rtsp_sessions\{id=".*?",path="rtsp_path",remoteAddr=".*?",state="publish"\} 1$`, boStr)
+		require.Regexp(t, `(?m)^rtsps_conns\{id=".*?"\} 1$`, boStr)
+		require.Regexp(t, `(?m)^rtsps_sessions\{id=".*?",path="rtsps_path",remoteAddr=".*?",state="publish"\} 1$`, boStr)
+		require.Regexp(t, `(?m)^rtmp_conns\{id=".*?",path="rtmp_path",remoteAddr=".*?",state="publish"\} 1$`, boStr)
+		require.Regexp(t, `(?m)^rtmps_conns\{id=".*?",path="rtmps_path",remoteAddr=".*?",state="publish"\} 1$`, boStr)
+		require.Regexp(t, `(?m)^srt_conns\{id=".*?",path="srt_path",remoteAddr=".*?",state="publish"\} 1$`, boStr)
+		require.Regexp(t, `(?m)^srt_conns_ms_rtt\{id=".*?",path="srt_path",`+
+			`remoteAddr=".*?",state="publish"\} [0-9.]+$`, boStr)
+		require.Regexp(t, `(?m)^webrtc_sessions\{id=".*?",path="webrtc_path",remoteAddr=".*?",state="publish"\} 1$`, boStr)
+		require.Regexp(t, `(?m)^webrtc_sessions_rtcp_packets_received\{id=".*?",path="webrtc_path",`+
+			`remoteAddr=".*?",state="publish"\} [0-9]+$`, boStr)
 
 		close(terminate)
 		wg.Wait()
 	})
 
 	t.Run("servers disabled", func(t *testing.T) {
-		httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/global/patch", map[string]interface{}{
+		httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/global/patch", map[string]any{
 			"rtsp":   false,
 			"rtmp":   false,
 			"srt":    false,
@@ -457,6 +511,23 @@ webrtc_sessions_bytes_sent 0
 
 		bo := httpPullFile(t, hc, "http://localhost:9998/metrics")
 
-		require.Equal(t, "paths 0\n", string(bo))
+		require.Equal(t, "# Paths\n"+
+			"paths 0\n"+
+			"paths_inbound_bytes 0\n"+
+			"paths_outbound_bytes 0\n"+
+			"paths_inbound_frames_in_error 0\n"+
+			"\n"+
+			"# Paths (deprecated)\n"+
+			"paths_bytes_received 0\n"+
+			"paths_bytes_sent 0\n"+
+			"paths_readers 0\n"+
+			"\n"+
+			"# MoQ sessions\n"+
+			"# The remoteAddr label is deprecated.\n"+
+			"moq_sessions 0\n"+
+			"moq_sessions_inbound_bytes 0\n"+
+			"moq_sessions_outbound_bytes 0\n"+
+			"\n",
+			string(bo))
 	})
 }

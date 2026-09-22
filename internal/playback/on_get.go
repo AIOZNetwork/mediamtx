@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
+	"github.com/gin-gonic/gin"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
-	"github.com/gin-gonic/gin"
 )
 
 type writerWrapper struct {
@@ -48,30 +49,32 @@ func seekAndMux(
 	m muxer,
 ) error {
 	if recordFormat == conf.RecordFormatFMP4 {
-		var firstInit *fmp4.Init
-		var segmentEnd time.Time
-
 		f, err := os.Open(segments[0].Fpath)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
 
-		firstInit, _, err = segmentFMP4ReadHeader(f)
+		firstInit, _, err := segmentFMP4ReadHeader(f)
 		if err != nil {
 			return err
 		}
 
-		m.writeInit(firstInit)
+		m.writeInit(&fmp4.Init{
+			Tracks: firstInit.Tracks,
+		})
 
-		segmentStartOffset := start.Sub(segments[0].Start)
+		firstMtxi := findMtxi(firstInit.UserData)
+		startOffset := segments[0].Start.Sub(start) // this is negative
+		dts := startOffset
+		prevInit := firstInit
 
-		segmentDuration, err := segmentFMP4SeekAndMuxParts(f, segmentStartOffset, duration, firstInit, m)
+		segmentDuration, err := segmentFMP4MuxParts(f, dts, duration, firstInit.Tracks, m)
 		if err != nil {
 			return err
 		}
 
-		segmentEnd = start.Add(segmentDuration)
+		segmentEnd := segments[0].Start.Add(segmentDuration)
 
 		for _, seg := range segments[1:] {
 			f, err = os.Open(seg.Fpath)
@@ -86,19 +89,24 @@ func seekAndMux(
 				return err
 			}
 
-			if !segmentFMP4CanBeConcatenated(firstInit, segmentEnd, init, seg.Start) {
+			if !segmentFMP4CanBeConcatenated(prevInit, segmentEnd, init, seg.Start) {
 				break
 			}
 
-			segmentStartOffset := seg.Start.Sub(start)
+			if firstMtxi != nil {
+				mtxi := findMtxi(init.UserData)
+				dts = time.Duration(mtxi.DTS-firstMtxi.DTS) + startOffset
+			} else { // legacy method
+				dts = seg.Start.Sub(start) // this is positive
+			}
 
-			var segmentDuration time.Duration
-			segmentDuration, err = segmentFMP4MuxParts(f, segmentStartOffset, duration, firstInit, m)
+			segmentDuration, err = segmentFMP4MuxParts(f, dts, duration, firstInit.Tracks, m)
 			if err != nil {
 				return err
 			}
 
-			segmentEnd = start.Add(segmentDuration)
+			segmentEnd = seg.Start.Add(segmentDuration)
+			prevInit = init
 		}
 
 		err = m.flush()
@@ -114,6 +122,13 @@ func seekAndMux(
 
 func (s *Server) onGet(ctx *gin.Context) {
 	pathName := ctx.Query("path")
+
+	// validate path name before passing it to the authentication manager
+	err := conf.IsValidPathName(pathName)
+	if err != nil {
+		s.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid path name: %w (%s)", err, pathName))
+		return
+	}
 
 	if !s.doAuth(ctx, pathName) {
 		return
@@ -167,8 +182,7 @@ func (s *Server) onGet(ctx *gin.Context) {
 	err = seekAndMux(pathConf.RecordFormat, segments, start, duration, m)
 	if err != nil {
 		// user aborted the download
-		var neterr *net.OpError
-		if errors.As(err, &neterr) {
+		if _, ok := errors.AsType[*net.OpError](err); ok {
 			return
 		}
 
