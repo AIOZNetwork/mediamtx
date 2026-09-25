@@ -234,20 +234,20 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	default:
 		if fname == "index.m3u8" && shouldRenderABRMaster(dir, pathConf) {
+			var mi *muxerInstance
 			mux, err := s.parent.getMuxer(serverGetMuxerReq{
 				path:           dir,
 				remoteAddr:     httpp.RemoteAddr(ctx),
 				query:          ctx.Request.URL.RawQuery,
 				sourceOnDemand: pathConf.SourceOnDemand,
 			})
-			if err != nil || mux == nil {
-				ctx.Writer.WriteHeader(http.StatusNotFound)
-				return
+			if err == nil && mux != nil {
+				mi = mux.getInstance()
 			}
-			mi := mux.getInstance()
-			if mi == nil {
-				ctx.Writer.WriteHeader(http.StatusNotFound)
-				return
+
+			hasAudio := true
+			if mi != nil {
+				hasAudio = mi.hasAudio()
 			}
 
 			ctx.Header("Cache-Control", "no-cache")
@@ -256,7 +256,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			ctx.Writer.Write(renderABRMasterPlaylist(
 				masterPlaylistRenditions(pathConf, mi),
 				codecStringForTranscodedOutput(pathConf, nil),
-				mi.hasAudio()))
+				hasAudio))
 			return
 		}
 
