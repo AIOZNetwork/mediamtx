@@ -211,6 +211,7 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 	}
 
 	s.pathConf = res.Conf
+	c.maybeStartOnConnectHook(ctx.Path)
 
 	s.mutex.Lock()
 	s.user = res.User

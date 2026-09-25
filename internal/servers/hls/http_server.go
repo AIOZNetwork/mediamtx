@@ -28,6 +28,15 @@ var hlsIndex []byte
 //go:embed hls.min.js
 var hlsMinJS []byte
 
+var hlsPlaceholderPlaylist = []byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n")
+
+func writeHLSPlaceholderPlaylist(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+	ctx.Writer.WriteHeader(http.StatusOK)
+	ctx.Writer.Write(hlsPlaceholderPlaylist)
+}
+
 func trailingSlashLocation(rawPath string, rawQuery string) string {
 	res := path.Clean(rawPath)
 	res = strings.TrimLeft(res, "/\\")
@@ -242,6 +251,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	case strings.HasSuffix(pa, ".ts") ||
 		strings.HasSuffix(pa, ".mp4") ||
+		strings.HasSuffix(pa, ".m4s") ||
 		strings.HasSuffix(pa, ".mp"):
 		dir, fname = path.Dir(pa), path.Base(pa)
 
@@ -290,12 +300,29 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		}
 
 		if shouldRenderABRMaster(dir, pathConf) {
+			var mi *muxerInstance
+			mux, err := s.parent.getMuxer(serverGetMuxerReq{
+				path:           dir,
+				remoteAddr:     httpp.RemoteAddr(ctx),
+				query:          ctx.Request.URL.RawQuery,
+				sourceOnDemand: pathConf.SourceOnDemand,
+			})
+			if err == nil && mux != nil {
+				mi = mux.getInstance()
+			}
+
+			hasAudio := true
+			if mi != nil {
+				hasAudio = mi.hasAudio()
+			}
+
 			ctx.Header("Cache-Control", "no-cache")
 			ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
 			ctx.Writer.WriteHeader(http.StatusOK)
 			ctx.Writer.Write(renderABRMasterPlaylist(
-				pathConf.HLSTranscodingRenditions,
-				codecStringForTranscodedOutput(pathConf, nil)))
+				masterPlaylistRenditions(pathConf, mi),
+				codecStringForTranscodedOutput(pathConf, nil),
+				hasAudio))
 			return
 		}
 

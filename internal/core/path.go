@@ -105,26 +105,27 @@ type pathAPIStaticSourcesGetReq struct {
 }
 
 type path struct {
-	parentCtx         context.Context
-	logLevel          conf.LogLevel
-	dumpPackets       bool
-	rtspAddress       string
-	rtmpAddress       string
-	readTimeout       conf.Duration
-	writeTimeout      conf.Duration
-	writeQueueSize    int
-	udpReadBufferSize uint
-	udpMaxPayloadSize int
-	rtpMaxPayloadSize int
-	supportsIPv6      bool
-	conf              *conf.Path
-	name              string
-	streamKey         string
-	matches           []string
-	wg                *sync.WaitGroup
-	externalCmdPool   *externalcmd.Pool
-	dvrService        *dvr.Service
-	parent            pathParent
+	parentCtx                context.Context
+	logLevel                 conf.LogLevel
+	dumpPackets              bool
+	rtspAddress              string
+	rtmpAddress              string
+	readTimeout              conf.Duration
+	writeTimeout             conf.Duration
+	writeQueueSize           int
+	udpReadBufferSize        uint
+	udpMaxPayloadSize        int
+	rtpMaxPayloadSize        int
+	supportsIPv6             bool
+	conf                     *conf.Path
+	name                     string
+	streamKey                string
+	hlsTranscodingRenditions []conf.HLSTranscodingRendition
+	matches                  []string
+	wg                       *sync.WaitGroup
+	externalCmdPool          *externalcmd.Pool
+	dvrService               *dvr.Service
+	parent                   pathParent
 
 	// accessed by pathManager only
 	ready    bool
@@ -171,7 +172,20 @@ type path struct {
 }
 
 func isHLSTranscodingOutputPath(pathName string) bool {
-	return strings.Contains(pathName, "/video/") || strings.Contains(pathName, "/audio/")
+	if !strings.Contains(pathName, "/") {
+		return false
+	}
+	if strings.Contains(pathName, "/video/") || strings.Contains(pathName, "/audio/") {
+		return true
+	}
+	lastPart := pathName[strings.LastIndex(pathName, "/")+1:]
+	if lastPart == "original" || lastPart == "main" {
+		return true
+	}
+	if _, err := strconv.Atoi(strings.TrimSuffix(lastPart, "p")); err == nil {
+		return true
+	}
+	return false
 }
 
 func shouldStartHLSTranscoder(pathName string, pathConf *conf.Path) bool {
@@ -331,7 +345,7 @@ func (pa *path) run() {
 	}
 
 	if pa.stream != nil {
-		pa.setNotAvailable()
+		pa.setNotReady()
 	}
 
 	pa.Log(logger.Debug, "destroyed: %v", err)
@@ -448,7 +462,7 @@ func (pa *path) doOnDemandStaticSourceCloseTimer() {
 	if pa.conf.AlwaysAvailable {
 		panic("should not happen")
 	}
-	pa.setNotAvailable()
+	pa.setNotReady()
 	pa.onDemandStaticSourceStop("not needed by anyone")
 }
 
@@ -542,7 +556,7 @@ func (pa *path) doSourceStaticSetReady(req defs.PathSourceStaticSetReadyReq) {
 
 func (pa *path) doSourceStaticSetNotReady(req defs.PathSourceStaticSetNotReadyReq) {
 	if !pa.conf.AlwaysAvailable {
-		pa.setNotAvailable()
+		pa.setNotReady()
 	} else {
 		pa.setOffline()
 
@@ -835,6 +849,12 @@ func (pa *path) SafeConf() *conf.Path {
 	return pa.conf
 }
 
+func (pa *path) SafeHLSTranscodingRenditions() []conf.HLSTranscodingRendition {
+	pa.confMutex.RLock()
+	defer pa.confMutex.RUnlock()
+	return append([]conf.HLSTranscodingRendition(nil), pa.hlsTranscodingRenditions...)
+}
+
 func (pa *path) ExternalCmdEnv() externalcmd.Environment {
 	_, port, _ := net.SplitHostPort(pa.rtspAddress)
 	env := externalcmd.Environment{
@@ -998,8 +1018,11 @@ func (pa *path) setAvailable(
 		}
 
 		effectiveConf := effectiveHLSTranscoderConf(pa.conf, sourceInfo)
+		pa.confMutex.Lock()
+		pa.hlsTranscodingRenditions = append([]conf.HLSTranscodingRendition(nil), effectiveConf.HLSTranscodingRenditions...)
+		pa.confMutex.Unlock()
 		pa.Log(logger.Info, "transcoder effective renditions=%d", len(effectiveConf.HLSTranscodingRenditions))
-		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtmpAddress)
+		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtmpAddress, pa.rtspAddress)
 		pa.transcoder.SourceInfo = sourceInfo
 
 		if err := pa.transcoder.Start(); err != nil {
@@ -1056,9 +1079,12 @@ func (pa *path) consumeOnHoldRequests() {
 	pa.readerAddRequestsOnHold = nil
 }
 
-func (pa *path) setNotAvailable() {
+func (pa *path) setNotReady() {
+	pa.confMutex.Lock()
+	pa.hlsTranscodingRenditions = nil
+	pa.confMutex.Unlock()
+
 	pa.parent.setPathNotReady(pa)
-	pa.setOffline()
 
 	for r := range pa.readers {
 		pa.executeRemoveReader(r)
@@ -1139,7 +1165,7 @@ func (pa *path) executeRemoveReader(r defs.Reader) {
 
 func (pa *path) executeRemovePublisher() {
 	if !pa.conf.AlwaysAvailable {
-		pa.setNotAvailable()
+		pa.setNotReady()
 	} else {
 		pa.setOffline()
 

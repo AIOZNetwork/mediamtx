@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -12,15 +13,87 @@ import (
 	"github.com/bluenviron/gortmplib"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/database"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp"
 	"github.com/bluenviron/mediamtx/internal/stream"
+)
+
+func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *map[string]bool) (string, url.Values, string, string, error) {
+	tmp := strings.TrimRight(inURL.String(), "/")
+	ur, _ := url.Parse(tmp)
+	pathName := strings.TrimLeft(ur.Path, "/")
+
+	if !isPublish {
+		return pathName, ur.Query(), ur.RawQuery, "", nil
+	}
+
+	streamKeyStr := pathName
+	if idx := strings.LastIndex(pathName, "/"); idx != -1 {
+		streamKeyStr = pathName[idx+1:]
+	}
+
+	if listStreamKey != nil && (*listStreamKey)[streamKeyStr] {
+		return "", nil, "", "", errors.New("this streamkey is streaming")
+	}
+
+	if streamKeyStr == "" {
+		return "", nil, "", "", errors.New("invalid path name")
+	}
+	uuidPathName, err := uuid.Parse(streamKeyStr)
+	if err != nil {
+		return "", nil, "", "", errors.New("invalid path name")
+	}
+
+	videoStreaming, err := c.livestreamVideoRepo.GetStreamMediaAvaialbleByStreamKey(uuidPathName)
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return "", nil, "", "", errors.New("something went wrong")
+	}
+
+	if err == gorm.ErrRecordNotFound { // stream directly without create stream session
+
+		streamKey := c.livestreamVideoRepo.GetStreamKeyExist(uuidPathName)
+		if streamKey == uuid.Nil {
+			return "", nil, "", "", errors.New("invalid path name")
+		}
+
+		newStreamID := uuid.New()
+
+		return newStreamID.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
+	}
+
+	if videoStreaming.Status == "streaming" {
+		value, _ := database.RedisIdDb.Get(c.ctx, videoStreaming.Id.String()).Result()
+		if value != "" {
+			// If Redis says this server is streaming it, but listStreamKey does not have it,
+			// then the previous session on this server crashed or was terminated without clean disconnect.
+			if value == conf.IdentityServer && (listStreamKey == nil || !(*listStreamKey)[streamKeyStr]) {
+				_ = database.RedisIdDb.Del(c.ctx, videoStreaming.Id.String()).Err()
+				_ = c.livestreamVideoRepo.UpdateStreamMediaStatus(videoStreaming.Id, "ended")
+
+				newStreamID := uuid.New()
+				return newStreamID.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
+			}
+			return "", nil, "", "", errors.New("this streamkey is streaming")
+		}
+	}
+
+	return videoStreaming.Id.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
+}
+
+type connState int
+
+const (
+	connStateRead connState = iota + 1
+	connStatePublish
 )
 
 type conn struct {
@@ -37,6 +110,7 @@ type conn struct {
 	externalCmdPool     *externalcmd.Pool
 	pathManager         serverPathManager
 	parent              *Server
+	livestreamVideoRepo *repository.LiveStreamVideoRepository
 
 	ctx       context.Context
 	ctxCancel func()
@@ -54,6 +128,7 @@ type conn struct {
 
 func (c *conn) initialize() {
 	c.ctx, c.ctxCancel = context.WithCancel(c.parentCtx)
+	c.livestreamVideoRepo = repository.NewLiveStreamVideoRepository(database.DB)
 
 	c.uuid = uuid.New()
 	c.created = time.Now()

@@ -24,10 +24,54 @@ import (
 	"github.com/pion/sdp/v3"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/protocols/whip"
+	"github.com/bluenviron/mediamtx/internal/servers/hls/transcoder"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
+
+func TestShouldStartHLSTranscoderSkipsNestedABROutputs(t *testing.T) {
+	pathConf := &conf.Path{HLSTranscoding: true}
+
+	for _, pathName := range []string{"cam_1", "nested/cam_1"} {
+		if !shouldStartHLSTranscoder(pathName, pathConf) {
+			t.Fatalf("expected source path %q to start transcoder", pathName)
+		}
+	}
+
+	for _, pathName := range []string{
+		"cam_1/original", "cam_1/1080", "cam_1/720", "cam_1/480",
+		"cam_1/video/720", "cam_1/audio/main", "nested/cam_1/video/480",
+	} {
+		if shouldStartHLSTranscoder(pathName, pathConf) {
+			t.Fatalf("expected ABR output path %q to skip transcoder", pathName)
+		}
+	}
+}
+
+func TestEffectiveHLSTranscoderConfDoesNotMutateOriginal(t *testing.T) {
+	pathConf := &conf.Path{
+		HLSTranscoding: true,
+		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
+			{Name: "1080", Width: 1920, Height: 1080, VideoBitrate: "6000k"},
+			{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+			{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
+		},
+	}
+
+	effective := effectiveHLSTranscoderConf(pathConf, &transcoder.SourceInfo{Height: 720})
+	if len(effective.HLSTranscodingRenditions) != 2 {
+		t.Fatalf("expected filtered effective renditions, got %+v", effective.HLSTranscodingRenditions)
+	}
+	if len(pathConf.HLSTranscodingRenditions) != 3 {
+		t.Fatalf("original config was mutated: %+v", pathConf.HLSTranscodingRenditions)
+	}
+	effective.HLSTranscodingRenditions[0].Name = "changed"
+	if pathConf.HLSTranscodingRenditions[1].Name != "720" {
+		t.Fatalf("effective config aliases original rendition slice")
+	}
+}
 
 type testServer struct {
 	onDescribe func(*gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error)

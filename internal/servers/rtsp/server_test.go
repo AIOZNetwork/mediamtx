@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,12 +26,15 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
+	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
 )
 
-type dummyPath struct{}
+type dummyPath struct {
+	streamCreated chan struct{}
+}
 
 func (p *dummyPath) Name() string {
 	return "teststream"
@@ -55,6 +59,105 @@ func (p *dummyPath) RemovePublisher(_ defs.PathRemovePublisherReq) {
 }
 
 func (p *dummyPath) RemoveReader(_ defs.PathRemoveReaderReq) {
+}
+
+func TestServerRunOnConnectPublisherPaths(t *testing.T) {
+	for _, ca := range []struct {
+		name        string
+		path        string
+		expectHooks bool
+	}{
+		{name: "base", path: "teststream", expectHooks: true},
+		{name: "video_original_child", path: "teststream/video/original", expectHooks: false},
+		{name: "video_720_child", path: "teststream/video/720", expectHooks: false},
+		{name: "original_path", path: "teststream/original", expectHooks: true},
+		{name: "transcoded_720_child", path: "teststream/720", expectHooks: false},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			prev := onConnectHook
+			defer func() { onConnectHook = prev }()
+
+			connected := make(chan struct{})
+			disconnected := make(chan struct{})
+			var connectedOnce sync.Once
+			var disconnectedOnce sync.Once
+
+			onConnectHook = func(params hooks.OnConnectParams) func() {
+				require.Equal(t, "rtspConn", params.Desc.Type)
+				require.NotEmpty(t, params.Desc.ID)
+				connectedOnce.Do(func() { close(connected) })
+				return func() {
+					disconnectedOnce.Do(func() { close(disconnected) })
+				}
+			}
+
+			path := &dummyPath{
+				streamCreated: make(chan struct{}),
+			}
+
+			pathManager := &test.PathManager{
+				FindPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+					require.Equal(t, ca.path, req.AccessRequest.Name)
+					return &defs.PathFindPathConfRes{Conf: &conf.Path{}}, nil
+				},
+				AddPublisherImpl: func(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+					require.Equal(t, ca.path, req.AccessRequest.Name)
+					close(path.streamCreated)
+					return &defs.PathAddPublisherRes{Path: path}, nil
+				},
+			}
+
+			s := &Server{
+				Address:         "127.0.0.1:8557",
+				ReadTimeout:     conf.Duration(10 * time.Second),
+				WriteTimeout:    conf.Duration(10 * time.Second),
+				WriteQueueSize:  512,
+				Transports:      conf.RTSPTransports{gortsplib.ProtocolTCP: {}},
+				RunOnConnect:    "connect",
+				RunOnDisconnect: "disconnect",
+				PathManager:     pathManager,
+				Parent:          test.NilLogger,
+			}
+			err := s.Initialize()
+			require.NoError(t, err)
+			defer s.Close()
+
+			source := gortsplib.Client{}
+			err = source.StartRecording(
+				"rtsp://127.0.0.1:8557/"+ca.path,
+				&description.Session{Medias: []*description.Media{test.UniqueMediaH264()}})
+			require.NoError(t, err)
+			<-path.streamCreated
+
+			if ca.expectHooks {
+				select {
+				case <-connected:
+				case <-time.After(2 * time.Second):
+					t.Fatal("runOnConnect hook was not started")
+				}
+
+				source.Close()
+				select {
+				case <-disconnected:
+				case <-time.After(2 * time.Second):
+					t.Fatal("runOnDisconnect hook was not called")
+				}
+			} else {
+				select {
+				case <-connected:
+					t.Fatal("runOnConnect hook started for transcoder child path")
+				case <-time.After(200 * time.Millisecond):
+				}
+
+				source.Close()
+				select {
+				case <-disconnected:
+					t.Fatal("runOnDisconnect hook called for transcoder child path")
+				case <-time.After(200 * time.Millisecond):
+				}
+			}
+		})
+	}
 }
 
 func TestServerPublish(t *testing.T) {

@@ -34,6 +34,10 @@ type muxerCloseInstanceReq struct {
 	err      error
 }
 
+type pathWithSafeHLSTranscodingRenditions interface {
+	SafeHLSTranscodingRenditions() []conf.HLSTranscodingRendition
+}
+
 type muxer struct {
 	parentCtx       context.Context
 	remoteAddr      string
@@ -272,26 +276,44 @@ func (m *muxer) runInner() error {
 
 func (m *muxer) createInstance(strm *stream.Stream) (*muxerInstance, error) {
 	mi := &muxerInstance{
-		variant:         m.variant,
-		segmentCount:    m.segmentCount,
-		segmentDuration: m.segmentDuration,
-		partDuration:    m.partDuration,
-		segmentMaxSize:  m.segmentMaxSize,
-		directory:       m.directory,
-		uploadConfig:    m.uploadConfig,
-		pathName:        m.pathName,
-		streamKey:       m.path.GetStreamKey(),
-		bytesSent:       &m.bytesSent,
-		wg:              m.wg,
-		stream:          strm,
-		server:          m.parent,
-		parent:          m,
+		variant:                  m.variant,
+		segmentCount:             m.segmentCount,
+		segmentDuration:          m.segmentDuration,
+		partDuration:             m.partDuration,
+		segmentMaxSize:           m.segmentMaxSize,
+		directory:                m.directory,
+		uploadConfig:             m.uploadConfig,
+		pathConf:                 m.path.SafeConf(),
+		hlsTranscodingRenditions: m.safeHLSTranscodingRenditions(),
+		pathName:                 m.pathName,
+		streamKey:                m.path.GetStreamKey(),
+		bytesSent:                &m.bytesSent,
+		wg:                       m.wg,
+		stream:                   strm,
+		server:                   m.parent,
+		parent:                   m,
 	}
 	err := mi.initialize()
 	if err != nil {
 		return nil, err
 	}
 	return mi, nil
+}
+
+func (m *muxer) safeHLSTranscodingRenditions() []conf.HLSTranscodingRendition {
+	if pathWithRenditions, ok := m.path.(pathWithSafeHLSTranscodingRenditions); ok {
+		return pathWithRenditions.SafeHLSTranscodingRenditions()
+	}
+	return nil
+}
+
+func (m *muxer) getInstance() *muxerInstance {
+	m.lastRequestTime.Store(time.Now().UnixNano())
+
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	return m.instance
 }
 
 func (m *muxer) closeInstance(mi *muxerInstance, err error) {
