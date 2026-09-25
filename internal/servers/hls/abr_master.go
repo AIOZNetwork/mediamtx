@@ -150,6 +150,31 @@ func shouldRenderABRMaster(pathName string, pathConf *conf.Path) bool {
 		!isABROutputPath(pathName) && !isConfiguredABRChildPath(pathName, pathConf)
 }
 
+// isConfiguredABRChildPath checks whether pathName is a valid ABR rendition child
+// path (e.g. "<uuid>/1080") that is actually enabled in pathConf's transcoding
+// renditions. It is used as a fallback when FindPathConf returns an error for a
+// child path that the router doesn't know about by name.
+func isConfiguredABRChildPath(pathName string, pathConf *conf.Path) bool {
+	if pathConf == nil || !pathConf.HLSTranscoding {
+		return false
+	}
+	if !isABRChildPlaylistPath(pathName) {
+		return false
+	}
+	name, ok := abrChildRenditionName(pathName)
+	if !ok {
+		// "original" and "main" are always valid when transcoding is on
+		lastPart := pathName[strings.LastIndex(pathName, "/")+1:]
+		return lastPart == "original" || lastPart == "main"
+	}
+	for _, r := range pathConf.HLSTranscodingRenditions {
+		if r.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func masterPlaylistRenditions(pathConf *conf.Path, mi *muxerInstance) []conf.HLSTranscodingRendition {
 	if mi != nil && mi.hlsTranscodingRenditions != nil {
 		return append([]conf.HLSTranscodingRendition(nil), mi.hlsTranscodingRenditions...)
