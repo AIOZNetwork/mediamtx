@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v4"
@@ -62,14 +63,35 @@ type conn struct {
 
 	uuid             uuid.UUID
 	created          time.Time
+	onDisconnectMu   sync.Mutex
 	onDisconnectHook func()
 }
+
+var onConnectHook = hooks.OnConnect
 
 func (c *conn) initialize() {
 	c.uuid = uuid.New()
 	c.created = time.Now()
 
 	c.Log(logger.Info, "opened")
+
+	// The path associated with a RTSP connection is not known when the TCP
+	// connection opens. Start runOnConnect only after a publisher successfully
+	// ANNOUNCEs a non-transcoder path, otherwise internal FFmpeg child RTSP
+	// connections would fire live-stream webhooks with their own connection IDs.
+}
+
+func (c *conn) maybeStartOnConnectHook(pathName string) {
+	if hooks.IsTranscoderChildPath(pathName) {
+		return
+	}
+
+	c.onDisconnectMu.Lock()
+	defer c.onDisconnectMu.Unlock()
+
+	if c.onDisconnectHook != nil {
+		return
+	}
 
 	desc := defs.APIPathSourceOrReader{
 		Type: func() string {
@@ -81,7 +103,7 @@ func (c *conn) initialize() {
 		ID: c.uuid.String(),
 	}
 
-	c.onDisconnectHook = hooks.OnConnect(hooks.OnConnectParams{
+	c.onDisconnectHook = onConnectHook(hooks.OnConnectParams{
 		Logger:              c,
 		ExternalCmdPool:     c.externalCmdPool,
 		RunOnConnect:        c.runOnConnect,
@@ -114,7 +136,14 @@ func (c *conn) ip() net.IP {
 func (c *conn) onClose(err error) {
 	c.Log(logger.Info, "closed: %v", err)
 
-	c.onDisconnectHook()
+	c.onDisconnectMu.Lock()
+	onDisconnectHook := c.onDisconnectHook
+	c.onDisconnectHook = nil
+	c.onDisconnectMu.Unlock()
+
+	if onDisconnectHook != nil {
+		onDisconnectHook()
+	}
 }
 
 // onRequest is called by rtspServer.

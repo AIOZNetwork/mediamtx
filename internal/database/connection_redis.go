@@ -41,4 +41,13 @@ func MustConnectToRedis(config *conf.Conf) {
 		panic(err)
 	}
 	RedisStatsDb = rdStreamStatsDb
+
+	// Clean up stale connection IDs for this server instance on boot
+	if config.IdentityServer != "" {
+		staleConnIDs, _ := rdStreamStatsDb.SMembers(ctx, config.IdentityServer).Result()
+		for _, connID := range staleConnIDs {
+			_ = rdUuidDb.Del(ctx, connID).Err()
+		}
+		_ = rdStreamStatsDb.Del(ctx, config.IdentityServer).Err()
+	}
 }

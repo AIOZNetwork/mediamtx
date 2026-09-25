@@ -65,22 +65,23 @@ type pathAPIPathsGetReq struct {
 }
 
 type path struct {
-	parentCtx         context.Context
-	logLevel          conf.LogLevel
-	rtspAddress       string
-	rtmpAddress       string
-	readTimeout       conf.Duration
-	writeTimeout      conf.Duration
-	writeQueueSize    int
-	udpMaxPayloadSize int
-	conf              *conf.Path
-	name              string
-	streamKey         string
-	matches           []string
-	wg                *sync.WaitGroup
-	externalCmdPool   *externalcmd.Pool
-	dvrService        *dvr.Service
-	parent            pathParent
+	parentCtx                context.Context
+	logLevel                 conf.LogLevel
+	rtspAddress              string
+	rtmpAddress              string
+	readTimeout              conf.Duration
+	writeTimeout             conf.Duration
+	writeQueueSize           int
+	udpMaxPayloadSize        int
+	conf                     *conf.Path
+	name                     string
+	streamKey                string
+	hlsTranscodingRenditions []conf.HLSTranscodingRendition
+	matches                  []string
+	wg                       *sync.WaitGroup
+	externalCmdPool          *externalcmd.Pool
+	dvrService               *dvr.Service
+	parent                   pathParent
 
 	ctx                            context.Context
 	ctxCancel                      func()
@@ -121,7 +122,20 @@ type path struct {
 }
 
 func isHLSTranscodingOutputPath(pathName string) bool {
-	return strings.Contains(pathName, "/video/") || strings.Contains(pathName, "/audio/")
+	if !strings.Contains(pathName, "/") {
+		return false
+	}
+	if strings.Contains(pathName, "/video/") || strings.Contains(pathName, "/audio/") {
+		return true
+	}
+	lastPart := pathName[strings.LastIndex(pathName, "/")+1:]
+	if lastPart == "original" || lastPart == "main" {
+		return true
+	}
+	if _, err := strconv.Atoi(strings.TrimSuffix(lastPart, "p")); err == nil {
+		return true
+	}
+	return false
 }
 
 func shouldStartHLSTranscoder(pathName string, pathConf *conf.Path) bool {
@@ -632,6 +646,12 @@ func (pa *path) SafeConf() *conf.Path {
 	return pa.conf
 }
 
+func (pa *path) SafeHLSTranscodingRenditions() []conf.HLSTranscodingRendition {
+	pa.confMutex.RLock()
+	defer pa.confMutex.RUnlock()
+	return append([]conf.HLSTranscodingRendition(nil), pa.hlsTranscodingRenditions...)
+}
+
 func (pa *path) ExternalCmdEnv() externalcmd.Environment {
 	_, port, _ := net.SplitHostPort(pa.rtspAddress)
 	env := externalcmd.Environment{
@@ -755,8 +775,11 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 		}
 
 		effectiveConf := effectiveHLSTranscoderConf(pa.conf, sourceInfo)
+		pa.confMutex.Lock()
+		pa.hlsTranscodingRenditions = append([]conf.HLSTranscodingRendition(nil), effectiveConf.HLSTranscodingRenditions...)
+		pa.confMutex.Unlock()
 		pa.Log(logger.Info, "transcoder effective renditions=%d", len(effectiveConf.HLSTranscodingRenditions))
-		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtmpAddress)
+		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtmpAddress, pa.rtspAddress)
 		pa.transcoder.SourceInfo = sourceInfo
 
 		if err := pa.transcoder.Start(); err != nil {
@@ -795,6 +818,10 @@ func (pa *path) consumeOnHoldRequests() {
 }
 
 func (pa *path) setNotReady() {
+	pa.confMutex.Lock()
+	pa.hlsTranscodingRenditions = nil
+	pa.confMutex.Unlock()
+
 	pa.parent.pathNotReady(pa)
 
 	for r := range pa.readers {

@@ -25,7 +25,7 @@ func TestTranscoderInit(t *testing.T) {
 	}
 
 	l := &mockLogger{t: t}
-	tr := NewTranscoder(cfg, "test_stream", l, ":1935")
+	tr := NewTranscoder(cfg, "test_stream", l, ":1935", "127.0.0.1:8554")
 
 	if tr.StreamID != "test_stream" {
 		t.Errorf("expected streamID test_stream, got %s", tr.StreamID)
@@ -45,7 +45,7 @@ func TestFFmpegBuildArgsSharedAudioNestedOutputs(t *testing.T) {
 		HLSTranscodingPreset:     "veryfast",
 	}
 
-	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935")
+	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554")
 	args := strings.Join(tr.BuildArgs(), " ")
 
 	for _, expected := range []string{
@@ -54,24 +54,18 @@ func TestFFmpegBuildArgsSharedAudioNestedOutputs(t *testing.T) {
 		"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[out1080]",
 		"scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[out720]",
 		"scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2[out480]",
-		"-map 0:v:0? -map 0:a:0? -c copy -f flv rtmp://127.0.0.1:1935/cam1/video/source",
-		"-map [out1080] -an -c:v libx264 -pix_fmt yuv420p -b:v 6000k -preset veryfast -tune zerolatency",
+		"-map [out1080] -c:v libx264 -pix_fmt yuv420p -b:v 6000k -preset veryfast -tune zerolatency",
 		"-g 60 -keyint_min 60 -sc_threshold 0 -x264-params scenecut=0:open_gop=0:rc-lookahead=0",
-		"-f flv rtmp://127.0.0.1:1935/cam1/video/1080",
-		"-f flv rtmp://127.0.0.1:1935/cam1/video/720",
-		"-f flv rtmp://127.0.0.1:1935/cam1/video/480",
-		"-map 0:a:0? -vn -af aresample=async=1:first_pts=0 -c:a aac -b:a 128k -ar 48000 -ac 2",
-		"-f flv rtmp://127.0.0.1:1935/cam1/audio/main",
+		"rtsp://127.0.0.1:8554/cam1/1080",
+		"rtsp://127.0.0.1:8554/cam1/720",
+		"rtsp://127.0.0.1:8554/cam1/480",
 	} {
 		if !strings.Contains(args, expected) {
 			t.Fatalf("args missing %q:\n%s", expected, args)
 		}
 	}
-
-	if strings.Contains(args, "rtsp://") || strings.Contains(args, "-rtsp_transport") || strings.Contains(args, "-f rtsp") {
-		t.Fatalf("args must not contain RTSP transport or output settings:\n%s", args)
-	}
 }
+
 
 func TestFilterRenditionsBySourceHeight(t *testing.T) {
 	renditions := []conf.HLSTranscodingRendition{

@@ -37,6 +37,7 @@ type FFmpegTranscoder struct {
 	StreamID    string
 	Parent      logger.Writer
 	rtmpAddress string
+	rtspAddress string
 	SourceInfo  *SourceInfo
 
 	ctx       context.Context
@@ -47,7 +48,7 @@ type FFmpegTranscoder struct {
 	done     chan struct{}
 }
 
-func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtmpAddress string) *FFmpegTranscoder {
+func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtmpAddress string, rtspAddress string) *FFmpegTranscoder {
 	ctx, cancel := context.WithCancel(context.Background())
 	if strings.TrimSpace(rtmpAddress) == "" {
 		rtmpAddress = defaultRTMPAddress
@@ -57,9 +58,20 @@ func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, 
 		StreamID:    streamID,
 		Parent:      parent,
 		rtmpAddress: rtmpAddress,
+		rtspAddress: rtspAddress,
 		ctx:         ctx,
 		ctxCancel:   cancel,
 	}
+}
+
+func (t *FFmpegTranscoder) rtspPort() string {
+	if t.rtspAddress != "" {
+		_, port, err := net.SplitHostPort(t.rtspAddress)
+		if err == nil && port != "" {
+			return port
+		}
+	}
+	return "8554"
 }
 
 func (t *FFmpegTranscoder) Log(level logger.Level, format string, args ...interface{}) {
@@ -121,7 +133,8 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		"-nostdin",
 		"-hide_banner",
 		"-loglevel", "warning",
-		"-fflags", "nobuffer+fastseek+genpts",
+		"-err_detect", "ignore_err",
+		"-fflags", "nobuffer+fastseek+genpts+discardcorrupt",
 		"-flags", "low_delay",
 		"-analyzeduration", "500000",
 		"-probesize", "500000",
@@ -132,19 +145,21 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 	videoCodec := defaultString(t.Conf.HLSTranscodingVideoCodec, defaultVideoCodec)
 	preset := defaultString(t.Conf.HLSTranscodingPreset, defaultPreset)
 
-	args = append(args,
-		"-map", "0:v:0?",
-		"-map", "0:a:0?",
-		"-c", "copy",
-		"-f", "flv",
-		t.rtmpURL(t.StreamID, "video", "source"),
-	)
+	audioCodec := defaultString(t.Conf.HLSTranscodingAudioCodec, defaultAudioCodec)
+	audioMap := "0:a:0?"
+	if t.SourceInfo != nil && !t.SourceInfo.HasAudio() {
+		args = append(args,
+			"-f", "lavfi",
+			"-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+		)
+		audioMap = "1:a:0"
+	}
 
+	// Transcoded renditions from config (each with its own video and audio muxed)
 	for _, r := range renditions {
-		outURL := t.rtmpURL(t.StreamID, "video", r.Name)
+		outURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s/%s", t.rtspPort(), t.StreamID, r.Name)
 		args = append(args,
 			"-map", fmt.Sprintf("[out%s]", r.Name),
-			"-an",
 			"-c:v", videoCodec,
 			"-pix_fmt", defaultPixelFormat,
 			"-b:v", r.VideoBitrate,
@@ -154,22 +169,17 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 			"-keyint_min", defaultKeyintMin,
 			"-sc_threshold", "0",
 			"-x264-params", x264ClosedGOPParams,
-			"-f", "flv",
+			"-map", audioMap,
+			"-c:a", audioCodec,
+			"-b:a", defaultAudioBitrate,
+			"-ar", defaultAudioSampleRate,
+			"-ac", defaultAudioChannels,
+			"-f", "rtsp",
+			"-rtsp_transport", "tcp",
 			outURL,
 		)
 	}
 
-	args = append(args,
-		"-map", "0:a:0?",
-		"-vn",
-		"-af", audioResampleFilter,
-		"-c:a", defaultString(t.Conf.HLSTranscodingAudioCodec, defaultAudioCodec),
-		"-b:a", defaultAudioBitrate,
-		"-ar", defaultAudioSampleRate,
-		"-ac", defaultAudioChannels,
-		"-f", "flv",
-		t.rtmpURL(t.StreamID, "audio", "main"),
-	)
 
 	return args
 }

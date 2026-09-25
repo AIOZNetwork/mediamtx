@@ -52,22 +52,36 @@ const (
 	codecSeparator = ","
 
 	// Path markers
-	pathMarkerVideo     = "/video/"
-	pathMarkerAudio     = "/audio/"
-	pathMarkerAudioMain = "/audio/main"
+	pathMarkerVideo = "/video/"
+	pathMarkerAudio = "/audio/"
 )
 
-func isABROutputPath(pathName string) bool {
-	return strings.Contains(pathName, pathMarkerVideo) ||
-		strings.Contains(pathName, pathMarkerAudio)
+func isABRChildPlaylistPath(pathName string) bool {
+	if !strings.Contains(pathName, "/") {
+		return false
+	}
+	if strings.Contains(pathName, pathMarkerVideo) || strings.Contains(pathName, pathMarkerAudio) {
+		return true
+	}
+	lastPart := pathName[strings.LastIndex(pathName, "/")+1:]
+	if lastPart == "original" || lastPart == "main" {
+		return true
+	}
+	if _, err := strconv.Atoi(strings.TrimSuffix(lastPart, "p")); err == nil {
+		return true
+	}
+	return false
 }
 
-func isABRChildPlaylistPath(pathName string) bool {
-	return strings.Contains(pathName, pathMarkerVideo) ||
-		strings.Contains(pathName, pathMarkerAudioMain)
+func isABROutputPath(pathName string) bool {
+	return isABRChildPlaylistPath(pathName)
 }
+
 
 func abrBasePath(pathName string) string {
+	if !isABRChildPlaylistPath(pathName) {
+		return pathName
+	}
 	for _, marker := range []string{pathMarkerVideo, pathMarkerAudio} {
 		if idx := strings.Index(pathName, marker); idx >= 0 {
 			return pathName[:idx]
@@ -79,6 +93,9 @@ func abrBasePath(pathName string) string {
 	return pathName
 }
 
+// isConfiguredABRChildPath checks whether pathName is a valid ABR rendition
+// child path that is actually enabled in pathConf's transcoding renditions.
+// Supports both legacy paths (video/<name>) and flat paths (<name>).
 func isConfiguredABRChildPath(pathName string, pathConf *conf.Path) bool {
 	if pathConf == nil || !pathConf.HLSTranscoding || !strings.Contains(pathName, "/") {
 		return false
@@ -86,25 +103,69 @@ func isConfiguredABRChildPath(pathName string, pathConf *conf.Path) bool {
 
 	basePath := abrBasePath(pathName)
 	childName := strings.TrimPrefix(pathName[len(basePath):], "/")
-	if childName == "video/source" || childName == "audio/main" {
+	// legacy: video/source, audio/main
+	if childName == "video/source" || childName == "audio/main" || childName == "original" || childName == "main" {
 		return true
 	}
-
+	// legacy: video/<renditionName>
 	for _, rendition := range pathConf.HLSTranscodingRenditions {
-		if childName == "video/"+rendition.Name {
+		if childName == "video/"+rendition.Name || childName == rendition.Name {
 			return true
 		}
 	}
-
 	return false
 }
+
+func abrChildRenditionName(pathName string) (string, bool) {
+	if !isABRChildPlaylistPath(pathName) {
+		return "", false
+	}
+	lastPart := pathName[strings.LastIndex(pathName, "/")+1:]
+	if lastPart == "original" || lastPart == "main" {
+		return "", false
+	}
+	name := strings.TrimSuffix(lastPart, "p")
+	if _, err := strconv.Atoi(name); err != nil {
+		return "", false
+	}
+	return name, true
+}
+
+func abrChildRenditionAdvertised(pathName string, renditions []conf.HLSTranscodingRendition) bool {
+	name, ok := abrChildRenditionName(pathName)
+	if !ok {
+		return true
+	}
+	for _, r := range renditions {
+		if r.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 
 func shouldRenderABRMaster(pathName string, pathConf *conf.Path) bool {
 	return pathConf != nil && pathConf.HLSTranscoding && len(pathConf.HLSTranscodingRenditions) > 0 &&
 		!isABROutputPath(pathName) && !isConfiguredABRChildPath(pathName, pathConf)
 }
 
-func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr string) []byte {
+func masterPlaylistRenditions(pathConf *conf.Path, mi *muxerInstance) []conf.HLSTranscodingRendition {
+	if mi != nil && mi.hlsTranscodingRenditions != nil {
+		return append([]conf.HLSTranscodingRendition(nil), mi.hlsTranscodingRenditions...)
+	}
+	if pathConf == nil {
+		return nil
+	}
+	return append([]conf.HLSTranscodingRendition(nil), pathConf.HLSTranscodingRenditions...)
+}
+
+func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr string, hasAudioOpts ...bool) []byte {
+	hasAudio := false
+	if len(hasAudioOpts) > 0 {
+		hasAudio = hasAudioOpts[0]
+	}
+
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:7\n")
@@ -113,14 +174,51 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 	if codecStr == "" {
 		codecStr = defaultMasterCodecString
 	}
-	b.WriteString("#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"main-audio\",NAME=\"Main\",LANGUAGE=\"und\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",URI=\"audio/main/index.m3u8\"\n")
 
+
+	// Derive original bandwidth and top resolution from the highest configured rendition
+	originalBandwidth := sourceBandwidth
+	var topWidth, topHeight int
+	for _, r := range renditions {
+		bw := parseBitrate(r.VideoBitrate) + sharedAudioBandwidth
+		if bw > originalBandwidth {
+			originalBandwidth = bw
+		}
+		if r.Width > topWidth {
+			topWidth = r.Width
+			topHeight = r.Height
+		}
+	}
+	originalBandwidth = originalBandwidth * 120 / 100
+
+	resolutionAttr := ""
+	if topWidth > 0 && topHeight > 0 {
+		resolutionAttr = fmt.Sprintf("RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,", topWidth, topHeight)
+	}
+
+	audioAttr := ""
+	if hasAudio {
+		audioURI := "original/audio2_stream.m3u8"
+		if len(renditions) > 0 {
+			audioURI = fmt.Sprintf("%s/audio2_stream.m3u8", renditions[0].Name)
+		}
+		b.WriteString(fmt.Sprintf(
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"%s\"\n",
+			audioURI,
+		))
+		audioAttr = "AUDIO=\"audio\","
+	}
+
+	// 1. Original quality (LL-HLS, not uploaded to provider). When source codec
+	// metadata is not available here, omit CODECS rather than advertising the
+	// normalized transcoder codec.
 	b.WriteString(fmt.Sprintf(
-		"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,CLOSED-CAPTIONS=NONE\n",
-		sourceBandwidth, sourceBandwidth,
+		"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,%s%sCLOSED-CAPTIONS=NONE,NAME=\"original\"\n",
+		originalBandwidth, originalBandwidth, resolutionAttr, audioAttr,
 	))
-	b.WriteString("video/source/index.m3u8\n")
+	b.WriteString("original/index.m3u8\n")
 
+	// 2. Transcoded qualities from config (uploaded to provider, fMP4 segment)
 	for _, r := range renditions {
 		videoBandwidth := parseBitrate(r.VideoBitrate)
 		bandwidth := videoBandwidth + sharedAudioBandwidth
@@ -128,10 +226,9 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 			bandwidth = defaultFallbackVideoBandwidth + sharedAudioBandwidth
 		}
 		b.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CODECS=\"%s\",AUDIO=\"main-audio\",CLOSED-CAPTIONS=NONE\n",
-			bandwidth, bandwidth, r.Width, r.Height, codecStr,
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CODECS=\"%s\",%sCLOSED-CAPTIONS=NONE,NAME=\"%sp\"\n",
+			bandwidth, bandwidth, r.Width, r.Height, codecStr, audioAttr, r.Name,
 		))
-		b.WriteString("video/")
 		b.WriteString(r.Name)
 		b.WriteString("/index.m3u8\n")
 	}

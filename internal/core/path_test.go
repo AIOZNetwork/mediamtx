@@ -41,7 +41,10 @@ func TestShouldStartHLSTranscoderSkipsNestedABROutputs(t *testing.T) {
 		}
 	}
 
-	for _, pathName := range []string{"cam_1/video/720", "cam_1/audio/main", "nested/cam_1/video/480"} {
+	for _, pathName := range []string{
+		"cam_1/original", "cam_1/1080", "cam_1/720", "cam_1/480",
+		"cam_1/video/720", "cam_1/audio/main", "nested/cam_1/video/480",
+	} {
 		if shouldStartHLSTranscoder(pathName, pathConf) {
 			t.Fatalf("expected ABR output path %q to skip transcoder", pathName)
 		}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -242,12 +241,10 @@ func (u *HLSS3Uploader) watchLoop() {
 
 			isSegment := ext == ".m4s" || ext == ".ts" || ext == ".mp4" || ext == ".mp"
 
-			// New sub-directory: add to fsnotify
+			// Skip sub-directory creation events — each subpath has its own muxer and uploader
 			if event.Op&fsnotify.Create != 0 {
 				info, err := os.Stat(event.Name)
 				if err == nil && info.IsDir() {
-					u.watcher.Add(event.Name)
-					u.scanDirectory(event.Name)
 					continue
 				}
 			}
@@ -272,21 +269,20 @@ func (u *HLSS3Uploader) watchLoop() {
 }
 
 func (u *HLSS3Uploader) scanDirectory(dir string) {
-	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
-		if d.IsDir() {
-			u.watcher.Add(path)
-		} else {
-			ext := strings.ToLower(filepath.Ext(path))
-			isSegment := ext == ".m4s" || ext == ".ts" || ext == ".mp4" || ext == ".mp"
-			if ext == ".m3u8" || isSegment {
-				u.sendToTaskChan(path)
-			}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		isSegment := ext == ".m4s" || ext == ".ts" || ext == ".mp4" || ext == ".mp"
+		if ext == ".m3u8" || isSegment {
+			u.sendToTaskChan(filepath.Join(dir, entry.Name()))
 		}
-		return nil
-	})
+	}
 }
 
 // sendToTaskChan sends filePath to the upload worker queue without blocking.
@@ -318,6 +314,10 @@ func (u *HLSS3Uploader) sendToTaskChan(filePath string) {
 
 func (u *HLSS3Uploader) handleLocalRemove(filePath string) {
 	if u.Repository == nil {
+		return
+	}
+
+	if filepath.Clean(filepath.Dir(filePath)) != filepath.Clean(u.Config.Directory) {
 		return
 	}
 
@@ -353,6 +353,10 @@ func (u *HLSS3Uploader) workerLoop() {
 }
 
 func (u *HLSS3Uploader) processFile(filePath string) {
+	if filepath.Clean(filepath.Dir(filePath)) != filepath.Clean(u.Config.Directory) {
+		return
+	}
+
 	relPath, err := filepath.Rel(u.Config.Directory, filePath)
 	if err != nil {
 		relPath = filepath.Base(filePath)
@@ -664,6 +668,15 @@ func deriveABRPathMetadata(streamID string) (string, string, string) {
 	}
 	if idx := strings.LastIndex(streamID, "/audio/"); idx >= 0 {
 		return streamID[:idx], "audio", streamID[idx+len("/audio/"):]
+	}
+	if idx := strings.LastIndex(streamID, "/"); idx >= 0 {
+		rendition := streamID[idx+1:]
+		if rendition == "original" {
+			return streamID[:idx], "video", rendition
+		}
+		if _, err := strconv.Atoi(strings.TrimSuffix(rendition, "p")); err == nil {
+			return streamID[:idx], "video", rendition
+		}
 	}
 	return streamID, "unknown", ""
 }

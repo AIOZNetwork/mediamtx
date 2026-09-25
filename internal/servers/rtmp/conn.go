@@ -35,14 +35,19 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *m
 		return pathName, ur.Query(), ur.RawQuery, "", nil
 	}
 
-	if listStreamKey != nil && (*listStreamKey)[pathName] {
+	streamKeyStr := pathName
+	if idx := strings.LastIndex(pathName, "/"); idx != -1 {
+		streamKeyStr = pathName[idx+1:]
+	}
+
+	if listStreamKey != nil && (*listStreamKey)[streamKeyStr] {
 		return "", nil, "", "", errors.New("this streamkey is streaming")
 	}
 
-	if pathName == "" {
+	if streamKeyStr == "" {
 		return "", nil, "", "", errors.New("invalid path name")
 	}
-	uuidPathName, err := uuid.Parse(pathName)
+	uuidPathName, err := uuid.Parse(streamKeyStr)
 	if err != nil {
 		return "", nil, "", "", errors.New("invalid path name")
 	}
@@ -61,14 +66,26 @@ func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *m
 
 		newStreamID := uuid.New()
 
-		return newStreamID.String(), ur.Query(), ur.RawQuery, pathName, nil
+		return newStreamID.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
 	}
 
-	if value, _ := database.RedisIdDb.Get(c.ctx, videoStreaming.Id.String()).Result(); value != "" && videoStreaming.Status == "streaming" {
-		return "", nil, "", "", errors.New("this streamkey is streaming")
+	if videoStreaming.Status == "streaming" {
+		value, _ := database.RedisIdDb.Get(c.ctx, videoStreaming.Id.String()).Result()
+		if value != "" {
+			// If Redis says this server is streaming it, but listStreamKey does not have it,
+			// then the previous session on this server crashed or was terminated without clean disconnect.
+			if value == conf.IdentityServer && (listStreamKey == nil || !(*listStreamKey)[streamKeyStr]) {
+				_ = database.RedisIdDb.Del(c.ctx, videoStreaming.Id.String()).Err()
+				_ = c.livestreamVideoRepo.UpdateStreamMediaStatus(videoStreaming.Id, "ended")
+
+				newStreamID := uuid.New()
+				return newStreamID.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
+			}
+			return "", nil, "", "", errors.New("this streamkey is streaming")
+		}
 	}
 
-	return videoStreaming.Id.String(), ur.Query(), ur.RawQuery, pathName, nil
+	return videoStreaming.Id.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
 }
 
 type connState int

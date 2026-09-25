@@ -153,6 +153,12 @@ func ExtractSourceInfo(desc *description.Session) *SourceInfo {
 				info.AudioCodec = "aac"
 			case *format.Opus:
 				info.AudioCodec = "opus"
+			case *format.AC3:
+				info.AudioCodec = "ac3"
+			case *format.G711:
+				info.AudioCodec = "g711"
+			case *format.LPCM:
+				info.AudioCodec = "pcm"
 			}
 		}
 	}
@@ -161,6 +167,11 @@ func ExtractSourceInfo(desc *description.Session) *SourceInfo {
 		return nil
 	}
 	return info
+}
+
+// HasAudio reports whether the probed source has an audio track.
+func (s *SourceInfo) HasAudio() bool {
+	return s != nil && s.AudioCodec != ""
 }
 
 func h264ProfileString(profileIdc uint8) string {

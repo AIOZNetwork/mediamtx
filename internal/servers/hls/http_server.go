@@ -28,6 +28,15 @@ var hlsIndex []byte
 //go:embed hls.min.js
 var hlsMinJS []byte
 
+var hlsPlaceholderPlaylist = []byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n")
+
+func writeHLSPlaceholderPlaylist(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+	ctx.Writer.WriteHeader(http.StatusOK)
+	ctx.Writer.Write(hlsPlaceholderPlaylist)
+}
+
 func mergePathAndQuery(path string, rawQuery string) string {
 	res := path
 	if rawQuery != "" {
@@ -140,6 +149,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 	case strings.HasSuffix(pa, ".m3u8") ||
 		strings.HasSuffix(pa, ".ts") ||
 		strings.HasSuffix(pa, ".mp4") ||
+		strings.HasSuffix(pa, ".m4s") ||
 		strings.HasSuffix(pa, ".mp"):
 		dir, fname = gopath.Dir(pa), gopath.Base(pa)
 
@@ -224,15 +234,29 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	default:
 		if fname == "index.m3u8" && shouldRenderABRMaster(dir, pathConf) {
+			mux, err := s.parent.getMuxer(serverGetMuxerReq{
+				path:           dir,
+				remoteAddr:     httpp.RemoteAddr(ctx),
+				query:          ctx.Request.URL.RawQuery,
+				sourceOnDemand: pathConf.SourceOnDemand,
+			})
+			if err != nil || mux == nil {
+				ctx.Writer.WriteHeader(http.StatusNotFound)
+				return
+			}
+			mi := mux.getInstance()
+			if mi == nil {
+				ctx.Writer.WriteHeader(http.StatusNotFound)
+				return
+			}
+
 			ctx.Header("Cache-Control", "no-cache")
 			ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
 			ctx.Writer.WriteHeader(http.StatusOK)
-			// This stateless route cannot currently access the live transcoder's
-			// probed SourceInfo, so it renders the deterministic configured output
-			// codec default unless a future state store provides per-path metadata.
 			ctx.Writer.Write(renderABRMasterPlaylist(
-				pathConf.HLSTranscodingRenditions,
-				codecStringForTranscodedOutput(pathConf, nil)))
+				masterPlaylistRenditions(pathConf, mi),
+				codecStringForTranscodedOutput(pathConf, nil),
+				mi.hasAudio()))
 			return
 		}
 
@@ -252,50 +276,57 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			}
 		}
 
+		muxPath := dir
+		if isOriginalPath(dir) {
+			muxPath = abrBasePath(dir)
+		}
+
 		var mi *muxerInstance
+		isABRChildPlaylist := isABRChildPlaylistPath(dir) && !isOriginalPath(dir) &&
+			(fname == "index.m3u8" || strings.HasSuffix(fname, ".m3u8"))
+		if isABRChildPlaylist {
+			var baseMI *muxerInstance
+			baseMux, baseErr := s.parent.getMuxer(serverGetMuxerReq{
+				path:           abrBasePath(dir),
+				remoteAddr:     httpp.RemoteAddr(ctx),
+				query:          ctx.Request.URL.RawQuery,
+				sourceOnDemand: pathConf.SourceOnDemand,
+			})
+			if baseErr == nil && baseMux != nil {
+				baseMI = baseMux.getInstance()
+			}
+			if !abrChildRenditionAdvertised(dir, masterPlaylistRenditions(pathConf, baseMI)) {
+				ctx.Writer.WriteHeader(http.StatusNotFound)
+				return
+			}
+		}
 		mux, err := s.parent.getMuxer(serverGetMuxerReq{
-			path:           dir,
+			path:           muxPath,
 			remoteAddr:     httpp.RemoteAddr(ctx),
 			query:          ctx.Request.URL.RawQuery,
 			sourceOnDemand: pathConf.SourceOnDemand,
-			abrChild:       abrChild,
+			abrChild:       isABRChildPlaylistPath(dir) && !isOriginalPath(dir),
 		})
 		if err == nil && mux != nil {
 			mi = mux.getInstance()
 		}
 
 		if mi == nil {
-			if abrChild {
-				// Rendition is transcode-bound to the media stream.
-				// If warming up, return an immediate valid live playlist (200 OK) so the player
-				// gets instant TTFB without timing out/canceling, and reloads after 1-2s per RFC 8216.
-				if fname == "index.m3u8" || strings.HasSuffix(fname, ".m3u8") {
-					ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-					ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
-					ctx.Writer.WriteHeader(http.StatusOK)
-					ctx.Writer.Write([]byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"))
-					return
-				}
-				ctx.Writer.WriteHeader(http.StatusNotFound)
+			if isABRChildPlaylist {
+				writeHLSPlaceholderPlaylist(ctx)
 				return
 			}
 			ctx.Writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 
-		if abrChild {
-			if fname == "index.m3u8" || strings.HasSuffix(fname, ".m3u8") {
-				if !mi.isMediaPlaylistReady() {
-					ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-					ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
-					ctx.Writer.WriteHeader(http.StatusOK)
-					ctx.Writer.Write([]byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"))
-					return
-				}
-				if fname == "index.m3u8" {
-					fname = mi.primaryMediaPlaylist()
-				}
-			}
+		if isABRChildPlaylist && !mi.isMediaPlaylistReady() {
+			writeHLSPlaceholderPlaylist(ctx)
+			return
+		}
+
+		if isABRChildPlaylistPath(dir) && fname == "index.m3u8" {
+			fname = mi.primaryVideoPlaylist()
 		}
 
 		ctx.Request.URL.Path = fname
