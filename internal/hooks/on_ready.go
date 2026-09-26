@@ -63,7 +63,7 @@ type OnReadyParams struct {
 	ExternalCmdPool *externalcmd.Pool
 	Conf            *conf.Path
 	ExternalCmdEnv  externalcmd.Environment
-	Desc            defs.APIPathSourceOrReader
+	Desc            *defs.APIPathSource
 	Query           string
 }
 
@@ -73,11 +73,26 @@ func OnReady(params OnReadyParams) func() {
 	var onReadyCmd *externalcmd.Cmd
 	var onMulticastCmd *externalcmd.Cmd
 
-	if params.Conf.RunOnReady != "" || params.Conf.RunOnNotReady != "" || params.Conf.IsRunMulticast {
+	runOnReady := ""
+	runOnReadyRestart := false
+	runOnNotReady := ""
+	if params.Conf.RunOnReady != nil {
+		runOnReady = *params.Conf.RunOnReady
+	}
+	if params.Conf.RunOnReadyRestart != nil {
+		runOnReadyRestart = *params.Conf.RunOnReadyRestart
+	}
+	if params.Conf.RunOnNotReady != nil {
+		runOnNotReady = *params.Conf.RunOnNotReady
+	}
+
+	if runOnReady != "" || runOnNotReady != "" || params.Conf.IsRunMulticast {
 		env = params.ExternalCmdEnv
 		env["MTX_QUERY"] = params.Query
-		env["MTX_SOURCE_TYPE"] = params.Desc.Type
-		env["MTX_SOURCE_ID"] = params.Desc.ID
+		if params.Desc != nil {
+			env["MTX_SOURCE_TYPE"] = string(params.Desc.Type)
+			env["MTX_SOURCE_ID"] = params.Desc.ID
+		}
 	}
 
 	_, err := database.RedisIdDb.Set(context.Background(), env["MTX_PATH"], conf.IdentityServer, time.Duration(conf.RedisTTLHours)*time.Hour).Result()
@@ -85,16 +100,18 @@ func OnReady(params OnReadyParams) func() {
 		params.Logger.Log(logger.Error, "Failed to set connid in redis: %v", err)
 	}
 
-	if params.Conf.RunOnReady != "" {
+	if runOnReady != "" {
 		params.Logger.Log(logger.Info, "runOnReady command started")
-		onReadyCmd = externalcmd.NewCmd(
-			params.ExternalCmdPool,
-			params.Conf.RunOnReady,
-			params.Conf.RunOnReadyRestart,
-			env,
-			func(err error) {
+		onReadyCmd = &externalcmd.Cmd{
+			Pool:    params.ExternalCmdPool,
+			Cmdstr:  runOnReady,
+			Restart: runOnReadyRestart,
+			Env:     env,
+			OnExit: func(err error) {
 				params.Logger.Log(logger.Info, "runOnReady command exited: %v", err)
-			})
+			},
+		}
+		onReadyCmd.Start()
 	}
 
 	if params.Conf.IsRunMulticast {
@@ -108,14 +125,16 @@ func OnReady(params OnReadyParams) func() {
 		}
 
 		if ffmpegQuery != "" {
-			onReadyCmd = externalcmd.NewCmd(
-				params.ExternalCmdPool,
-				ffmpegQuery,
-				params.Conf.RunOnReadyRestart,
-				env,
-				func(err error) {
+			onMulticastCmd = &externalcmd.Cmd{
+				Pool:    params.ExternalCmdPool,
+				Cmdstr:  ffmpegQuery,
+				Restart: runOnReadyRestart,
+				Env:     env,
+				OnExit: func(err error) {
 					params.Logger.Log(logger.Info, "Run multicast command exited: %v", err)
-				})
+				},
+			}
+			onMulticastCmd.Start()
 		}
 	}
 
@@ -137,14 +156,15 @@ func OnReady(params OnReadyParams) func() {
 			params.Logger.Log(logger.Info, "Run multicast command stopped")
 		}
 
-		if params.Conf.RunOnNotReady != "" {
+		if runOnNotReady != "" {
 			params.Logger.Log(logger.Info, "runOnNotReady command launched")
-			externalcmd.NewCmd(
-				params.ExternalCmdPool,
-				params.Conf.RunOnNotReady,
-				false,
-				env,
-				nil)
+			cmd := &externalcmd.Cmd{
+				Pool:    params.ExternalCmdPool,
+				Cmdstr:  runOnNotReady,
+				Restart: false,
+				Env:     env,
+			}
+			cmd.Start()
 		}
 	}
 }

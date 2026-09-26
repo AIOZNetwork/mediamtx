@@ -1,22 +1,59 @@
 package hls
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gohlslib/v2"
+	"github.com/gin-gonic/gin"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/hls"
 	"github.com/bluenviron/mediamtx/internal/stream"
-	"github.com/gin-gonic/gin"
 )
+
+const (
+	sessionCookieName     = "hlsSession"
+	sessionQueryParamName = "session"
+	sessionCloseAfter     = 30 * time.Second
+	sessionCleanupPeriod  = sessionCloseAfter / 3
+)
+
+// this prevents directory traversal.
+// functionally it's useless since there's already conf.IsValidPathName, but it's needed by CodeQL.
+func absolutePathInside(base string, candidate string) (string, error) {
+	baseAbs, err := filepath.Abs(filepath.Clean(base))
+	if err != nil {
+		return "", err
+	}
+
+	candidateAbs, err := filepath.Abs(filepath.Clean(candidate))
+	if err != nil {
+		return "", err
+	}
+
+	if !strings.HasPrefix(candidateAbs, baseAbs) {
+		return "", fmt.Errorf("path escapes base directory")
+	}
+
+	return candidateAbs, nil
+}
+
+type instanceParent interface {
+	logger.Writer
+	closeInstance(*muxerInstance, error)
+}
 
 type muxerInstance struct {
 	variant                  conf.HLSVariant
@@ -29,13 +66,18 @@ type muxerInstance struct {
 	pathConf                 *conf.Path
 	hlsTranscodingRenditions []conf.HLSTranscodingRendition
 	pathName                 string
-	stream                   *stream.Stream
-	bytesSent                *uint64
-	parent                   logger.Writer
 	streamKey                string
+	bytesSent                *atomic.Uint64
+	wg                       *sync.WaitGroup
+	stream                   *stream.Stream
+	server                   logger.Writer
+	parent                   instanceParent
 
-	hmuxer      *gohlslib.Muxer
-	hlsUploader *hlss3uploader.HLSS3Uploader
+	ctx       context.Context
+	ctxCancel func()
+	hmuxer    *gohlslib.Muxer
+	reader    *stream.Reader
+	uploader  *hlss3uploader.HLSS3Uploader
 }
 
 func isOriginalPath(pathName string) bool {
@@ -46,8 +88,6 @@ func isOriginalPath(pathName string) bool {
 
 func (mi *muxerInstance) effectiveVariant() conf.HLSVariant {
 	if mi.pathConf != nil && mi.pathConf.HLSTranscoding {
-		// Only original stream (root stream, or child original path) uses Low-Latency HLS.
-		// Transcoded renditions (1080, 720, 480) use regular segment-based HLS (fMP4).
 		if isABROutputPath(mi.pathName) && !isOriginalPath(mi.pathName) {
 			if mi.variant == conf.HLSVariant(gohlslib.MuxerVariantMPEGTS) {
 				return conf.HLSVariant(gohlslib.MuxerVariantMPEGTS)
@@ -62,40 +102,36 @@ func (mi *muxerInstance) shouldUploadToProvider() bool {
 	if mi.pathConf == nil || !mi.pathConf.HLSTranscoding {
 		return true
 	}
-
-	// When transcoding is enabled:
-	// "original dùng ll-hls và không lưu vào provider, và 3 chất lượng khác từ config sẽ được transcoding và lưu vào provider"
-	// 1. Root stream (e.g. <stream_id>) is the original incoming stream -> DO NOT upload
 	if !isABROutputPath(mi.pathName) {
 		return false
 	}
-
-	// 2. original is the original quality (LL-HLS live only) -> DO NOT upload
-	if isOriginalPath(mi.pathName) {
-		return false
-	}
-
-	// 3. Transcoded renditions (1080, 720, 480) -> DO upload
-	return true
+	return !isOriginalPath(mi.pathName)
 }
 
 func (mi *muxerInstance) initialize() error {
 	mi.variant = mi.effectiveVariant()
+	mi.Log(logger.Debug, "instance created")
 
 	var muxerDirectory string
+
 	if mi.directory != "" {
-		muxerDir := filepath.Join(mi.directory, mi.pathName)
-		if err := os.MkdirAll(muxerDir, 0o755); err != nil {
+		var err error
+		muxerDirectory, err = absolutePathInside(mi.directory, filepath.Join(mi.directory, mi.pathName))
+		if err != nil {
 			return err
 		}
-		muxerDirectory = muxerDir
+
+		err = os.MkdirAll(muxerDirectory, 0o755)
+		if err != nil {
+			return err
+		}
 	}
 
 	if muxerDirectory != "" && mi.uploadConfig != nil && mi.shouldUploadToProvider() {
-		mi.hlsUploader = mi.uploadConfig.NewUploader(muxerDirectory, mi.pathName, mi.streamKey, mi)
-		if err := mi.hlsUploader.Initialize(); err != nil {
-			mi.Log(logger.Warn, "failed to initialize muxer HLS uploader: %v", err)
-			mi.hlsUploader = nil
+		mi.uploader = mi.uploadConfig.NewUploader(muxerDirectory, mi.pathName, mi.streamKey, mi)
+		if err := mi.uploader.Initialize(); err != nil {
+			mi.Log(logger.Warn, "failed to initialize HLS uploader: %v", err)
+			mi.uploader = nil
 		}
 	}
 
@@ -111,65 +147,87 @@ func (mi *muxerInstance) initialize() error {
 		},
 	}
 
-	err := hls.FromStream(mi.stream, mi, mi.hmuxer)
+	mi.reader = &stream.Reader{
+		SkipOutboundBytes: true,
+		Parent:            mi,
+	}
+
+	err := hls.FromStream(
+		mi.stream.OrigDesc,
+		mi.stream.OutDescCopy(),
+		mi.reader,
+		mi.hmuxer)
 	if err != nil {
-		if mi.hlsUploader != nil {
-			mi.hlsUploader.Close()
-			mi.hlsUploader = nil
-		}
 		return err
 	}
 
 	err = mi.hmuxer.Start()
 	if err != nil {
-		mi.stream.RemoveReader(mi)
-		if mi.hlsUploader != nil {
-			mi.hlsUploader.Close()
-			mi.hlsUploader = nil
-		}
 		return err
 	}
 
 	mi.Log(logger.Info, "is converting into HLS, %s",
-		defs.FormatsInfo(mi.stream.ReaderFormats(mi)))
+		defs.FormatsInfo(mi.reader.Formats()))
 
-	mi.stream.StartReader(mi)
+	mi.stream.AddReader(mi.reader)
+
+	mi.ctx, mi.ctxCancel = context.WithCancel(context.Background())
+
+	mi.wg.Add(1)
+	go mi.run()
 
 	return nil
 }
 
 // Log implements logger.Writer.
-func (mi *muxerInstance) Log(level logger.Level, format string, args ...interface{}) {
+func (mi *muxerInstance) Log(level logger.Level, format string, args ...any) {
 	mi.parent.Log(level, format, args...)
 }
 
 func (mi *muxerInstance) close() {
-	mi.stream.RemoveReader(mi)
-
-	// 1. Close the HLS muxer (gohlslib) FIRST — flush last segment and #EXT-X-ENDLIST to disk
-	if mi.hmuxer != nil {
-		mi.hmuxer.Close()
-	}
-
-	// 2. Stop the uploader and flush all remaining files flushed by the muxer before cleanup
-	if mi.hlsUploader != nil {
-		mi.hlsUploader.FlushAndClose()
-		mi.hlsUploader = nil
-	}
-
-	// 3. Delete local directory last after all files are safely uploaded to storage
-	if mi.hmuxer != nil && mi.hmuxer.Directory != "" {
-		os.RemoveAll(mi.hmuxer.Directory)
-	}
+	mi.ctxCancel()
 }
 
-func (mi *muxerInstance) errorChan() chan error {
-	return mi.stream.ReaderError(mi)
+func (mi *muxerInstance) run() {
+	defer mi.wg.Done()
+
+	err := mi.runInner()
+
+	mi.ctxCancel()
+
+	mi.stream.RemoveReader(mi.reader)
+
+	mi.hmuxer.Close()
+
+	if mi.uploader != nil {
+		mi.uploader.FlushAndClose()
+		mi.uploader = nil
+	}
+
+	if mi.hmuxer.Directory != "" {
+		os.Remove(mi.hmuxer.Directory)
+	}
+
+	mi.Log(logger.Debug, "instance destroyed: %v", err)
+
+	mi.parent.closeInstance(mi, err)
+}
+
+func (mi *muxerInstance) runInner() error {
+	for {
+		select {
+		case <-mi.ctx.Done():
+			return fmt.Errorf("terminated")
+
+		case err := <-mi.reader.Error():
+			return err
+		}
+	}
 }
 
 func (mi *muxerInstance) localSegmentAvailable(fileName string) bool {
 	if mi.directory == "" || mi.variant == conf.HLSVariant(gohlslib.MuxerVariantLowLatency) {
-		return true // Fallback to hmuxer if RAM-based or LL-HLS
+		return true
 	}
 	localPath := filepath.Join(mi.directory, mi.pathName, fileName)
 	_, err := os.Stat(localPath)
@@ -184,8 +242,8 @@ func isHLSSegment(fileName string) bool {
 }
 
 func (mi *muxerInstance) hasAudio() bool {
-	if mi.stream != nil && mi.stream.Desc() != nil {
-		for _, media := range mi.stream.Desc().Medias {
+	if mi.stream != nil {
+		for _, media := range mi.stream.OutDescCopy().Medias {
 			for _, forma := range media.Formats {
 				switch forma.Codec() {
 				case "MPEG-4 Audio", "Opus", "LPCM", "Vorbis":
@@ -229,7 +287,6 @@ func (mi *muxerInstance) primaryVideoPlaylist() string {
 }
 
 func (mi *muxerInstance) isMediaPlaylistReady() bool {
-	// Low-Latency HLS operates in RAM and never writes playlist files to disk.
 	if mi.directory == "" || mi.variant == conf.HLSVariant(gohlslib.MuxerVariantLowLatency) {
 		return true
 	}
@@ -238,9 +295,7 @@ func (mi *muxerInstance) isMediaPlaylistReady() bool {
 	return len(matches) > 0
 }
 
-func (mi *muxerInstance) handleRequest(ctx *gin.Context) {
-	// For Low-Latency HLS, all playlists, init files, parts, and segments are managed
-	// entirely in RAM by gohlslib. Pass them directly to hmuxer without disk checks.
+func (mi *muxerInstance) handleRequest(ctx *gin.Context, isCDN bool) {
 	if mi.variant == conf.HLSVariant(gohlslib.MuxerVariantLowLatency) {
 		mi.hmuxer.Handle(ctx.Writer, ctx.Request)
 		return
@@ -253,39 +308,39 @@ func (mi *muxerInstance) handleRequest(ctx *gin.Context) {
 		return
 	}
 
-	w := &responseWriterWithCounter{
-		ResponseWriter: ctx.Writer,
+	w := ctx.Writer
+
+	if !isCDN {
+		w = &responseWriterNoCache{ResponseWriter: w}
+	}
+
+	w = &responseWriterCounter{
+		ResponseWriter: w,
 		bytesSent:      mi.bytesSent,
-		statusCode:     200,
 	}
 
-	if !isHLSSegment(fileName) {
+	if !isHLSSegment(fileName) || mi.localSegmentAvailable(fileName) {
 		mi.hmuxer.Handle(w, ctx.Request)
 		return
 	}
 
-	if mi.localSegmentAvailable(fileName) {
-		mi.hmuxer.Handle(w, ctx.Request)
-		return
-	}
-
-	if mi.hlsUploader == nil {
+	if mi.uploader == nil {
 		ctx.Status(http.StatusNotFound)
 		return
 	}
 
-	remoteKey := mi.hlsUploader.BuildRemoteKey(mi.pathName, fileName)
-	if !mi.hlsUploader.IsUploaded(remoteKey) {
+	remoteKey := mi.uploader.BuildRemoteKey(mi.pathName, fileName)
+	if !mi.uploader.IsUploaded(remoteKey) {
 		ctx.Status(http.StatusNotFound)
 		return
 	}
 
 	mi.Log(logger.Info, "[HLS Resolver] Local miss for %s. Proxying from remote.", fileName)
-	if mi.hlsUploader.ProxyObject(ctx.Request.Context(), ctx.Writer, remoteKey) {
+	if mi.uploader.ProxyObject(ctx.Request.Context(), ctx.Writer, remoteKey) {
 		return
 	}
 
-	url, err := mi.hlsUploader.Presign(remoteKey)
+	url, err := mi.uploader.Presign(remoteKey)
 	if err != nil {
 		ctx.Status(http.StatusBadGateway)
 		return
