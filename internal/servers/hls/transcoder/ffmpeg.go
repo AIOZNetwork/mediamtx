@@ -23,8 +23,7 @@ const (
 	defaultRTMPAddress     = ":1935"
 	defaultFPS             = "30"
 	defaultPixelFormat     = "yuv420p"
-	defaultGOPSize         = "60"
-	defaultKeyintMin       = "60"
+	defaultSegmentDuration = 2.0
 	defaultAudioBitrate    = "128k"
 	defaultAudioSampleRate = "48000"
 	defaultAudioChannels   = "2"
@@ -127,6 +126,7 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 	if t.SourceInfo != nil && t.SourceInfo.FPS > 0 {
 		fps = fmt.Sprintf("%.2f", t.SourceInfo.FPS)
 	}
+	gopSize := gopSizeForFPS(fps)
 	filterGraph := t.videoFilterGraph(renditions, fps)
 
 	args := []string{
@@ -165,9 +165,10 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 			"-b:v", r.VideoBitrate,
 			"-preset", preset,
 			"-tune", "zerolatency",
-			"-g", defaultGOPSize,
-			"-keyint_min", defaultKeyintMin,
+			"-g", gopSize,
+			"-keyint_min", gopSize,
 			"-sc_threshold", "0",
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%.0f)", defaultSegmentDuration),
 			"-x264-params", x264ClosedGOPParams,
 			"-map", audioMap,
 			"-c:a", audioCodec,
@@ -180,8 +181,15 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		)
 	}
 
-
 	return args
+}
+
+func gopSizeForFPS(fps string) string {
+	v, err := strconv.ParseFloat(strings.TrimSpace(fps), 64)
+	if err != nil || v <= 0 {
+		v, _ = strconv.ParseFloat(defaultFPS, 64)
+	}
+	return strconv.Itoa(int(v*defaultSegmentDuration + 0.5))
 }
 
 func (t *FFmpegTranscoder) rtmpURL(parts ...string) string {

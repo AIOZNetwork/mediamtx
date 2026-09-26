@@ -322,9 +322,11 @@ func TestRenderABRMasterPlaylistWithAudio(t *testing.T) {
 		{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
 	}, "", true))
 
+	t.Logf("RENDERED PLAYLIST:\n%s", playlist)
+
 	for _, expected := range []string{
 		"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n",
-		`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="audio",DEFAULT=YES,AUTOSELECT=YES,URI="1080/audio2_stream.m3u8"`,
+		`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="audio",DEFAULT=YES,AUTOSELECT=YES,URI="original/audio2_stream.m3u8"`,
 		`AUDIO="audio"`,
 		"original/index.m3u8",
 		"1080/index.m3u8",

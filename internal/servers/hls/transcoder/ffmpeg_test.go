@@ -55,7 +55,7 @@ func TestFFmpegBuildArgsSharedAudioNestedOutputs(t *testing.T) {
 		"scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[out720]",
 		"scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2[out480]",
 		"-map [out1080] -c:v libx264 -pix_fmt yuv420p -b:v 6000k -preset veryfast -tune zerolatency",
-		"-g 60 -keyint_min 60 -sc_threshold 0 -x264-params scenecut=0:open_gop=0:rc-lookahead=0",
+		"-g 60 -keyint_min 60 -sc_threshold 0 -force_key_frames expr:gte(t,n_forced*2) -x264-params scenecut=0:open_gop=0:rc-lookahead=0",
 		"rtsp://127.0.0.1:8554/cam1/1080",
 		"rtsp://127.0.0.1:8554/cam1/720",
 		"rtsp://127.0.0.1:8554/cam1/480",
@@ -66,6 +66,27 @@ func TestFFmpegBuildArgsSharedAudioNestedOutputs(t *testing.T) {
 	}
 }
 
+func TestFFmpegBuildArgsGOPMatchesSourceFPS(t *testing.T) {
+	cfg := &conf.Path{
+		HLSTranscoding: true,
+		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
+			{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+		},
+	}
+
+	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554")
+	tr.SourceInfo = &SourceInfo{FPS: 25}
+	args := strings.Join(tr.BuildArgs(), " ")
+
+	for _, expected := range []string{
+		"fps=25.00,setpts=PTS-STARTPTS",
+		"-g 50 -keyint_min 50 -sc_threshold 0 -force_key_frames expr:gte(t,n_forced*2)",
+	} {
+		if !strings.Contains(args, expected) {
+			t.Fatalf("args missing %q:\n%s", expected, args)
+		}
+	}
+}
 
 func TestFilterRenditionsBySourceHeight(t *testing.T) {
 	renditions := []conf.HLSTranscodingRendition{

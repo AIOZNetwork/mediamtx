@@ -200,14 +200,9 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 
 	audioAttr := ""
 	if hasAudio {
-		audioURI := "original/audio2_stream.m3u8"
-		if len(renditions) > 0 {
-			audioURI = fmt.Sprintf("%s/audio2_stream.m3u8", renditions[0].Name)
-		}
-		b.WriteString(fmt.Sprintf(
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"%s\"\n",
-			audioURI,
-		))
+		b.WriteString(
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"original/audio2_stream.m3u8\"\n",
+		)
 		audioAttr = "AUDIO=\"audio\","
 	}
 
