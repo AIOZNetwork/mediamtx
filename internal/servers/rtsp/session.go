@@ -129,6 +129,7 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 	}
 
 	s.path = path
+	c.maybeStartOnConnectHook(ctx.Path)
 
 	s.mutex.Lock()
 	s.state = gortsplib.ServerSessionStatePreRecord

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	gopath "path"
 	"strings"
 	"time"
@@ -26,6 +27,15 @@ var hlsIndex []byte
 
 //go:embed hls.min.js
 var hlsMinJS []byte
+
+var hlsPlaceholderPlaylist = []byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n")
+
+func writeHLSPlaceholderPlaylist(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+	ctx.Writer.WriteHeader(http.StatusOK)
+	ctx.Writer.Write(hlsPlaceholderPlaylist)
+}
 
 func mergePathAndQuery(path string, rawQuery string) string {
 	res := path
@@ -91,7 +101,13 @@ func (s *httpServer) close() {
 }
 
 func (s *httpServer) middlewareOrigin(ctx *gin.Context) {
-	ctx.Header("Access-Control-Allow-Origin", s.allowOrigin)
+	origin := ctx.Request.Header.Get("Origin")
+	if origin != "" && (s.allowOrigin == "*" || s.allowOrigin == origin) {
+		ctx.Header("Access-Control-Allow-Origin", origin)
+		ctx.Header("Vary", "Origin")
+	} else {
+		ctx.Header("Access-Control-Allow-Origin", s.allowOrigin)
+	}
 	ctx.Header("Access-Control-Allow-Credentials", "true")
 
 	// preflight requests
@@ -111,6 +127,10 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	// remove leading prefix
 	pa := ctx.Request.URL.Path[1:]
+	if strings.HasPrefix(pa, "media/") {
+		s.onMediaRequest(ctx, strings.TrimPrefix(pa, "media/"))
+		return
+	}
 
 	var dir string
 	var fname string
@@ -129,6 +149,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 	case strings.HasSuffix(pa, ".m3u8") ||
 		strings.HasSuffix(pa, ".ts") ||
 		strings.HasSuffix(pa, ".mp4") ||
+		strings.HasSuffix(pa, ".m4s") ||
 		strings.HasSuffix(pa, ".mp"):
 		dir, fname = gopath.Dir(pa), gopath.Base(pa)
 
@@ -151,8 +172,15 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		return
 	}
 
+	pathConfName := dir
+	abrChild := false
+	if isABRChildPlaylistPath(dir) {
+		pathConfName = abrBasePath(dir)
+		abrChild = true
+	}
+
 	req := defs.PathAccessRequest{
-		Name:    dir,
+		Name:    pathConfName,
 		Publish: false,
 		IP:      net.ParseIP(ctx.ClientIP()),
 		Proto:   auth.ProtocolHLS,
@@ -162,6 +190,19 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 	pathConf, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
 		AccessRequest: req,
 	})
+	if err != nil && !abrChild && strings.Contains(dir, "/") {
+		basePath := abrBasePath(dir)
+		req.Name = basePath
+		candidatePathConf, candidateErr := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+			AccessRequest: req,
+		})
+		if candidateErr == nil && isConfiguredABRChildPath(dir, candidatePathConf) {
+			pathConfName = basePath
+			pathConf = candidatePathConf
+			err = nil
+			abrChild = true
+		}
+	}
 	if err != nil {
 		var terr auth.Error
 		if errors.As(err, &terr) {
@@ -192,24 +233,154 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		ctx.Writer.Write(hlsIndex)
 
 	default:
+		if fname == "index.m3u8" && shouldRenderABRMaster(dir, pathConf) {
+			var mi *muxerInstance
+			mux, err := s.parent.getMuxer(serverGetMuxerReq{
+				path:           dir,
+				remoteAddr:     httpp.RemoteAddr(ctx),
+				query:          ctx.Request.URL.RawQuery,
+				sourceOnDemand: pathConf.SourceOnDemand,
+			})
+			if err == nil && mux != nil {
+				mi = mux.getInstance()
+			}
+
+			hasAudio := true
+			if mi != nil {
+				hasAudio = mi.hasAudio()
+			}
+
+			ctx.Header("Cache-Control", "no-cache")
+			ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+			ctx.Writer.WriteHeader(http.StatusOK)
+			ctx.Writer.Write(renderABRMasterPlaylist(
+				masterPlaylistRenditions(pathConf, mi),
+				codecStringForTranscodedOutput(pathConf, nil),
+				hasAudio))
+			return
+		}
+
+		if fname == "index.m3u8" && s.parent.DVREnabled && s.parent.DVRService != nil {
+			playlist, ok, err := s.parent.DVRService.RenderPlaylist(dir, time.Now())
+			if err != nil {
+				s.Log(logger.Warn, "DVR playlist error for %s: %v", dir, err)
+				ctx.Writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if ok {
+				ctx.Header("Cache-Control", "no-cache")
+				ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+				ctx.Writer.WriteHeader(http.StatusOK)
+				ctx.Writer.Write(playlist)
+				return
+			}
+		}
+
+		muxPath := dir
+		if isOriginalPath(dir) {
+			muxPath = abrBasePath(dir)
+		}
+
+		var mi *muxerInstance
+		isABRChildPlaylist := isABRChildPlaylistPath(dir) && !isOriginalPath(dir) &&
+			(fname == "index.m3u8" || strings.HasSuffix(fname, ".m3u8"))
+		if isABRChildPlaylist {
+			var baseMI *muxerInstance
+			baseMux, baseErr := s.parent.getMuxer(serverGetMuxerReq{
+				path:           abrBasePath(dir),
+				remoteAddr:     httpp.RemoteAddr(ctx),
+				query:          ctx.Request.URL.RawQuery,
+				sourceOnDemand: pathConf.SourceOnDemand,
+			})
+			if baseErr == nil && baseMux != nil {
+				baseMI = baseMux.getInstance()
+			}
+			if !abrChildRenditionAdvertised(dir, masterPlaylistRenditions(pathConf, baseMI)) {
+				ctx.Writer.WriteHeader(http.StatusNotFound)
+				return
+			}
+		}
 		mux, err := s.parent.getMuxer(serverGetMuxerReq{
-			path:           dir,
+			path:           muxPath,
 			remoteAddr:     httpp.RemoteAddr(ctx),
 			query:          ctx.Request.URL.RawQuery,
 			sourceOnDemand: pathConf.SourceOnDemand,
+			abrChild:       isABRChildPlaylistPath(dir) && !isOriginalPath(dir),
 		})
-		if err != nil {
+		if err == nil && mux != nil {
+			mi = mux.getInstance()
+		}
+
+		if mi == nil {
+			if isABRChildPlaylist {
+				writeHLSPlaceholderPlaylist(ctx)
+				return
+			}
 			ctx.Writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 
-		mi := mux.getInstance()
-		if mi == nil {
-			ctx.Writer.WriteHeader(http.StatusNotFound)
+		if isABRChildPlaylist && !mi.isMediaPlaylistReady() {
+			writeHLSPlaceholderPlaylist(ctx)
 			return
+		}
+
+		if isABRChildPlaylistPath(dir) && fname == "index.m3u8" {
+			fname = mi.primaryVideoPlaylist()
 		}
 
 		ctx.Request.URL.Path = fname
 		mi.handleRequest(ctx)
+	}
+}
+
+func (s *httpServer) onMediaRequest(ctx *gin.Context, mediaPath string) {
+	idx := strings.LastIndex(mediaPath, "/")
+	if idx <= 0 || idx == len(mediaPath)-1 {
+		ctx.Writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+	streamID, err := url.PathUnescape(mediaPath[:idx])
+	if err != nil {
+		ctx.Writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	segmentName, err := url.PathUnescape(mediaPath[idx+1:])
+	if err != nil {
+		ctx.Writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	pathConfName := streamID
+	abrChild := false
+	if isABRChildPlaylistPath(streamID) {
+		pathConfName = abrBasePath(streamID)
+		abrChild = true
+	}
+
+	req := defs.PathAccessRequest{
+		Name:    pathConfName,
+		Publish: false,
+		IP:      net.ParseIP(ctx.ClientIP()),
+		Proto:   auth.ProtocolHLS,
+	}
+	req.FillFromHTTPRequest(ctx.Request)
+	_, err = s.pathManager.FindPathConf(defs.PathFindPathConfReq{AccessRequest: req})
+	if err != nil && !abrChild && strings.Contains(streamID, "/") {
+		basePath := abrBasePath(streamID)
+		req.Name = basePath
+		candidatePathConf, candidateErr := s.pathManager.FindPathConf(defs.PathFindPathConfReq{AccessRequest: req})
+		if candidateErr == nil && isConfiguredABRChildPath(streamID, candidatePathConf) {
+			err = nil
+			abrChild = true
+		}
+	}
+	if err != nil {
+		ctx.Writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if !s.parent.DVREnabled || s.parent.DVRService == nil || !s.parent.DVRService.ServeMedia(ctx.Writer, ctx.Request, streamID, segmentName) {
+		ctx.Writer.WriteHeader(http.StatusNotFound)
 	}
 }

@@ -287,6 +287,27 @@ type Conf struct {
 	HLSSegmentMaxSize  StringSize `json:"hlsSegmentMaxSize"`
 	HLSDirectory       string     `json:"hlsDirectory"`
 	HLSMuxerCloseAfter Duration   `json:"hlsMuxerCloseAfter"`
+	HLSDVREnabled      bool       `json:"hlsDvrEnabled"`
+
+	// Storage Provider
+	StorageProvider   string `json:"storageProvider"`
+	S3Endpoint        string `json:"s3Endpoint"`
+	S3Bucket          string `json:"s3Bucket"`
+	S3Region          string `json:"s3Region"`
+	S3AccessKeyId     string `json:"s3AccessKeyId"`
+	S3SecretAccessKey string `json:"s3SecretAccessKey"`
+	S3Prefix          string `json:"s3Prefix"`
+
+	// DePIN go-sdk storage settings (used when storageProvider == "depin")
+	DePINIdentityDir  string `json:"depinIdentityDir"`
+	DePINCoordPeerURL string `json:"depinCoordPeerUrl"`
+	DePINPieceKeyPath string `json:"depinPieceKeyPath"`
+	DePINLinkEndpoint string `json:"depinLinkEndpoint"`
+
+	// CDN storage settings (used when storageProvider == "cdn")
+	CDNEndpoint        string `json:"cdnEndpoint"`
+	CDNHubURL          string `json:"cdnHubUrl"`
+	CDNBusinessAddress string `json:"cdnBusinessAddress"`
 
 	// WebRTC server
 	WebRTC                      bool             `json:"webrtc"`
@@ -417,6 +438,7 @@ func (conf *Conf) setDefaults() {
 	conf.HLSPartDuration = 200 * Duration(time.Millisecond)
 	conf.HLSSegmentMaxSize = 50 * 1024 * 1024
 	conf.HLSMuxerCloseAfter = 60 * Duration(time.Second)
+	conf.HLSDVREnabled = true
 
 	// WebRTC server
 	conf.WebRTC = true

@@ -185,22 +185,31 @@ type Path struct {
 	RPICameraLevel             string    `json:"rpiCameraLevel"`
 
 	// Hooks
-	RunOnInit                  string   `json:"runOnInit"`
-	RunOnInitRestart           bool     `json:"runOnInitRestart"`
-	RunOnDemand                string   `json:"runOnDemand"`
-	RunOnDemandRestart         bool     `json:"runOnDemandRestart"`
-	RunOnDemandStartTimeout    Duration `json:"runOnDemandStartTimeout"`
-	RunOnDemandCloseAfter      Duration `json:"runOnDemandCloseAfter"`
-	RunOnUnDemand              string   `json:"runOnUnDemand"`
-	RunOnReady                 string   `json:"runOnReady"`
-	IsRunMulticast             bool     `json:"isRunMulticast"`
-	RunOnReadyRestart          bool     `json:"runOnReadyRestart"`
-	RunOnNotReady              string   `json:"runOnNotReady"`
-	RunOnRead                  string   `json:"runOnRead"`
-	RunOnReadRestart           bool     `json:"runOnReadRestart"`
-	RunOnUnread                string   `json:"runOnUnread"`
-	RunOnRecordSegmentCreate   string   `json:"runOnRecordSegmentCreate"`
-	RunOnRecordSegmentComplete string   `json:"runOnRecordSegmentComplete"`
+	RunOnInit               string   `json:"runOnInit"`
+	RunOnInitRestart        bool     `json:"runOnInitRestart"`
+	RunOnDemand             string   `json:"runOnDemand"`
+	RunOnDemandRestart      bool     `json:"runOnDemandRestart"`
+	RunOnDemandStartTimeout Duration `json:"runOnDemandStartTimeout"`
+	RunOnDemandCloseAfter   Duration `json:"runOnDemandCloseAfter"`
+	RunOnUnDemand           string   `json:"runOnUnDemand"`
+	RunOnReady              string   `json:"runOnReady"`
+	IsRunMulticast          bool     `json:"isRunMulticast"`
+	RunOnReadyRestart       bool     `json:"runOnReadyRestart"`
+	RunOnNotReady           string   `json:"runOnNotReady"`
+
+	// HLS Transcoding
+	HLSTranscoding           bool                      `json:"hlsTranscoding"`
+	HLSTranscodingInputProto string                    `json:"hlsTranscodingInputProtocol"`
+	HLSTranscodingRenditions []HLSTranscodingRendition `json:"hlsTranscodingRenditions"`
+	HLSTranscodingVideoCodec string                    `json:"hlsTranscodingVideoCodec"`
+	HLSTranscodingAudioCodec string                    `json:"hlsTranscodingAudioCodec"`
+	HLSTranscodingPreset     string                    `json:"hlsTranscodingPreset"`
+
+	RunOnRead                  string `json:"runOnRead"`
+	RunOnReadRestart           bool   `json:"runOnReadRestart"`
+	RunOnUnread                string `json:"runOnUnread"`
+	RunOnRecordSegmentCreate   string `json:"runOnRecordSegmentCreate"`
+	RunOnRecordSegmentComplete string `json:"runOnRecordSegmentComplete"`
 }
 
 func (pconf *Path) setDefaults() {

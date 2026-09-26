@@ -1,0 +1,873 @@
+package hlss3uploader
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/fsnotify/fsnotify"
+
+	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/models"
+)
+
+// StorageProvider is the interface for pluggable storage backends (S3, Local, CDN, MinIO, GCS, etc.).
+type StorageProvider interface {
+	Name() string
+	UploadFile(ctx context.Context, localPath, remoteKey, contentType string) (string, error)
+	DeleteFolder(ctx context.Context, prefix string) error
+	Close() error
+}
+
+type ReadableStorageProvider interface {
+	GetObject(ctx context.Context, key string) (io.ReadCloser, string, int64, error)
+}
+
+// LinkStorageProvider is the interface for storage backends that can generate direct download/presigned links.
+type LinkStorageProvider interface {
+	GetLink(ctx context.Context, key string) (string, error)
+}
+
+// HLSS3Uploader watches local HLS directory (e.g. ./input-live),
+// uploads generated segment and playlist files to configured StorageProvider,
+// and deletes local segment files after successful upload.
+type HLSS3Uploader struct {
+	Config     StorageConfig
+	Parent     logger.Writer
+	Repository models.LiveHLSSegmentRepository
+
+	provider StorageProvider
+
+	ctx       context.Context
+	ctxCancel func()
+	watcher   *fsnotify.Watcher
+
+	taskChan chan string
+	done     chan struct{}
+	wg       sync.WaitGroup
+
+	muClose  sync.RWMutex
+	isClosed bool
+
+	processingFiles sync.Map
+	uploadedFiles   sync.Map
+}
+
+const (
+	defaultStoragePrefix         = "live-hls"
+	defaultStorageDirectory      = "./input-live"
+	defaultWorkerCount           = 4
+	defaultTaskQueueSize         = 1000
+	defaultSegmentDurationMS     = 2000
+	defaultUploadTimeout         = 2 * time.Minute
+	defaultPresignExpires        = 15 * time.Minute
+	cacheControlNoCache          = "no-cache"
+	cacheControlImmutableSegment = "public, max-age=31536000, immutable"
+
+	contentTypeMP4     = "video/mp4"
+	contentTypeM4S     = "video/iso.segment"
+	contentTypeTS      = "video/mp2t"
+	contentTypeM3U8    = "application/x-mpegURL"
+	contentTypeDefault = "application/octet-stream"
+
+	extM3U8 = ".m3u8"
+	extMP4  = ".mp4"
+	extMP   = ".mp"
+	extM4S  = ".m4s"
+	extTS   = ".ts"
+)
+
+// Initialize initializes and starts the HLSS3Uploader background service using supplied Config.
+func (u *HLSS3Uploader) Initialize() error {
+	u.ctx, u.ctxCancel = context.WithCancel(context.Background())
+	u.done = make(chan struct{})
+	u.taskChan = make(chan string, defaultTaskQueueSize)
+	if u.Config.Workers <= 0 {
+		u.Config.Workers = defaultWorkerCount
+	}
+
+	selector := NewProviderSelector()
+	provider, err := selector.Select(u.ctx, u.Config)
+	if err != nil {
+		u.Log(logger.Info, "HLS Storage Uploader disabled: %v", err)
+		close(u.done)
+		return nil
+	}
+	u.provider = provider
+
+	if u.Config.Directory == "" {
+		u.Config.Directory = defaultStorageDirectory
+	}
+	if u.Config.Prefix == "" {
+		u.Config.Prefix = defaultStoragePrefix
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		u.Log(logger.Error, "failed to create fsnotify watcher: %v", err)
+		close(u.done)
+		return err
+	}
+	u.watcher = watcher
+
+	u.Log(logger.Info, "HLS Storage Uploader initialized (provider: %s, bucket: %s, endpoint: %s, dir: %s)", u.provider.Name(), u.Config.Bucket, u.Config.Endpoint, u.Config.Directory)
+
+	for i := 0; i < u.Config.Workers; i++ {
+		u.wg.Add(1)
+		go u.workerLoop()
+	}
+
+	// Start directory watcher loop
+	go u.watchLoop()
+
+	return nil
+}
+
+// Close stops the HLSS3Uploader and waits for goroutines to exit.
+func (u *HLSS3Uploader) Close() {
+	u.FlushAndClose()
+}
+
+// FlushAndClose flushes all remaining segment/playlist files from the local directory,
+// finishes any pending uploads, and then cleanly closes all workers and providers.
+func (u *HLSS3Uploader) FlushAndClose() {
+	u.muClose.Lock()
+	if u.isClosed {
+		u.muClose.Unlock()
+		return
+	}
+	u.isClosed = true
+	u.muClose.Unlock()
+
+	// 1. Stop watching for new filesystem events
+	if u.watcher != nil {
+		u.watcher.Close()
+	}
+
+	// 2. Wait for watchLoop to exit
+	if u.done != nil {
+		select {
+		case <-u.done:
+		case <-time.After(3 * time.Second):
+			if u.Parent != nil {
+				u.Parent.Log(logger.Warn, "[HLS Uploader Close] watchLoop did not exit in time")
+			}
+		}
+	}
+
+	// 3. Scan directory one last time to capture the final segment and updated playlist (with #EXT-X-ENDLIST)
+	u.scanDirectory(u.Config.Directory)
+
+	// 4. Safely close task channel so workers know when all work is drained
+	u.muClose.Lock()
+	close(u.taskChan)
+	u.muClose.Unlock()
+
+	// 5. Wait for upload workers to finish all remaining queued uploads
+	waitDone := make(chan struct{})
+	go func() {
+		u.wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(15 * time.Second):
+		if u.Parent != nil {
+			u.Parent.Log(logger.Warn, "[HLS Uploader Close] workers did not exit in time")
+		}
+		if u.ctxCancel != nil {
+			u.ctxCancel()
+		}
+	}
+
+	// 6. Cancel context to release any lingering resources
+	if u.ctxCancel != nil {
+		u.ctxCancel()
+	}
+
+	// 7. Close storage provider
+	if u.provider != nil {
+		u.provider.Close()
+	}
+}
+
+// Log implements logger.Writer.
+func (u *HLSS3Uploader) Log(level logger.Level, format string, args ...interface{}) {
+	if u.Parent != nil {
+		u.Parent.Log(level, "[HLS Storage Uploader] "+format, args...)
+	}
+}
+
+// EnqueueSegment is called by the Muxer callback when a segment file is finalized.
+// It queues the file for immediate upload to S3 without polling.
+func (u *HLSS3Uploader) EnqueueSegment(filePath string, duration time.Duration) {
+	u.sendToTaskChan(filePath)
+}
+
+func (u *HLSS3Uploader) watchLoop() {
+	defer close(u.done)
+
+	// Ensure directory exists
+	os.MkdirAll(u.Config.Directory, 0755)
+
+	// Add root directory to fsnotify for directory-create and playlist-write events.
+	if err := u.watcher.Add(u.Config.Directory); err != nil {
+		u.Log(logger.Warn, "failed to watch directory %s: %v", u.Config.Directory, err)
+	}
+
+	// Add existing subdirectories and queue existing files
+	u.scanDirectory(u.Config.Directory)
+
+	for {
+		select {
+		case <-u.ctx.Done():
+			return
+
+		case event, ok := <-u.watcher.Events:
+			if !ok {
+				return
+			}
+
+			ext := strings.ToLower(filepath.Ext(event.Name))
+
+			isSegment := ext == ".m4s" || ext == ".ts" || ext == ".mp4" || ext == ".mp"
+
+			// Skip sub-directory creation events — each subpath has its own muxer and uploader
+			if event.Op&fsnotify.Create != 0 {
+				info, err := os.Stat(event.Name)
+				if err == nil && info.IsDir() {
+					continue
+				}
+			}
+
+			// Playlist file: upload to S3 on every Write/Create
+			// Segment file: enqueue for waitStable + upload
+			if (ext == ".m3u8" || isSegment) && event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+				u.sendToTaskChan(event.Name)
+			}
+
+			if isSegment && event.Op&fsnotify.Remove != 0 {
+				go u.handleLocalRemove(event.Name)
+			}
+
+		case err, ok := <-u.watcher.Errors:
+			if !ok {
+				return
+			}
+			u.Log(logger.Warn, "watcher error: %v", err)
+		}
+	}
+}
+
+func (u *HLSS3Uploader) scanDirectory(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		isSegment := ext == ".m4s" || ext == ".ts" || ext == ".mp4" || ext == ".mp"
+		if ext == ".m3u8" || isSegment {
+			u.sendToTaskChan(filepath.Join(dir, entry.Name()))
+		}
+	}
+}
+
+// sendToTaskChan sends filePath to the upload worker queue without blocking.
+func (u *HLSS3Uploader) sendToTaskChan(filePath string) {
+	u.muClose.RLock()
+	if u.isClosed {
+		u.muClose.RUnlock()
+		return
+	}
+	select {
+	case u.taskChan <- filePath:
+		u.muClose.RUnlock()
+	default:
+		u.muClose.RUnlock()
+		// Queue full — retry in a background goroutine.
+		go func(p string) {
+			u.muClose.RLock()
+			defer u.muClose.RUnlock()
+			if u.isClosed {
+				return
+			}
+			select {
+			case u.taskChan <- p:
+			case <-u.ctx.Done():
+			}
+		}(filePath)
+	}
+}
+
+func (u *HLSS3Uploader) handleLocalRemove(filePath string) {
+	if u.Repository == nil {
+		return
+	}
+
+	if filepath.Clean(filepath.Dir(filePath)) != filepath.Clean(u.Config.Directory) {
+		return
+	}
+
+	relPath, err := filepath.Rel(u.Config.Directory, filePath)
+	if err != nil {
+		relPath = filepath.Base(filePath)
+	}
+	relPath = filepath.ToSlash(relPath)
+
+	streamName := strings.Trim(strings.TrimSpace(u.Config.StreamName), "/")
+	if streamName == "" {
+		streamName = filepath.Base(u.Config.Directory)
+	}
+
+	segmentName := filepath.Base(filePath)
+	_ = u.Repository.MarkLocalDeleted(streamName, segmentName, time.Now())
+}
+
+func (u *HLSS3Uploader) workerLoop() {
+	defer u.wg.Done()
+
+	for {
+		select {
+		case <-u.ctx.Done():
+			return
+		case filePath, ok := <-u.taskChan:
+			if !ok {
+				return
+			}
+			u.processFile(filePath)
+		}
+	}
+}
+
+func (u *HLSS3Uploader) processFile(filePath string) {
+	if filepath.Clean(filepath.Dir(filePath)) != filepath.Clean(u.Config.Directory) {
+		return
+	}
+
+	relPath, err := filepath.Rel(u.Config.Directory, filePath)
+	if err != nil {
+		relPath = filepath.Base(filePath)
+	}
+	relPath = filepath.ToSlash(relPath)
+
+	ext := strings.ToLower(filepath.Ext(filePath))
+	isSegment := ext == ".m4s" || ext == ".ts" || ext == ".mp4" || ext == ".mp"
+
+	streamName := strings.Trim(strings.TrimSpace(u.Config.StreamName), "/")
+	keyRelPath := relPath
+	if streamName != "" && !strings.HasPrefix(keyRelPath, streamName+"/") {
+		keyRelPath = streamName + "/" + keyRelPath
+	}
+	remoteKey := fmt.Sprintf("%s/%s", strings.TrimSuffix(u.Config.Prefix, "/"), keyRelPath)
+
+	// Segments: deduplicate — never re-upload a successfully completed segment.
+	if isSegment {
+		if strings.Contains(filepath.Base(filePath), "_part") {
+			// Skip uploading LL-HLS parts. The full segment will be uploaded instead.
+			return
+		}
+		if _, exists := u.uploadedFiles.Load(remoteKey); exists {
+			return
+		}
+	}
+
+	// Prevent concurrent in-flight uploads for the same remote key.
+	if _, loaded := u.processingFiles.LoadOrStore(remoteKey, true); loaded {
+		return
+	}
+	defer u.processingFiles.Delete(remoteKey)
+
+	if !u.waitStable(filePath) {
+		return
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil || info.Size() == 0 {
+		return
+	}
+
+	durationMS := u.inferDurationMS(filePath)
+	if isInitSegmentFile(filepath.Base(filePath)) {
+		durationMS = 0
+	} else if durationMS <= 0 {
+		durationMS = 2000 // default 2s segment duration per spec
+	}
+	duration := time.Duration(durationMS) * time.Millisecond
+	startedAt := info.ModTime().Add(-duration)
+	if duration <= 0 {
+		startedAt = info.ModTime()
+	}
+
+	contentType := getContentType(ext)
+	segmentRecord := models.LiveHLSSegment{
+		StreamID:       streamName,
+		SegmentName:    filepath.Base(filePath),
+		LocalPath:      filePath,
+		StorageBackend: u.provider.Name(),
+		StorageKey:     remoteKey,
+		StartedAt:      startedAt,
+		DurationMS:     durationMS,
+		SizeBytes:      info.Size(),
+		ContentType:    contentType,
+	}
+	if segmentRecord.StreamID == "" {
+		segmentRecord.StreamID = filepath.Base(u.Config.Directory)
+	}
+	populateABRMetadata(&segmentRecord, filepath.Base(filePath))
+	if isSegment && u.Repository != nil {
+		mergeExistingDVRMetadata(u.Repository, &segmentRecord)
+	}
+	if isSegment && u.Repository != nil {
+		_ = u.Repository.UpsertLocal(segmentRecord)
+		_ = u.Repository.UpsertUploading(segmentRecord)
+	}
+
+	uploadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	etag, err := u.provider.UploadFile(uploadCtx, filePath, remoteKey, contentType)
+	cancel()
+
+	if err != nil {
+		if isSegment && u.Repository != nil {
+			_ = u.Repository.UpsertUploadFailed(segmentRecord)
+		}
+		u.Log(logger.Warn, "failed to upload %s via provider %s (key: %s, streamKey: %s): %v", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey, err)
+		return
+	}
+
+	if isSegment {
+		now := time.Now()
+		segmentRecord.StorageETag = etag
+		segmentRecord.UploadedAt = &now
+		if u.Repository != nil {
+			_ = u.Repository.UpsertUploaded(segmentRecord)
+		}
+		u.uploadedFiles.Store(remoteKey, true)
+	} else {
+		if strings.HasSuffix(filepath.Base(filePath), "_stream.m3u8") && u.Repository != nil {
+			u.ingestFMP4Playlist(filePath, streamName)
+		}
+		// u.Log(logger.Info, "uploaded playlist %s via %s (key: %s, streamKey: %s)", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey)
+	}
+}
+
+func getContentType(ext string) string {
+	switch ext {
+	case extM4S:
+		return contentTypeM4S
+	case extMP4, extMP:
+		return contentTypeMP4
+	case extTS:
+		return contentTypeTS
+	case extM3U8:
+		return contentTypeM3U8
+	default:
+		return contentTypeDefault
+	}
+}
+
+var (
+	extinfRe        = regexp.MustCompile(`^#EXTINF:([0-9.]+)`)                               // #EXTINF:1.000,
+	partRe          = regexp.MustCompile(`^#EXT-X-PART:.*DURATION=([0-9.]+).*URI="([^"]+)"`) // LL-HLS parts
+	mapURIRe        = regexp.MustCompile(`^#EXT-X-MAP:.*URI="?([^",]+)"?`)                   // init segment
+	mediaSequenceRe = regexp.MustCompile(`^#EXT-X-MEDIA-SEQUENCE:([0-9]+)`)                  // media sequence
+	pdtRe           = regexp.MustCompile(`^#EXT-X-PROGRAM-DATE-TIME:(.+)$`)
+	fmp4SegmentRe   = regexp.MustCompile(`_seg[0-9]+\.mp4$`)
+)
+
+func isInitSegmentFile(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), "_init.mp4")
+}
+
+func (u *HLSS3Uploader) ingestFMP4Playlist(playlistPath string, streamName string) {
+	entries, initName := parseFMP4Playlist(playlistPath)
+	if len(entries) == 0 {
+		return
+	}
+	playlistName := filepath.Base(playlistPath)
+	childToken := strings.TrimSuffix(playlistName, "_stream.m3u8")
+	if streamName == "" {
+		streamName = filepath.Base(u.Config.Directory)
+	}
+	initStorageKey := ""
+	if initName != "" {
+		initStorageKey = u.remoteKeyForName(streamName, initName)
+	}
+	storageBackend := "local"
+	if u.provider != nil {
+		storageBackend = u.provider.Name()
+	}
+	for _, entry := range entries {
+		segName := filepath.Base(entry.URI)
+		localPath := filepath.Join(filepath.Dir(playlistPath), segName)
+		size := int64(0)
+		startedAt := entry.ProgramDateTime
+		if startedAt.IsZero() {
+			if existing, err := u.Repository.GetByStreamAndSegment(streamName, segName); err == nil && existing != nil {
+				startedAt = existing.StartedAt
+			}
+		}
+		if info, err := os.Stat(localPath); err == nil {
+			size = info.Size()
+			if startedAt.IsZero() && entry.DurationMS > 0 {
+				startedAt = info.ModTime().Add(-time.Duration(entry.DurationMS) * time.Millisecond)
+			}
+		}
+		sequence := entry.MediaSequence
+		segment := models.LiveHLSSegment{
+			StreamID:        streamName,
+			SegmentName:     segName,
+			LocalPath:       localPath,
+			StorageBackend:  storageBackend,
+			StorageKey:      u.remoteKeyForName(streamName, segName),
+			StartedAt:       startedAt,
+			DurationMS:      entry.DurationMS,
+			SizeBytes:       size,
+			ContentType:     getContentType(strings.ToLower(filepath.Ext(segName))),
+			MediaSequence:   &sequence,
+			InitSegmentName: initName,
+			InitStorageKey:  initStorageKey,
+			PlaylistName:    playlistName,
+			MuxSessionID:    deriveMuxSessionID(segName, childToken),
+		}
+		populateABRMetadata(&segment, segName)
+		if existing, err := u.Repository.GetByStreamAndSegment(streamName, segName); err == nil && existing != nil && existing.Status == models.LiveHLSSegmentStatusUploadedS3 {
+			segment.StorageETag = existing.StorageETag
+			segment.UploadedAt = existing.UploadedAt
+			_ = u.Repository.UpsertUploaded(segment)
+		} else {
+			_ = u.Repository.UpsertLocal(segment)
+		}
+	}
+}
+
+type fmp4PlaylistEntry struct {
+	URI             string
+	DurationMS      int64
+	MediaSequence   int64
+	ProgramDateTime time.Time
+}
+
+func parseFMP4Playlist(playlistPath string) ([]fmp4PlaylistEntry, string) {
+	byts, err := os.ReadFile(playlistPath)
+	if err != nil {
+		return nil, ""
+	}
+	var entries []fmp4PlaylistEntry
+	var initName string
+	mediaSequence := int64(0)
+	pendingDuration := int64(0)
+	var pendingPDT time.Time
+	for _, line := range strings.Split(string(byts), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if matches := mediaSequenceRe.FindStringSubmatch(line); matches != nil {
+			mediaSequence, _ = strconv.ParseInt(matches[1], 10, 64)
+			continue
+		}
+		if matches := mapURIRe.FindStringSubmatch(line); matches != nil {
+			initName = filepath.Base(matches[1])
+			continue
+		}
+		if matches := pdtRe.FindStringSubmatch(line); matches != nil {
+			pendingPDT, _ = time.Parse(time.RFC3339Nano, strings.TrimSpace(matches[1]))
+			continue
+		}
+		if matches := extinfRe.FindStringSubmatch(line); matches != nil {
+			pendingDuration = secondsToMS(matches[1])
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		entries = append(entries, fmp4PlaylistEntry{
+			URI:             line,
+			DurationMS:      pendingDuration,
+			MediaSequence:   mediaSequence + int64(len(entries)),
+			ProgramDateTime: pendingPDT,
+		})
+		pendingDuration = 0
+		pendingPDT = time.Time{}
+	}
+	return entries, initName
+}
+
+func (u *HLSS3Uploader) remoteKeyForName(streamName, name string) string {
+	keyRelPath := path.Join(strings.Trim(streamName, "/"), name)
+	return path.Join(strings.TrimSuffix(u.Config.Prefix, "/"), keyRelPath)
+}
+
+func populateABRMetadata(segment *models.LiveHLSSegment, fileName string) {
+	base, track, rendition := deriveABRPathMetadata(segment.StreamID)
+	segment.BaseStreamID = base
+	segment.TrackType = track
+	segment.Rendition = rendition
+	if segment.MuxSessionID == "" {
+		childToken := strings.TrimSuffix(segment.PlaylistName, "_stream.m3u8")
+		segment.MuxSessionID = deriveMuxSessionID(fileName, childToken)
+	}
+}
+
+func mergeExistingDVRMetadata(repo models.LiveHLSSegmentRepository, segment *models.LiveHLSSegment) {
+	if repo == nil || segment == nil {
+		return
+	}
+	existing, err := repo.GetByStreamAndSegment(segment.StreamID, segment.SegmentName)
+	if err != nil || existing == nil {
+		return
+	}
+	if segment.BaseStreamID == "" {
+		segment.BaseStreamID = existing.BaseStreamID
+	}
+	if segment.TrackType == "" || segment.TrackType == "unknown" {
+		segment.TrackType = existing.TrackType
+	}
+	if segment.Rendition == "" {
+		segment.Rendition = existing.Rendition
+	}
+	if segment.MuxSessionID == "" || strings.Contains(segment.MuxSessionID, "_seg") {
+		segment.MuxSessionID = existing.MuxSessionID
+	}
+	if segment.InitSegmentName == "" {
+		segment.InitSegmentName = existing.InitSegmentName
+	}
+	if segment.InitStorageKey == "" {
+		segment.InitStorageKey = existing.InitStorageKey
+	}
+	if segment.PlaylistName == "" {
+		segment.PlaylistName = existing.PlaylistName
+	}
+	if segment.MediaSequence == nil {
+		segment.MediaSequence = existing.MediaSequence
+	}
+	if segment.StartedAt.IsZero() {
+		segment.StartedAt = existing.StartedAt
+	}
+	if segment.DurationMS <= 0 {
+		segment.DurationMS = existing.DurationMS
+	}
+}
+
+func deriveABRPathMetadata(streamID string) (string, string, string) {
+	if idx := strings.LastIndex(streamID, "/video/"); idx >= 0 {
+		return streamID[:idx], "video", streamID[idx+len("/video/"):]
+	}
+	if idx := strings.LastIndex(streamID, "/audio/"); idx >= 0 {
+		return streamID[:idx], "audio", streamID[idx+len("/audio/"):]
+	}
+	if idx := strings.LastIndex(streamID, "/"); idx >= 0 {
+		rendition := streamID[idx+1:]
+		if rendition == "original" {
+			return streamID[:idx], "video", rendition
+		}
+		if _, err := strconv.Atoi(strings.TrimSuffix(rendition, "p")); err == nil {
+			return streamID[:idx], "video", rendition
+		}
+	}
+	return streamID, "unknown", ""
+}
+
+func deriveMuxSessionID(fileName, childToken string) string {
+	base := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+	if childToken != "" {
+		for _, suffix := range []string{"_" + childToken + "_init", "_" + childToken} {
+			if strings.HasSuffix(base, suffix) {
+				return strings.TrimSuffix(base, suffix)
+			}
+		}
+		segSuffix := regexp.MustCompile(`_` + regexp.QuoteMeta(childToken) + `_seg[0-9]+$`)
+		if loc := segSuffix.FindStringIndex(base); loc != nil && loc[1] == len(base) {
+			return base[:loc[0]]
+		}
+	}
+	if loc := fmp4SegmentRe.FindStringIndex(fileName); loc != nil && loc[1] == len(fileName) {
+		return fileName[:loc[0]]
+	}
+	return base
+}
+
+func (u *HLSS3Uploader) inferDurationMS(filePath string) int64 {
+	playlistPath := filepath.Join(filepath.Dir(filePath), "index.m3u8")
+	if strings.HasSuffix(filepath.Base(filePath), ".mp4") {
+		matches, _ := filepath.Glob(filepath.Join(filepath.Dir(filePath), "*_stream.m3u8"))
+		for _, candidate := range matches {
+			if duration := inferDurationFromPlaylist(candidate, filepath.Base(filePath)); duration > 0 {
+				return duration
+			}
+		}
+	}
+	return inferDurationFromPlaylist(playlistPath, filepath.Base(filePath))
+}
+
+func inferDurationFromPlaylist(playlistPath string, name string) int64 {
+	byts, err := os.ReadFile(playlistPath)
+	if err != nil {
+		return 0
+	}
+
+	lines := strings.Split(string(byts), "\n")
+	var pendingDuration int64
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		if matches := partRe.FindStringSubmatch(line); matches != nil {
+			if matches[2] == name {
+				return secondsToMS(matches[1])
+			}
+			continue
+		}
+
+		if matches := extinfRe.FindStringSubmatch(line); matches != nil {
+			pendingDuration = secondsToMS(matches[1])
+			continue
+		}
+
+		if line == name || filepath.Base(line) == name {
+			return pendingDuration
+		}
+	}
+
+	return 0
+}
+
+func secondsToMS(raw string) int64 {
+	seconds, err := strconv.ParseFloat(strings.TrimRight(raw, ","), 64)
+	if err != nil {
+		return 0
+	}
+	return int64(seconds * 1000)
+}
+
+// waitStable polls the file until its size stops changing, ensuring it is fully written.
+// A bounded timeout of 5s guarantees workers will not deadlock on stalled or empty files.
+func (u *HLSS3Uploader) waitStable(filePath string) bool {
+	var lastSize int64 = -1
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(5 * time.Second)
+
+	for {
+		select {
+		case <-u.ctx.Done():
+			return false
+		case <-timeout:
+			// Ensure worker never deadlocks on 0-byte or stalled files
+			info, err := os.Stat(filePath)
+			if err == nil && info.Size() > 0 {
+				return true
+			}
+			return false
+		case <-ticker.C:
+			info, err := os.Stat(filePath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return false
+				}
+				continue
+			}
+
+			if info.Size() == lastSize && lastSize > 0 {
+				return true
+			}
+			lastSize = info.Size()
+		}
+	}
+}
+
+// BuildRemoteKey constructs the S3 storage key for a given stream path and file name
+// using the configured prefix, ensuring consistency between upload and lookup.
+func (u *HLSS3Uploader) BuildRemoteKey(streamPath, fileName string) string {
+	prefix := strings.TrimSuffix(u.Config.Prefix, "/")
+	if prefix == "" {
+		prefix = "live-hls"
+	}
+	return path.Join(prefix, streamPath, fileName)
+}
+
+func (u *HLSS3Uploader) IsUploaded(remoteKey string) bool {
+	if _, ok := u.uploadedFiles.Load(remoteKey); ok {
+		return true
+	}
+	if u.Repository == nil {
+		return false
+	}
+	segment, err := u.Repository.GetByStorageKey(remoteKey)
+	if err != nil {
+		return false
+	}
+	return segment.Status == models.LiveHLSSegmentStatusUploadedS3
+}
+
+func (u *HLSS3Uploader) Presign(remoteKey string) (string, error) {
+	if linkProv, ok := u.provider.(LinkStorageProvider); ok {
+		return linkProv.GetLink(context.Background(), remoteKey)
+	}
+	return "", fmt.Errorf("provider does not support presign or link generation")
+}
+
+func contentTypeForRemoteKey(remoteKey string) string {
+	switch strings.ToLower(path.Ext(remoteKey)) {
+	case extM3U8:
+		return contentTypeM3U8
+	case extMP4, extMP:
+		return contentTypeMP4
+	case extM4S:
+		return contentTypeM4S
+	case extTS:
+		return contentTypeTS
+	default:
+		return contentTypeDefault
+	}
+}
+
+func (u *HLSS3Uploader) ProxyObject(ctx context.Context, w http.ResponseWriter, remoteKey string) bool {
+	readable, ok := u.provider.(ReadableStorageProvider)
+	if !ok {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	body, contentType, contentLength, err := readable.GetObject(ctx, remoteKey)
+	if err != nil {
+		return false
+	}
+	defer body.Close()
+
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	} else {
+		w.Header().Set("Content-Type", contentTypeForRemoteKey(remoteKey))
+	}
+	if contentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	}
+
+	if strings.HasSuffix(remoteKey, extM3U8) {
+		w.Header().Set("Cache-Control", cacheControlNoCache)
+	} else {
+		w.Header().Set("Cache-Control", cacheControlImmutableSegment)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, body)
+	return true
+}

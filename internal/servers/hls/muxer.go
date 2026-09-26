@@ -32,7 +32,13 @@ func emptyTimer() *time.Timer {
 
 type responseWriterWithCounter struct {
 	http.ResponseWriter
-	bytesSent *uint64
+	bytesSent  *uint64
+	statusCode int
+}
+
+func (w *responseWriterWithCounter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (w *responseWriterWithCounter) Write(p []byte) (int, error) {
@@ -45,6 +51,10 @@ type muxerGetInstanceReq struct {
 	res chan *muxerInstance
 }
 
+type pathWithSafeHLSTranscodingRenditions interface {
+	SafeHLSTranscodingRenditions() []conf.HLSTranscodingRendition
+}
+
 type muxer struct {
 	parentCtx       context.Context
 	remoteAddr      string
@@ -54,6 +64,7 @@ type muxer struct {
 	partDuration    conf.Duration
 	segmentMaxSize  conf.StringSize
 	directory       string
+	uploadConfig    *MuxerUploadConfig
 	closeAfter      conf.Duration
 	wg              *sync.WaitGroup
 	pathName        string
@@ -140,17 +151,20 @@ func (m *muxer) runInner() error {
 	var recreateTimer *time.Timer
 
 	mi := &muxerInstance{
-		variant:         m.variant,
-		segmentCount:    m.segmentCount,
-		segmentDuration: m.segmentDuration,
-		partDuration:    m.partDuration,
-		segmentMaxSize:  m.segmentMaxSize,
-		directory:       m.directory,
-		pathName:        m.pathName,
-		stream:          stream,
-		bytesSent:       m.bytesSent,
-		parent:          m,
-		streamKey: 		   m.path.GetStreamKey(),
+		variant:                  m.variant,
+		segmentCount:             m.segmentCount,
+		segmentDuration:          m.segmentDuration,
+		partDuration:             m.partDuration,
+		segmentMaxSize:           m.segmentMaxSize,
+		directory:                m.directory,
+		uploadConfig:             m.uploadConfig,
+		pathConf:                 m.path.SafeConf(),
+		hlsTranscodingRenditions: m.safeHLSTranscodingRenditions(),
+		pathName:                 m.pathName,
+		stream:                   stream,
+		bytesSent:                m.bytesSent,
+		parent:                   m,
+		streamKey:                m.path.GetStreamKey(),
 	}
 	err = mi.initialize()
 	if err != nil {
@@ -198,17 +212,20 @@ func (m *muxer) runInner() error {
 
 		case <-recreateTimer.C:
 			mi = &muxerInstance{
-				variant:         m.variant,
-				segmentCount:    m.segmentCount,
-				segmentDuration: m.segmentDuration,
-				partDuration:    m.partDuration,
-				segmentMaxSize:  m.segmentMaxSize,
-				directory:       m.directory,
-				pathName:        m.pathName,
-				stream:          stream,
-				bytesSent:       m.bytesSent,
-				parent:          m,
-				streamKey: 		   m.path.GetStreamKey(),
+				variant:                  m.variant,
+				segmentCount:             m.segmentCount,
+				segmentDuration:          m.segmentDuration,
+				partDuration:             m.partDuration,
+				segmentMaxSize:           m.segmentMaxSize,
+				directory:                m.directory,
+				uploadConfig:             m.uploadConfig,
+				pathConf:                 m.path.SafeConf(),
+				hlsTranscodingRenditions: m.safeHLSTranscodingRenditions(),
+				pathName:                 m.pathName,
+				stream:                   stream,
+				bytesSent:                m.bytesSent,
+				parent:                   m,
+				streamKey:                m.path.GetStreamKey(),
 			}
 			err := mi.initialize()
 			if err != nil {
@@ -230,6 +247,13 @@ func (m *muxer) runInner() error {
 			return errors.New("terminated")
 		}
 	}
+}
+
+func (m *muxer) safeHLSTranscodingRenditions() []conf.HLSTranscodingRendition {
+	if pathWithRenditions, ok := m.path.(pathWithSafeHLSTranscodingRenditions); ok {
+		return pathWithRenditions.SafeHLSTranscodingRenditions()
+	}
+	return nil
 }
 
 func (m *muxer) getInstance() *muxerInstance {

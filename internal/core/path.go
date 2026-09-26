@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,10 +13,12 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/dvr"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recorder"
+	"github.com/bluenviron/mediamtx/internal/servers/hls/transcoder"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
@@ -62,20 +65,23 @@ type pathAPIPathsGetReq struct {
 }
 
 type path struct {
-	parentCtx         context.Context
-	logLevel          conf.LogLevel
-	rtspAddress       string
-	readTimeout       conf.Duration
-	writeTimeout      conf.Duration
-	writeQueueSize    int
-	udpMaxPayloadSize int
-	conf              *conf.Path
-	name              string
-	streamKey         string
-	matches           []string
-	wg                *sync.WaitGroup
-	externalCmdPool   *externalcmd.Pool
-	parent            pathParent
+	parentCtx                context.Context
+	logLevel                 conf.LogLevel
+	rtspAddress              string
+	rtmpAddress              string
+	readTimeout              conf.Duration
+	writeTimeout             conf.Duration
+	writeQueueSize           int
+	udpMaxPayloadSize        int
+	conf                     *conf.Path
+	name                     string
+	streamKey                string
+	hlsTranscodingRenditions []conf.HLSTranscodingRendition
+	matches                  []string
+	wg                       *sync.WaitGroup
+	externalCmdPool          *externalcmd.Pool
+	dvrService               *dvr.Service
+	parent                   pathParent
 
 	ctx                            context.Context
 	ctxCancel                      func()
@@ -84,6 +90,7 @@ type path struct {
 	publisherQuery                 string
 	stream                         *stream.Stream
 	recorder                       *recorder.Recorder
+	transcoder                     *transcoder.Transcoder
 	readyTime                      time.Time
 	onUnDemandHook                 func(string)
 	onNotReadyHook                 func()
@@ -112,6 +119,36 @@ type path struct {
 
 	// out
 	done chan struct{}
+}
+
+func isHLSTranscodingOutputPath(pathName string) bool {
+	if !strings.Contains(pathName, "/") {
+		return false
+	}
+	if strings.Contains(pathName, "/video/") || strings.Contains(pathName, "/audio/") {
+		return true
+	}
+	lastPart := pathName[strings.LastIndex(pathName, "/")+1:]
+	if lastPart == "original" || lastPart == "main" {
+		return true
+	}
+	if _, err := strconv.Atoi(strings.TrimSuffix(lastPart, "p")); err == nil {
+		return true
+	}
+	return false
+}
+
+func shouldStartHLSTranscoder(pathName string, pathConf *conf.Path) bool {
+	return pathConf != nil && pathConf.HLSTranscoding && !isHLSTranscodingOutputPath(pathName)
+}
+
+func effectiveHLSTranscoderConf(pathConf *conf.Path, sourceInfo *transcoder.SourceInfo) *conf.Path {
+	if pathConf == nil {
+		return nil
+	}
+	effective := *pathConf
+	effective.HLSTranscodingRenditions = transcoder.FilterRenditions(pathConf.HLSTranscodingRenditions, sourceInfo)
+	return &effective
 }
 
 func (pa *path) initialize() {
@@ -609,12 +646,18 @@ func (pa *path) SafeConf() *conf.Path {
 	return pa.conf
 }
 
+func (pa *path) SafeHLSTranscodingRenditions() []conf.HLSTranscodingRendition {
+	pa.confMutex.RLock()
+	defer pa.confMutex.RUnlock()
+	return append([]conf.HLSTranscodingRendition(nil), pa.hlsTranscodingRenditions...)
+}
+
 func (pa *path) ExternalCmdEnv() externalcmd.Environment {
 	_, port, _ := net.SplitHostPort(pa.rtspAddress)
 	env := externalcmd.Environment{
-		"MTX_PATH":  pa.name,
-		"RTSP_PATH": pa.name, // deprecated
-		"RTSP_PORT": port,
+		"MTX_PATH":       pa.name,
+		"RTSP_PATH":      pa.name, // deprecated
+		"RTSP_PORT":      port,
 		"AIOZ_StreamKey": pa.streamKey,
 	}
 
@@ -709,8 +752,39 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 		return err
 	}
 
+	if pa.dvrService != nil {
+		pa.dvrService.StartSession(pa.name)
+	}
+
 	if pa.conf.Record {
 		pa.startRecording()
+	}
+
+	pa.Log(logger.Info, "setReady: HLSTranscoding=%v, pathName=%s, isABROutput=%v, renditions=%d",
+		pa.conf.HLSTranscoding, pa.name, isHLSTranscodingOutputPath(pa.name), len(pa.conf.HLSTranscodingRenditions))
+
+	if shouldStartHLSTranscoder(pa.name, pa.conf) {
+		pa.Log(logger.Info, "starting transcoder for path %s with rtmpAddress=%s", pa.name, pa.rtmpAddress)
+
+		sourceInfo := transcoder.ExtractSourceInfo(desc)
+		if sourceInfo != nil {
+			pa.Log(logger.Info, "source detected from description: %dx%d, fps=%.2f, video=%s, audio=%s",
+				sourceInfo.Width, sourceInfo.Height, sourceInfo.FPS, sourceInfo.VideoCodec, sourceInfo.AudioCodec)
+		} else {
+			pa.Log(logger.Info, "source info not fully in description, proceeding with configured renditions")
+		}
+
+		effectiveConf := effectiveHLSTranscoderConf(pa.conf, sourceInfo)
+		pa.confMutex.Lock()
+		pa.hlsTranscodingRenditions = append([]conf.HLSTranscodingRendition(nil), effectiveConf.HLSTranscodingRenditions...)
+		pa.confMutex.Unlock()
+		pa.Log(logger.Info, "transcoder effective renditions=%d", len(effectiveConf.HLSTranscodingRenditions))
+		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtmpAddress, pa.rtspAddress)
+		pa.transcoder.SourceInfo = sourceInfo
+
+		if err := pa.transcoder.Start(); err != nil {
+			pa.Log(logger.Error, "failed to start transcoder: %v", err)
+		}
 	}
 
 	pa.readyTime = time.Now()
@@ -744,6 +818,10 @@ func (pa *path) consumeOnHoldRequests() {
 }
 
 func (pa *path) setNotReady() {
+	pa.confMutex.Lock()
+	pa.hlsTranscodingRenditions = nil
+	pa.confMutex.Unlock()
+
 	pa.parent.pathNotReady(pa)
 
 	for r := range pa.readers {
@@ -756,6 +834,14 @@ func (pa *path) setNotReady() {
 	if pa.recorder != nil {
 		pa.recorder.Close()
 		pa.recorder = nil
+	}
+	if pa.dvrService != nil {
+		pa.dvrService.EndSession(pa.name)
+	}
+
+	if pa.transcoder != nil {
+		pa.transcoder.Stop()
+		pa.transcoder = nil
 	}
 
 	if pa.stream != nil {

@@ -9,6 +9,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/dvr"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
@@ -52,12 +53,14 @@ type pathManager struct {
 	logLevel          conf.LogLevel
 	authManager       *auth.Manager
 	rtspAddress       string
+	rtmpAddress       string
 	readTimeout       conf.Duration
 	writeTimeout      conf.Duration
 	writeQueueSize    int
 	udpMaxPayloadSize int
 	pathConfs         map[string]*conf.Path
 	externalCmdPool   *externalcmd.Pool
+	dvrService        *dvr.Service
 	parent            pathManagerParent
 
 	ctx         context.Context
@@ -342,6 +345,7 @@ func (pm *pathManager) createPath(
 		parentCtx:         pm.ctx,
 		logLevel:          pm.logLevel,
 		rtspAddress:       pm.rtspAddress,
+		rtmpAddress:       pm.rtmpAddress,
 		readTimeout:       pm.readTimeout,
 		writeTimeout:      pm.writeTimeout,
 		writeQueueSize:    pm.writeQueueSize,
@@ -351,6 +355,7 @@ func (pm *pathManager) createPath(
 		matches:           matches,
 		wg:                &pm.wg,
 		externalCmdPool:   pm.externalCmdPool,
+		dvrService:        pm.dvrService,
 		parent:            pm,
 	}
 	pa.initialize()

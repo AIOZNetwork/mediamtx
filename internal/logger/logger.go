@@ -47,7 +47,7 @@ func New(level Level, destinations []Destination, filePath string) (*Logger, err
 			lh.destinations = append(lh.destinations, dest)
 		case DestinationGraylog:
 			graylogFacility := os.Getenv("GRAYLOG_FACILITY")
-			graylogUrl:= os.Getenv("GRAYLOG_URL")
+			graylogUrl := os.Getenv("GRAYLOG_URL")
 			graylogServiceName := os.Getenv("GRAYLOG_LIVE_SERVICE_NAME")
 			dest := newDestinationGraylog(graylogFacility, graylogServiceName, graylogUrl)
 			lh.destinations = append(lh.destinations, dest)

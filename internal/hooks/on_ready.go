@@ -120,6 +120,13 @@ func OnReady(params OnReadyParams) func() {
 	}
 
 	return func() {
+		if env["MTX_PATH"] != "" {
+			_, err := database.RedisIdDb.Del(context.Background(), env["MTX_PATH"]).Result()
+			if err != nil {
+				params.Logger.Log(logger.Error, "Failed to remove path from redis: %v", err)
+			}
+		}
+
 		if onReadyCmd != nil {
 			onReadyCmd.Close()
 			params.Logger.Log(logger.Info, "runOnReady command stopped")

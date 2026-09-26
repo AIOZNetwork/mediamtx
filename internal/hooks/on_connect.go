@@ -5,6 +5,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
@@ -16,6 +18,29 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/google/uuid"
 )
+
+// IsTranscoderChildPath returns whether a path is an internal HLS transcoder
+// output path published back into RTSP by FFmpeg.
+func IsTranscoderChildPath(pathName string) bool {
+	if !strings.Contains(pathName, "/") {
+		return false
+	}
+
+	if strings.Contains(pathName, "/video/") || strings.Contains(pathName, "/audio/") {
+		return true
+	}
+
+	lastPart := pathName[strings.LastIndex(pathName, "/")+1:]
+	if lastPart == "original" || lastPart == "main" {
+		return true
+	}
+
+	if _, err := strconv.Atoi(strings.TrimSuffix(lastPart, "p")); err == nil {
+		return true
+	}
+
+	return false
+}
 
 // OnConnectParams are the parameters of OnConnect.
 type OnConnectParams struct {

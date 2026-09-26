@@ -22,8 +22,11 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/confwatcher"
 	"github.com/bluenviron/mediamtx/internal/database"
+	"github.com/bluenviron/mediamtx/internal/database/repository"
+	"github.com/bluenviron/mediamtx/internal/dvr"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/grpc_service"
+	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/playback"
@@ -80,6 +83,7 @@ type Core struct {
 	recordCleaner   *recordcleaner.Cleaner
 	retryUploader   *retryuploader.RetryUploader
 	playbackServer  *playback.Server
+	dvrService      *dvr.Service
 	pathManager     *pathManager
 	rtspServer      *rtsp.Server
 	rtspsServer     *rtsp.Server
@@ -144,6 +148,7 @@ func New(args []string) (*Core, bool) {
 	database.MustConnectToRedis(p.conf)
 	database.MustInitLiveStreamMulticastDatabase()
 	database.MustInitLiveStreamStatisticsDatabase()
+	database.MustInitLiveHLSSegmentDatabase()
 
 	err = p.createResources(true)
 	if err != nil {
@@ -376,17 +381,46 @@ func (p *Core) createResources(initial bool) error {
 		p.playbackServer = i
 	}
 
+	if p.dvrService == nil {
+		p.dvrService = &dvr.Service{
+			Config: hlss3uploader.StorageConfig{
+				Provider:           p.conf.StorageProvider,
+				Prefix:             p.conf.S3Prefix,
+				Endpoint:           p.conf.S3Endpoint,
+				Bucket:             p.conf.S3Bucket,
+				Region:             p.conf.S3Region,
+				AccessKeyID:        p.conf.S3AccessKeyId,
+				SecretAccessKey:    p.conf.S3SecretAccessKey,
+				DePINIdentityDir:   p.conf.DePINIdentityDir,
+				DePINCoordPeerURL:  p.conf.DePINCoordPeerURL,
+				DePINPieceKeyPath:  p.conf.DePINPieceKeyPath,
+				DePINLinkEndpoint:  p.conf.DePINLinkEndpoint,
+				CDNEndpoint:        p.conf.CDNEndpoint,
+				CDNHubURL:          p.conf.CDNHubURL,
+				CDNBusinessAddress: p.conf.CDNBusinessAddress,
+			},
+			Repository:   repository.NewLiveHLSSegmentRepository(database.DB),
+			Parent:       p,
+			SegmentCount: p.conf.HLSSegmentCount,
+		}
+		p.dvrService.Initialize()
+	} else {
+		p.dvrService.SegmentCount = p.conf.HLSSegmentCount
+	}
+
 	if p.pathManager == nil {
 		p.pathManager = &pathManager{
 			logLevel:          p.conf.LogLevel,
 			authManager:       p.authManager,
 			rtspAddress:       p.conf.RTSPAddress,
+			rtmpAddress:       p.conf.RTMPAddress,
 			readTimeout:       p.conf.ReadTimeout,
 			writeTimeout:      p.conf.WriteTimeout,
 			writeQueueSize:    p.conf.WriteQueueSize,
 			udpMaxPayloadSize: p.conf.UDPMaxPayloadSize,
 			pathConfs:         p.conf.Paths,
 			externalCmdPool:   p.externalCmdPool,
+			dvrService:        p.dvrService,
 			parent:            p,
 		}
 		p.pathManager.initialize()
@@ -555,6 +589,28 @@ func (p *Core) createResources(initial bool) error {
 			PartDuration:    p.conf.HLSPartDuration,
 			SegmentMaxSize:  p.conf.HLSSegmentMaxSize,
 			Directory:       p.conf.HLSDirectory,
+			DVRService:      p.dvrService,
+			DVREnabled:      p.conf.HLSDVREnabled,
+			UploadConfig: &hls.MuxerUploadConfig{
+				Storage: hlss3uploader.StorageConfig{
+					Provider:               p.conf.StorageProvider,
+					Prefix:                 p.conf.S3Prefix,
+					Endpoint:               p.conf.S3Endpoint,
+					Bucket:                 p.conf.S3Bucket,
+					Region:                 p.conf.S3Region,
+					AccessKeyID:            p.conf.S3AccessKeyId,
+					SecretAccessKey:        p.conf.S3SecretAccessKey,
+					DePINIdentityDir:       p.conf.DePINIdentityDir,
+					DePINCoordPeerURL:      p.conf.DePINCoordPeerURL,
+					DePINPieceKeyPath:      p.conf.DePINPieceKeyPath,
+					DePINLinkEndpoint:      p.conf.DePINLinkEndpoint,
+					CDNEndpoint:            p.conf.CDNEndpoint,
+					CDNHubURL:              p.conf.CDNHubURL,
+					CDNBusinessAddress:     p.conf.CDNBusinessAddress,
+					DeleteLocalAfterUpload: true,
+					Workers:                4,
+				},
+			},
 			ReadTimeout:     p.conf.ReadTimeout,
 			MuxerCloseAfter: p.conf.HLSMuxerCloseAfter,
 			PathManager:     p.pathManager,
@@ -744,6 +800,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	closePathManager := newConf == nil ||
 		newConf.LogLevel != p.conf.LogLevel ||
 		newConf.RTSPAddress != p.conf.RTSPAddress ||
+		newConf.RTMPAddress != p.conf.RTMPAddress ||
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.WriteQueueSize != p.conf.WriteQueueSize ||
@@ -841,6 +898,13 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.HLSPartDuration != p.conf.HLSPartDuration ||
 		newConf.HLSSegmentMaxSize != p.conf.HLSSegmentMaxSize ||
 		newConf.HLSDirectory != p.conf.HLSDirectory ||
+		newConf.StorageProvider != p.conf.StorageProvider ||
+		newConf.S3Endpoint != p.conf.S3Endpoint ||
+		newConf.S3Bucket != p.conf.S3Bucket ||
+		newConf.S3Region != p.conf.S3Region ||
+		newConf.S3AccessKeyId != p.conf.S3AccessKeyId ||
+		newConf.S3SecretAccessKey != p.conf.S3SecretAccessKey ||
+		newConf.S3Prefix != p.conf.S3Prefix ||
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.HLSMuxerCloseAfter != p.conf.HLSMuxerCloseAfter ||
 		closePathManager ||
@@ -1002,6 +1066,11 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	if closeRetryUploader && p.retryUploader != nil {
 		p.retryUploader.Close()
 		p.retryUploader = nil
+	}
+
+	if newConf == nil && p.dvrService != nil {
+		p.dvrService.Close()
+		p.dvrService = nil
 	}
 
 	if closePPROF && p.pprof != nil {
