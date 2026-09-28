@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 )
 
@@ -50,7 +52,8 @@ func gitDescribeTags(repo *git.Repository) (string, error) {
 	i := 0
 
 	for {
-		commit, err := cIter.Next()
+		var commit *object.Commit
+		commit, err = cIter.Next()
 		if err != nil {
 			return "", fmt.Errorf("failed to get next commit: %w", err)
 		}
@@ -76,11 +79,13 @@ func tagFromGit() error {
 	// where .git/objects/info/alternates points to a directory outside of the .git directory.
 	//
 	// To work around this, specify an AlternatesFS that allows access to the entire filesystem.
-	storerFs := osfs.New("../../.git", osfs.WithBoundOS())
+	dotGitAbs, _ := filepath.Abs("../../.git")
+	storerFs := osfs.New(dotGitAbs, osfs.WithBoundOS())
 	storer := filesystem.NewStorageWithOptions(storerFs, cache.NewObjectLRUDefault(), filesystem.Options{
 		AlternatesFS: osfs.New("/", osfs.WithBoundOS()),
 	})
-	worktreeFs := osfs.New("../..", osfs.WithBoundOS())
+	workTreeAbs, _ := filepath.Abs("../../")
+	worktreeFs := osfs.New(workTreeAbs, osfs.WithBoundOS())
 	repo, err := git.Open(storer, worktreeFs)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)

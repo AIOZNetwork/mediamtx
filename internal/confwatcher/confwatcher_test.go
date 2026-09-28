@@ -1,29 +1,33 @@
-package confwatcher
+package confwatcher_test
 
 import (
 	"os"
 	"testing"
 	"time"
 
-	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/confwatcher"
+	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 func TestNoFile(t *testing.T) {
-	_, err := New("/nonexistent")
+	w := &confwatcher.ConfWatcher{FilePath: "/nonexistent"}
+	err := w.Initialize()
 	require.Error(t, err)
 }
 
 func TestWrite(t *testing.T) {
-	fpath, err := test.CreateTempFile([]byte("{}"))
-	require.NoError(t, err)
+	fpath := test.CreateTempFile(t, []byte("{}"))
 
-	w, err := New(fpath)
+	w := &confwatcher.ConfWatcher{FilePath: fpath}
+	err := w.Initialize()
 	require.NoError(t, err)
 	defer w.Close()
 
 	func() {
-		f, err := os.Create(fpath)
+		var f *os.File
+		f, err = os.Create(fpath)
 		require.NoError(t, err)
 		defer f.Close()
 
@@ -40,31 +44,31 @@ func TestWrite(t *testing.T) {
 }
 
 func TestWriteMultipleTimes(t *testing.T) {
-	fpath, err := test.CreateTempFile([]byte("{}"))
-	require.NoError(t, err)
+	fpath := test.CreateTempFile(t, []byte("{}"))
 
-	w, err := New(fpath)
+	w := &confwatcher.ConfWatcher{FilePath: fpath}
+	err := w.Initialize()
 	require.NoError(t, err)
 	defer w.Close()
 
 	func() {
-		f, err := os.Create(fpath)
-		require.NoError(t, err)
+		f, err2 := os.Create(fpath)
+		require.NoError(t, err2)
 		defer f.Close()
 
-		_, err = f.Write([]byte("{}"))
-		require.NoError(t, err)
+		_, err2 = f.Write([]byte("{}"))
+		require.NoError(t, err2)
 	}()
 
 	time.Sleep(10 * time.Millisecond)
 
 	func() {
-		f, err := os.Create(fpath)
-		require.NoError(t, err)
+		f, err2 := os.Create(fpath)
+		require.NoError(t, err2)
 		defer f.Close()
 
-		_, err = f.Write([]byte("{}"))
-		require.NoError(t, err)
+		_, err2 = f.Write([]byte("{}"))
+		require.NoError(t, err2)
 	}()
 
 	select {
@@ -83,18 +87,20 @@ func TestWriteMultipleTimes(t *testing.T) {
 }
 
 func TestDeleteCreate(t *testing.T) {
-	fpath, err := test.CreateTempFile([]byte("{}"))
-	require.NoError(t, err)
+	fpath := test.CreateTempFile(t, []byte("{}"))
 
-	w, err := New(fpath)
+	w := &confwatcher.ConfWatcher{FilePath: fpath}
+	err := w.Initialize()
 	require.NoError(t, err)
 	defer w.Close()
 
 	os.Remove(fpath)
+
 	time.Sleep(10 * time.Millisecond)
 
 	func() {
-		f, err := os.Create(fpath)
+		var f *os.File
+		f, err = os.Create(fpath)
 		require.NoError(t, err)
 		defer f.Close()
 
@@ -111,25 +117,25 @@ func TestDeleteCreate(t *testing.T) {
 }
 
 func TestSymlinkDeleteCreate(t *testing.T) {
-	fpath, err := test.CreateTempFile([]byte("{}"))
+	fpath := test.CreateTempFile(t, []byte("{}"))
+
+	err := os.Symlink(fpath, fpath+"-sym")
 	require.NoError(t, err)
 
-	err = os.Symlink(fpath, fpath+"-sym")
-	require.NoError(t, err)
-
-	w, err := New(fpath + "-sym")
+	w := &confwatcher.ConfWatcher{FilePath: fpath + "-sym"}
+	err = w.Initialize()
 	require.NoError(t, err)
 	defer w.Close()
 
 	os.Remove(fpath)
 
 	func() {
-		f, err := os.Create(fpath)
-		require.NoError(t, err)
+		f, err2 := os.Create(fpath)
+		require.NoError(t, err2)
 		defer f.Close()
 
-		_, err = f.Write([]byte("{}"))
-		require.NoError(t, err)
+		_, err2 = f.Write([]byte("{}"))
+		require.NoError(t, err2)
 	}()
 
 	select {

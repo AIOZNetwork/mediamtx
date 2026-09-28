@@ -1,39 +1,29 @@
 // Package api contains the API server.
-package api
+package api //nolint:revive
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/conf/jsonwrapper"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
-	"github.com/bluenviron/mediamtx/internal/recordstore"
-	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
-	"github.com/bluenviron/mediamtx/internal/servers/hls"
-	"github.com/bluenviron/mediamtx/internal/servers/rtmp"
-	"github.com/bluenviron/mediamtx/internal/servers/rtsp"
-	"github.com/bluenviron/mediamtx/internal/servers/srt"
-	"github.com/bluenviron/mediamtx/internal/servers/webrtc"
 )
 
-func interfaceIsEmpty(i interface{}) bool {
-	return reflect.ValueOf(i).Kind() != reflect.Ptr || reflect.ValueOf(i).IsNil()
+const (
+	maxInboundConfigSize = 10 * 1024 * 1024
+)
+
+func interfaceIsEmpty(i any) bool {
+	return reflect.ValueOf(i).Kind() != reflect.Pointer || reflect.ValueOf(i).IsNil()
 }
 
 func sortedKeys(paths map[string]*conf.Path) []string {
@@ -57,118 +47,70 @@ func paramName(ctx *gin.Context) (string, bool) {
 	return name[1:], true
 }
 
-func recordingsOfPath(
-	pathConf *conf.Path,
-	pathName string,
-) *defs.APIRecording {
-	ret := &defs.APIRecording{
-		Name: pathName,
-	}
-
-	segments, _ := recordstore.FindSegments(pathConf, pathName, nil, nil)
-
-	ret.Segments = make([]*defs.APIRecordingSegment, len(segments))
-
-	for i, seg := range segments {
-		ret.Segments[i] = &defs.APIRecordingSegment{
-			Start: seg.Start,
-		}
-	}
-
-	return ret
-}
-
-// PathManager contains methods used by the API and Metrics server.
-type PathManager interface {
-	APIPathsList() (*defs.APIPathList, error)
-	APIPathsGet(string) (*defs.APIPath, error)
-}
-
-// HLSServer contains methods used by the API and Metrics server.
-type HLSServer interface {
-	APIMuxersList() (*defs.APIHLSMuxerList, error)
-	APIMuxersGet(string) (*defs.APIHLSMuxer, error)
-}
-
-// RTSPServer contains methods used by the API and Metrics server.
-type RTSPServer interface {
-	APIConnsList() (*defs.APIRTSPConnsList, error)
-	APIConnsGet(uuid.UUID) (*defs.APIRTSPConn, error)
-	APISessionsList() (*defs.APIRTSPSessionList, error)
-	APISessionsGet(uuid.UUID) (*defs.APIRTSPSession, error)
-	APISessionsKick(uuid.UUID) error
-}
-
-// RTMPServer contains methods used by the API and Metrics server.
-type RTMPServer interface {
-	APIConnsList() (*defs.APIRTMPConnList, error)
-	APIConnsGet(uuid.UUID) (*defs.APIRTMPConn, error)
-	APIConnsKick(uuid.UUID) error
-}
-
-// SRTServer contains methods used by the API and Metrics server.
-type SRTServer interface {
-	APIConnsList() (*defs.APISRTConnList, error)
-	APIConnsGet(uuid.UUID) (*defs.APISRTConn, error)
-	APIConnsKick(uuid.UUID) error
-}
-
-// WebRTCServer contains methods used by the API and Metrics server.
-type WebRTCServer interface {
-	APISessionsList() (*defs.APIWebRTCSessionList, error)
-	APISessionsGet(uuid.UUID) (*defs.APIWebRTCSession, error)
-	APISessionsKick(uuid.UUID) error
-}
-
 type apiAuthManager interface {
-	Authenticate(req *auth.Request) error
+	Authenticate(req *auth.Request) (string, *auth.Error)
+	RefreshJWTJWKS()
 }
 
 type apiParent interface {
 	logger.Writer
-	APIConfigSet(conf *conf.Conf)
+	APIConfigSnapshot() *conf.Conf
+	APIConfigGlobalPatch(conf.OptionalGlobal) error
+	APIConfigPathDefaultsPatch(conf.OptionalPath) error
+	APIConfigPathsAdd(string, conf.OptionalPath) error
+	APIConfigPathsPatch(string, conf.OptionalPath) error
+	APIConfigPathsReplace(string, conf.OptionalPath) error
+	APIConfigPathsDelete(string) error
 }
 
 // API is an API server.
 type API struct {
+	Version        string
+	Started        time.Time
 	Address        string
+	DumpPackets    bool
 	Encryption     bool
 	ServerKey      string
 	ServerCert     string
-	AllowOrigin    string
+	AllowOrigins   []string
 	TrustedProxies conf.IPNetworks
 	ReadTimeout    conf.Duration
-	Conf           *conf.Conf
+	WriteTimeout   conf.Duration
 	AuthManager    apiAuthManager
-	PathManager    PathManager
-	RTSPServer     RTSPServer
-	RTSPSServer    RTSPServer
-	RTMPServer     RTMPServer
-	RTMPSServer    RTMPServer
-	HLSServer      HLSServer
-	WebRTCServer   WebRTCServer
-	SRTServer      SRTServer
+	PathManager    defs.APIPathManager
+	RTSPServer     defs.APIRTSPServer
+	RTSPSServer    defs.APIRTSPServer
+	RTMPServer     defs.APIRTMPServer
+	RTMPSServer    defs.APIRTMPServer
+	HLSServer      defs.APIHLSServer
+	WebRTCServer   defs.APIWebRTCServer
+	SRTServer      defs.APISRTServer
+	MoQServer      defs.APIMoQServer
 	Parent         apiParent
 
 	httpServer *httpp.Server
-	mutex      sync.RWMutex
 }
 
 // Initialize initializes API.
 func (a *API) Initialize() error {
 	router := gin.New()
 	router.SetTrustedProxies(a.TrustedProxies.ToTrustedProxies()) //nolint:errcheck
-
-	router.Use(a.middlewareOrigin)
+	router.Use(a.middlewarePreflightRequests)
 	router.Use(a.middlewareAuth)
+
 	group := router.Group("/v3")
+
+	group.GET("/info", a.onInfo)
+
+	group.POST("/auth/jwks/refresh", a.onAuthJwksRefresh)
 
 	group.GET("/config/global/get", a.onConfigGlobalGet)
 	group.PATCH("/config/global/patch", a.onConfigGlobalPatch)
 
-	group.GET("/config/storage/get", a.onConfigStorageGet)
-	group.PATCH("/config/storage/patch", a.onConfigStoragePatch)
+	group.GET("/config/path-defaults/get", a.onConfigPathDefaultsGet)
+	group.PATCH("/config/path-defaults/patch", a.onConfigPathDefaultsPatch)
 
+	// deprecated
 	group.GET("/config/pathdefaults/get", a.onConfigPathDefaultsGet)
 	group.PATCH("/config/pathdefaults/patch", a.onConfigPathDefaultsPatch)
 
@@ -181,13 +123,37 @@ func (a *API) Initialize() error {
 
 	group.GET("/paths/list", a.onPathsList)
 	group.GET("/paths/get/*name", a.onPathsGet)
+	group.GET("/paths/forward-dests/list", a.onForwardDestsList)
+	group.GET("/paths/forward-dests/get", a.onForwardDestsGet)
+	group.GET("/paths/static-sources/get/*name", a.onStaticSourcesGet)
+
+	// deprecated
+	group.GET("/paths/forward/list", a.onForwardDestsList)
+	group.GET("/paths/forward/get", a.onForwardDestsGet)
 
 	if !interfaceIsEmpty(a.HLSServer) {
+		group.GET("/hls/muxers/list", a.onHLSMuxersList)
+		group.GET("/hls/muxers/get/*name", a.onHLSMuxersGet)
+		group.GET("/hls/sessions/list", a.onHLSSessionsList)
+		group.GET("/hls/sessions/get/:id", a.onHLSSessionsGet)
+		group.POST("/hls/sessions/kick/:id", a.onHLSSessionsKick)
+
+		// deprecated
 		group.GET("/hlsmuxers/list", a.onHLSMuxersList)
 		group.GET("/hlsmuxers/get/*name", a.onHLSMuxersGet)
+		group.GET("/hlssessions/list", a.onHLSSessionsList)
+		group.GET("/hlssessions/get/:id", a.onHLSSessionsGet)
+		group.POST("/hlssessions/kick/:id", a.onHLSSessionsKick)
 	}
 
 	if !interfaceIsEmpty(a.RTSPServer) {
+		group.GET("/rtsp/conns/list", a.onRTSPConnsList)
+		group.GET("/rtsp/conns/get/:id", a.onRTSPConnsGet)
+		group.GET("/rtsp/sessions/list", a.onRTSPSessionsList)
+		group.GET("/rtsp/sessions/get/:id", a.onRTSPSessionsGet)
+		group.POST("/rtsp/sessions/kick/:id", a.onRTSPSessionsKick)
+
+		// deprecated
 		group.GET("/rtspconns/list", a.onRTSPConnsList)
 		group.GET("/rtspconns/get/:id", a.onRTSPConnsGet)
 		group.GET("/rtspsessions/list", a.onRTSPSessionsList)
@@ -196,6 +162,13 @@ func (a *API) Initialize() error {
 	}
 
 	if !interfaceIsEmpty(a.RTSPSServer) {
+		group.GET("/rtsps/conns/list", a.onRTSPSConnsList)
+		group.GET("/rtsps/conns/get/:id", a.onRTSPSConnsGet)
+		group.GET("/rtsps/sessions/list", a.onRTSPSSessionsList)
+		group.GET("/rtsps/sessions/get/:id", a.onRTSPSSessionsGet)
+		group.POST("/rtsps/sessions/kick/:id", a.onRTSPSSessionsKick)
+
+		// deprecated
 		group.GET("/rtspsconns/list", a.onRTSPSConnsList)
 		group.GET("/rtspsconns/get/:id", a.onRTSPSConnsGet)
 		group.GET("/rtspssessions/list", a.onRTSPSSessionsList)
@@ -204,63 +177,107 @@ func (a *API) Initialize() error {
 	}
 
 	if !interfaceIsEmpty(a.RTMPServer) {
+		group.GET("/rtmp/conns/list", a.onRTMPConnsList)
+		group.GET("/rtmp/conns/get/:id", a.onRTMPConnsGet)
+		group.POST("/rtmp/conns/kick/:id", a.onRTMPConnsKick)
+
+		// deprecated
 		group.GET("/rtmpconns/list", a.onRTMPConnsList)
 		group.GET("/rtmpconns/get/:id", a.onRTMPConnsGet)
 		group.POST("/rtmpconns/kick/:id", a.onRTMPConnsKick)
 	}
 
 	if !interfaceIsEmpty(a.RTMPSServer) {
+		group.GET("/rtmps/conns/list", a.onRTMPSConnsList)
+		group.GET("/rtmps/conns/get/:id", a.onRTMPSConnsGet)
+		group.POST("/rtmps/conns/kick/:id", a.onRTMPSConnsKick)
+
+		// deprecated
 		group.GET("/rtmpsconns/list", a.onRTMPSConnsList)
 		group.GET("/rtmpsconns/get/:id", a.onRTMPSConnsGet)
 		group.POST("/rtmpsconns/kick/:id", a.onRTMPSConnsKick)
 	}
 
 	if !interfaceIsEmpty(a.WebRTCServer) {
+		group.GET("/webrtc/sessions/list", a.onWebRTCSessionsList)
+		group.GET("/webrtc/sessions/get/:id", a.onWebRTCSessionsGet)
+		group.POST("/webrtc/sessions/kick/:id", a.onWebRTCSessionsKick)
+
+		// deprecated
 		group.GET("/webrtcsessions/list", a.onWebRTCSessionsList)
 		group.GET("/webrtcsessions/get/:id", a.onWebRTCSessionsGet)
 		group.POST("/webrtcsessions/kick/:id", a.onWebRTCSessionsKick)
 	}
 
 	if !interfaceIsEmpty(a.SRTServer) {
+		group.GET("/srt/conns/list", a.onSRTConnsList)
+		group.GET("/srt/conns/get/:id", a.onSRTConnsGet)
+		group.POST("/srt/conns/kick/:id", a.onSRTConnsKick)
+
+		// deprecated
 		group.GET("/srtconns/list", a.onSRTConnsList)
 		group.GET("/srtconns/get/:id", a.onSRTConnsGet)
 		group.POST("/srtconns/kick/:id", a.onSRTConnsKick)
 	}
 
+	if !interfaceIsEmpty(a.MoQServer) {
+		group.GET("/moq/sessions/list", a.onMoQSessionsList)
+		group.GET("/moq/sessions/get/:id", a.onMoQSessionsGet)
+		group.POST("/moq/sessions/kick/:id", a.onMoQSessionsKick)
+
+		// deprecated
+		group.GET("/moqsessions/list", a.onMoQSessionsList)
+		group.GET("/moqsessions/get/:id", a.onMoQSessionsGet)
+		group.POST("/moqsessions/kick/:id", a.onMoQSessionsKick)
+	}
+
 	group.GET("/recordings/list", a.onRecordingsList)
 	group.GET("/recordings/get/*name", a.onRecordingsGet)
-	group.DELETE("/recordings/deletesegment", a.onRecordingDeleteSegment)
+	group.DELETE("/recordings/segments/delete", a.onRecordingsSegmentsDelete)
 
-	network, address := restrictnetwork.Restrict("tcp", a.Address)
+	// deprecated
+	group.DELETE("/recordings/deletesegment", a.onRecordingsSegmentsDelete)
 
 	a.httpServer = &httpp.Server{
-		Network:     network,
-		Address:     address,
-		ReadTimeout: time.Duration(a.ReadTimeout),
-		Encryption:  a.Encryption,
-		ServerCert:  a.ServerCert,
-		ServerKey:   a.ServerKey,
-		Handler:     router,
-		Parent:      a,
+		Address:           a.Address,
+		AllowOrigins:      a.AllowOrigins,
+		DumpPackets:       a.DumpPackets,
+		DumpPacketsPrefix: "api_server_conn",
+		ReadTimeout:       time.Duration(a.ReadTimeout),
+		WriteTimeout:      time.Duration(a.WriteTimeout),
+		Encryption:        a.Encryption,
+		ServerCert:        a.ServerCert,
+		ServerKey:         a.ServerKey,
+		Handler:           router,
+		Parent:            a,
 	}
 	err := a.httpServer.Initialize()
 	if err != nil {
 		return err
 	}
 
-	a.Log(logger.Info, "listener opened on "+address)
+	str := "started with listener on " + a.Address
+	if !a.Encryption {
+		str += " (TCP/HTTP)"
+	} else {
+		str += " (TCP/HTTPS)"
+	}
+	a.Log(logger.Info, str)
 
 	return nil
 }
 
 // Close closes the API.
 func (a *API) Close() {
-	a.Log(logger.Info, "listener is closing")
+	a.Log(logger.Info, "closing")
+
 	a.httpServer.Close()
+
+	a.Log(logger.Debug, "closed")
 }
 
 // Log implements logger.Writer.
-func (a *API) Log(level logger.Level, format string, args ...interface{}) {
+func (a *API) Log(level logger.Level, format string, args ...any) {
 	a.Parent.Log(level, "[API] "+format, args...)
 }
 
@@ -269,16 +286,24 @@ func (a *API) writeError(ctx *gin.Context, status int, err error) {
 	a.Log(logger.Error, err.Error())
 
 	// add error to response
-	ctx.JSON(status, &defs.APIError{
-		Error: err.Error(),
+	ctx.AbortWithStatusJSON(status, &defs.APIError{
+		Status: defs.APIErrorStatusError,
+		Error:  err.Error(),
 	})
 }
 
-func (a *API) middlewareOrigin(ctx *gin.Context) {
-	ctx.Header("Access-Control-Allow-Origin", a.AllowOrigin)
-	ctx.Header("Access-Control-Allow-Credentials", "true")
+func (a *API) writeErrorNoLog(ctx *gin.Context, status int, err error) {
+	ctx.AbortWithStatusJSON(status, &defs.APIError{
+		Status: defs.APIErrorStatusError,
+		Error:  err.Error(),
+	})
+}
 
-	// preflight requests
+func (a *API) writeOK(ctx *gin.Context) {
+	ctx.JSON(http.StatusOK, &defs.APIOK{Status: defs.APIOKStatusOK})
+}
+
+func (a *API) middlewarePreflightRequests(ctx *gin.Context) {
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {
 		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET, POST, PATCH, DELETE")
@@ -290,964 +315,39 @@ func (a *API) middlewareOrigin(ctx *gin.Context) {
 
 func (a *API) middlewareAuth(ctx *gin.Context) {
 	req := &auth.Request{
-		IP:     net.ParseIP(ctx.ClientIP()),
-		Action: conf.AuthActionAPI,
+		Action:               conf.AuthActionAPI,
+		Query:                ctx.Request.URL.RawQuery,
+		Credentials:          httpp.Credentials(ctx.Request),
+		IP:                   net.ParseIP(ctx.ClientIP()),
+		EnableAskCredentials: true,
 	}
-	req.FillFromHTTPRequest(ctx.Request)
 
-	err := a.AuthManager.Authenticate(req)
+	_, err := a.AuthManager.Authenticate(req)
 	if err != nil {
-		if err.(auth.Error).AskCredentials { //nolint:errorlint
+		if err.AskCredentials {
 			ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
-			ctx.AbortWithStatus(http.StatusUnauthorized)
+			a.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return
 		}
 
-		// wait some seconds to mitigate brute force attacks
-		<-time.After(auth.PauseAfterError)
+		auth.LogAndDelayError(&logger.InlineWriter{
+			Parent: a,
+			Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
+		}, err)
 
-		ctx.AbortWithStatus(http.StatusUnauthorized)
+		a.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 		return
 	}
 }
 
-func (a *API) onConfigGlobalGet(ctx *gin.Context) {
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
-
-	ctx.JSON(http.StatusOK, c.Global())
-}
-
-func (a *API) onConfigGlobalPatch(ctx *gin.Context) {
-	var c conf.OptionalGlobal
-	err := jsonwrapper.Decode(ctx.Request.Body, &c)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	newConf.PatchGlobal(&c)
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-
-	// since reloading the configuration can cause the shutdown of the API,
-	// call it in a goroutine
-	go a.Parent.APIConfigSet(newConf)
-
-	ctx.Status(http.StatusOK)
-}
-
-type APIStorageConfig struct {
-	StorageProvider   string `json:"storageProvider"`
-	S3Endpoint        string `json:"s3Endpoint"`
-	S3Bucket          string `json:"s3Bucket"`
-	S3Region          string `json:"s3Region"`
-	S3AccessKeyId     string `json:"s3AccessKeyId"`
-	S3SecretAccessKey string `json:"s3SecretAccessKey"`
-	S3Prefix          string `json:"s3Prefix"`
-}
-
-func (a *API) onConfigStorageGet(ctx *gin.Context) {
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
-
-	ctx.JSON(http.StatusOK, &APIStorageConfig{
-		StorageProvider:   c.StorageProvider,
-		S3Endpoint:        c.S3Endpoint,
-		S3Bucket:          c.S3Bucket,
-		S3Region:          c.S3Region,
-		S3AccessKeyId:     c.S3AccessKeyId,
-		S3SecretAccessKey: c.S3SecretAccessKey,
-		S3Prefix:          c.S3Prefix,
+func (a *API) onInfo(ctx *gin.Context) {
+	ctx.JSON(http.StatusOK, &defs.APIInfo{
+		Version: a.Version,
+		Started: a.Started,
 	})
 }
 
-func (a *API) onConfigStoragePatch(ctx *gin.Context) {
-	var p APIStorageConfig
-	err := jsonwrapper.Decode(ctx.Request.Body, &p)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-	if p.StorageProvider != "" {
-		newConf.StorageProvider = p.StorageProvider
-	}
-	if p.S3Endpoint != "" {
-		newConf.S3Endpoint = p.S3Endpoint
-	}
-	if p.S3Bucket != "" {
-		newConf.S3Bucket = p.S3Bucket
-	}
-	if p.S3Region != "" {
-		newConf.S3Region = p.S3Region
-	}
-	if p.S3AccessKeyId != "" {
-		newConf.S3AccessKeyId = p.S3AccessKeyId
-	}
-	if p.S3SecretAccessKey != "" {
-		newConf.S3SecretAccessKey = p.S3SecretAccessKey
-	}
-	if p.S3Prefix != "" {
-		newConf.S3Prefix = p.S3Prefix
-	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	go a.Parent.APIConfigSet(newConf)
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onConfigPathDefaultsGet(ctx *gin.Context) {
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
-
-	ctx.JSON(http.StatusOK, c.PathDefaults)
-}
-
-func (a *API) onConfigPathDefaultsPatch(ctx *gin.Context) {
-	var p conf.OptionalPath
-	err := jsonwrapper.Decode(ctx.Request.Body, &p)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	newConf.PatchPathDefaults(&p)
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onConfigPathsList(ctx *gin.Context) {
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
-
-	data := &defs.APIPathConfList{
-		Items: make([]*conf.Path, len(c.Paths)),
-	}
-
-	for i, key := range sortedKeys(c.Paths) {
-		data.Items[i] = c.Paths[key]
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onConfigPathsGet(ctx *gin.Context) {
-	confName, ok := paramName(ctx)
-	if !ok {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid name"))
-		return
-	}
-
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
-
-	p, ok := c.Paths[confName]
-	if !ok {
-		a.writeError(ctx, http.StatusNotFound, fmt.Errorf("path configuration not found"))
-		return
-	}
-
-	ctx.JSON(http.StatusOK, p)
-}
-
-func (a *API) onConfigPathsAdd(ctx *gin.Context) { //nolint:dupl
-	confName, ok := paramName(ctx)
-	if !ok {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid name"))
-		return
-	}
-
-	var p conf.OptionalPath
-	err := jsonwrapper.Decode(ctx.Request.Body, &p)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	err = newConf.AddPath(confName, &p)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onConfigPathsPatch(ctx *gin.Context) { //nolint:dupl
-	confName, ok := paramName(ctx)
-	if !ok {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid name"))
-		return
-	}
-
-	var p conf.OptionalPath
-	err := jsonwrapper.Decode(ctx.Request.Body, &p)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	err = newConf.PatchPath(confName, &p)
-	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusBadRequest, err)
-		}
-		return
-	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onConfigPathsReplace(ctx *gin.Context) { //nolint:dupl
-	confName, ok := paramName(ctx)
-	if !ok {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid name"))
-		return
-	}
-
-	var p conf.OptionalPath
-	err := jsonwrapper.Decode(ctx.Request.Body, &p)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	err = newConf.ReplacePath(confName, &p)
-	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusBadRequest, err)
-		}
-		return
-	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onConfigPathsDelete(ctx *gin.Context) {
-	confName, ok := paramName(ctx)
-	if !ok {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid name"))
-		return
-	}
-
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	err := newConf.RemovePath(confName)
-	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusBadRequest, err)
-		}
-		return
-	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onPathsList(ctx *gin.Context) {
-	data, err := a.PathManager.APIPathsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onPathsGet(ctx *gin.Context) {
-	pathName, ok := paramName(ctx)
-	if !ok {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid name"))
-		return
-	}
-
-	data, err := a.PathManager.APIPathsGet(pathName)
-	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPConnsList(ctx *gin.Context) {
-	data, err := a.RTSPServer.APIConnsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPConnsGet(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	data, err := a.RTSPServer.APIConnsGet(uuid)
-	if err != nil {
-		if errors.Is(err, rtsp.ErrConnNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPSessionsList(ctx *gin.Context) {
-	data, err := a.RTSPServer.APISessionsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPSessionsGet(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	data, err := a.RTSPServer.APISessionsGet(uuid)
-	if err != nil {
-		if errors.Is(err, rtsp.ErrSessionNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPSessionsKick(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	err = a.RTSPServer.APISessionsKick(uuid)
-	if err != nil {
-		if errors.Is(err, rtsp.ErrSessionNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onRTSPSConnsList(ctx *gin.Context) {
-	data, err := a.RTSPSServer.APIConnsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPSConnsGet(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	data, err := a.RTSPSServer.APIConnsGet(uuid)
-	if err != nil {
-		if errors.Is(err, rtsp.ErrConnNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPSSessionsList(ctx *gin.Context) {
-	data, err := a.RTSPSServer.APISessionsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPSSessionsGet(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	data, err := a.RTSPSServer.APISessionsGet(uuid)
-	if err != nil {
-		if errors.Is(err, rtsp.ErrSessionNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTSPSSessionsKick(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	err = a.RTSPSServer.APISessionsKick(uuid)
-	if err != nil {
-		if errors.Is(err, rtsp.ErrSessionNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onRTMPConnsList(ctx *gin.Context) {
-	data, err := a.RTMPServer.APIConnsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTMPConnsGet(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	data, err := a.RTMPServer.APIConnsGet(uuid)
-	if err != nil {
-		if errors.Is(err, rtmp.ErrConnNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTMPConnsKick(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	err = a.RTMPServer.APIConnsKick(uuid)
-	if err != nil {
-		if errors.Is(err, rtmp.ErrConnNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onRTMPSConnsList(ctx *gin.Context) {
-	data, err := a.RTMPSServer.APIConnsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTMPSConnsGet(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	data, err := a.RTMPSServer.APIConnsGet(uuid)
-	if err != nil {
-		if errors.Is(err, rtmp.ErrConnNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRTMPSConnsKick(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	err = a.RTMPSServer.APIConnsKick(uuid)
-	if err != nil {
-		if errors.Is(err, rtmp.ErrConnNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onHLSMuxersList(ctx *gin.Context) {
-	data, err := a.HLSServer.APIMuxersList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onHLSMuxersGet(ctx *gin.Context) {
-	pathName, ok := paramName(ctx)
-	if !ok {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid name"))
-		return
-	}
-
-	data, err := a.HLSServer.APIMuxersGet(pathName)
-	if err != nil {
-		if errors.Is(err, hls.ErrMuxerNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onWebRTCSessionsList(ctx *gin.Context) {
-	data, err := a.WebRTCServer.APISessionsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onWebRTCSessionsGet(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	data, err := a.WebRTCServer.APISessionsGet(uuid)
-	if err != nil {
-		if errors.Is(err, webrtc.ErrSessionNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onWebRTCSessionsKick(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	err = a.WebRTCServer.APISessionsKick(uuid)
-	if err != nil {
-		if errors.Is(err, webrtc.ErrSessionNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onSRTConnsList(ctx *gin.Context) {
-	data, err := a.SRTServer.APIConnsList()
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	data.ItemCount = len(data.Items)
-	pageCount, err := paginate(&data.Items, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onSRTConnsGet(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	data, err := a.SRTServer.APIConnsGet(uuid)
-	if err != nil {
-		if errors.Is(err, srt.ErrConnNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onSRTConnsKick(ctx *gin.Context) {
-	uuid, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	err = a.SRTServer.APIConnsKick(uuid)
-	if err != nil {
-		if errors.Is(err, srt.ErrConnNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	ctx.Status(http.StatusOK)
-}
-
-func (a *API) onRecordingsList(ctx *gin.Context) {
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
-
-	pathNames := recordstore.FindAllPathsWithSegments(c.Paths)
-
-	data := defs.APIRecordingList{}
-
-	data.ItemCount = len(pathNames)
-	pageCount, err := paginate(&pathNames, ctx.Query("itemsPerPage"), ctx.Query("page"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-	data.PageCount = pageCount
-
-	data.Items = make([]*defs.APIRecording, len(pathNames))
-
-	for i, pathName := range pathNames {
-		pathConf, _, _ := conf.FindPathConf(c.Paths, pathName)
-		data.Items[i] = recordingsOfPath(pathConf, pathName)
-	}
-
-	ctx.JSON(http.StatusOK, data)
-}
-
-func (a *API) onRecordingsGet(ctx *gin.Context) {
-	pathName, ok := paramName(ctx)
-	if !ok {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid name"))
-		return
-	}
-
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
-
-	pathConf, _, err := conf.FindPathConf(c.Paths, pathName)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	ctx.JSON(http.StatusOK, recordingsOfPath(pathConf, pathName))
-}
-
-func (a *API) onRecordingDeleteSegment(ctx *gin.Context) {
-	pathName := ctx.Query("path")
-
-	start, err := time.Parse(time.RFC3339, ctx.Query("start"))
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid 'start' parameter: %w", err))
-		return
-	}
-
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
-
-	pathConf, _, err := conf.FindPathConf(c.Paths, pathName)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	pathFormat := recordstore.PathAddExtension(
-		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
-		pathConf.RecordFormat,
-	)
-
-	segmentPath := recordstore.Path{
-		Start: start,
-	}.Encode(pathFormat)
-
-	err = os.Remove(segmentPath)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	dirPath := filepath.Dir(segmentPath)
-
-	err = os.RemoveAll(dirPath)
-	if err != nil {
-		a.writeError(ctx, http.StatusInternalServerError, fmt.Errorf("failed to remove directory: %w", err))
-		return
-	}
-
-	ctx.Status(http.StatusOK)
-}
-
-// ReloadConf is called by core.
-func (a *API) ReloadConf(conf *conf.Conf) {
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-	a.Conf = conf
+func (a *API) onAuthJwksRefresh(ctx *gin.Context) {
+	a.AuthManager.RefreshJWTJWKS()
+	a.writeOK(ctx)
 }
