@@ -5,14 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	uplinksdk "aioz-depin/go-sdk"
-
-	"go.uber.org/zap"
+	uplinksdk "gitlab.internal/aioz-depin/go-sdk"
 )
 
 const (
@@ -208,15 +207,10 @@ func init() {
 			return nil, fmt.Errorf("depin: identity_dir and coord_peer_url are required")
 		}
 
-		zapLogger, err := zap.NewProduction()
-		if err != nil {
-			zapLogger = zap.NewNop()
-		}
-
 		opts := []uplinksdk.ClientOption{
 			uplinksdk.WithIdentityDir(identityDir),
 			uplinksdk.WithCoordPeerURL(coordPeerURL),
-			uplinksdk.WithLogger(zapLogger),
+			uplinksdk.WithLogger(slog.Default()),
 		}
 		if pieceKeyPath != "" {
 			opts = append(opts, uplinksdk.WithPieceKey(pieceKeyPath))
