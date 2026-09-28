@@ -93,3 +93,7 @@ func (l *LiveStreamVideoRepository) UpsertStreamMedia(streamKey uuid.UUID, strea
 
 	return nil
 }
+
+func (l *LiveStreamVideoRepository) UpdateStreamMediaStatus(id uuid.UUID, status string) error {
+	return l.db.Table("live_stream_media").Where("id = ?", id).Update("status", status).Error
+}

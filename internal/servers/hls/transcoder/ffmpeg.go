@@ -1,0 +1,293 @@
+package transcoder
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"net"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/logger"
+)
+
+const (
+	defaultVideoCodec      = "libx264"
+	defaultAudioCodec      = "aac"
+	defaultPreset          = "veryfast"
+	defaultRTMPAddress     = ":1935"
+	defaultFPS             = "30"
+	defaultPixelFormat     = "yuv420p"
+	defaultSegmentDuration = 2.0
+	defaultAudioBitrate    = "128k"
+	defaultAudioSampleRate = "48000"
+	defaultAudioChannels   = "2"
+	audioResampleFilter    = "aresample=async=1:first_pts=0"
+	x264ClosedGOPParams    = "scenecut=0:open_gop=0:rc-lookahead=0"
+)
+
+type FFmpegTranscoder struct {
+	Conf        *conf.Path
+	StreamID    string
+	Parent      logger.Writer
+	rtmpAddress string
+	rtspAddress string
+	SourceInfo  *SourceInfo
+
+	ctx       context.Context
+	ctxCancel context.CancelFunc
+
+	cmd      *exec.Cmd
+	cmdMutex sync.Mutex
+	done     chan struct{}
+}
+
+func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtmpAddress string, rtspAddress string) *FFmpegTranscoder {
+	ctx, cancel := context.WithCancel(context.Background())
+	if strings.TrimSpace(rtmpAddress) == "" {
+		rtmpAddress = defaultRTMPAddress
+	}
+	return &FFmpegTranscoder{
+		Conf:        cfg,
+		StreamID:    streamID,
+		Parent:      parent,
+		rtmpAddress: rtmpAddress,
+		rtspAddress: rtspAddress,
+		ctx:         ctx,
+		ctxCancel:   cancel,
+	}
+}
+
+func (t *FFmpegTranscoder) rtspPort() string {
+	if t.rtspAddress != "" {
+		_, port, err := net.SplitHostPort(t.rtspAddress)
+		if err == nil && port != "" {
+			return port
+		}
+	}
+	return "8554"
+}
+
+func (t *FFmpegTranscoder) Log(level logger.Level, format string, args ...interface{}) {
+	t.Parent.Log(level, "[Transcoder %s] "+format, append([]interface{}{t.StreamID}, args...)...)
+}
+
+func (t *FFmpegTranscoder) Start() error {
+	t.Log(logger.Info, "Starting FFmpeg transcoder for stream %s", t.StreamID)
+	args := t.BuildArgs()
+
+	cmd := exec.CommandContext(t.ctx, "ffmpeg", args...)
+	cmd.SysProcAttr = processGroupSysProcAttr()
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	t.cmdMutex.Lock()
+	t.cmd = cmd
+	t.done = make(chan struct{})
+	t.cmdMutex.Unlock()
+
+	go func() {
+		defer close(t.done)
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			t.Log(logger.Warn, "FFmpeg: %s", scanner.Text())
+		}
+
+		// Wait only after scanner finishes reading all stderr output (EOF)
+		err := cmd.Wait()
+		if err != nil && t.ctx.Err() == nil {
+			t.Log(logger.Error, "FFmpeg transcoder exited with error: %v", err)
+		} else {
+			t.Log(logger.Info, "FFmpeg transcoder stopped")
+		}
+	}()
+
+	return nil
+}
+
+// BuildArgs builds FFmpeg arguments without starting the process.
+func (t *FFmpegTranscoder) BuildArgs() []string {
+	sourceURL := t.rtmpURL(t.StreamID)
+
+	renditions := t.Conf.HLSTranscodingRenditions
+	fps := defaultFPS
+	if t.SourceInfo != nil && t.SourceInfo.FPS > 0 {
+		fps = fmt.Sprintf("%.2f", t.SourceInfo.FPS)
+	}
+	gopSize := gopSizeForFPS(fps)
+	filterGraph := t.videoFilterGraph(renditions, fps)
+
+	args := []string{
+		"-nostdin",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-err_detect", "ignore_err",
+		"-fflags", "nobuffer+fastseek+genpts+discardcorrupt",
+		"-flags", "low_delay",
+		"-analyzeduration", "500000",
+		"-probesize", "500000",
+		"-i", sourceURL,
+		"-filter_complex", filterGraph,
+	}
+
+	videoCodec := defaultString(t.Conf.HLSTranscodingVideoCodec, defaultVideoCodec)
+	preset := defaultString(t.Conf.HLSTranscodingPreset, defaultPreset)
+
+	audioCodec := defaultString(t.Conf.HLSTranscodingAudioCodec, defaultAudioCodec)
+	audioMap := "0:a:0?"
+	if t.SourceInfo != nil && !t.SourceInfo.HasAudio() {
+		args = append(args,
+			"-f", "lavfi",
+			"-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+		)
+		audioMap = "1:a:0"
+	}
+
+	// Transcoded renditions from config (each with its own video and audio muxed)
+	for _, r := range renditions {
+		outURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s/%s", t.rtspPort(), t.StreamID, r.Name)
+		args = append(args,
+			"-map", fmt.Sprintf("[out%s]", r.Name),
+			"-c:v", videoCodec,
+			"-pix_fmt", defaultPixelFormat,
+			"-b:v", r.VideoBitrate,
+			"-preset", preset,
+			"-tune", "zerolatency",
+			"-g", gopSize,
+			"-keyint_min", gopSize,
+			"-sc_threshold", "0",
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%.0f)", defaultSegmentDuration),
+			"-x264-params", x264ClosedGOPParams,
+			"-map", audioMap,
+			"-c:a", audioCodec,
+			"-b:a", defaultAudioBitrate,
+			"-ar", defaultAudioSampleRate,
+			"-ac", defaultAudioChannels,
+			"-f", "rtsp",
+			"-rtsp_transport", "tcp",
+			outURL,
+		)
+	}
+
+	return args
+}
+
+func gopSizeForFPS(fps string) string {
+	v, err := strconv.ParseFloat(strings.TrimSpace(fps), 64)
+	if err != nil || v <= 0 {
+		v, _ = strconv.ParseFloat(defaultFPS, 64)
+	}
+	return strconv.Itoa(int(v*defaultSegmentDuration + 0.5))
+}
+
+func (t *FFmpegTranscoder) rtmpURL(parts ...string) string {
+	address := strings.TrimSpace(t.rtmpAddress)
+	if address == "" {
+		address = defaultRTMPAddress
+	}
+	_, port, err := net.SplitHostPort(address)
+	if err != nil || port == "" {
+		_, port, _ = net.SplitHostPort(defaultRTMPAddress)
+	}
+	return "rtmp://127.0.0.1:" + port + "/" + strings.Join(parts, "/")
+}
+
+func (t *FFmpegTranscoder) videoFilterGraph(renditions []conf.HLSTranscodingRendition, fps string) string {
+	var splitOuts []string
+	for _, r := range renditions {
+		splitOuts = append(splitOuts, fmt.Sprintf("[v%sin]", r.Name))
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("[0:v]fps=%s,setpts=PTS-STARTPTS,split=", fps))
+	b.WriteString(strconv.Itoa(len(renditions)))
+	b.WriteString(strings.Join(splitOuts, ""))
+	b.WriteByte(';')
+
+	for _, r := range renditions {
+		b.WriteString(fmt.Sprintf(
+			"[v%sin]scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2[out%s];",
+			r.Name, r.Width, r.Height, r.Width, r.Height, r.Name,
+		))
+	}
+
+	return strings.TrimSuffix(b.String(), ";")
+}
+
+func defaultString(v string, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
+}
+
+func (t *FFmpegTranscoder) Stop() {
+	t.ctxCancel()
+
+	t.cmdMutex.Lock()
+	cmd := t.cmd
+	done := t.done
+	t.cmdMutex.Unlock()
+
+	if cmd != nil && cmd.Process != nil && done != nil {
+		killProcessGroup(cmd.Process.Pid)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			forceKillProcessGroup(cmd.Process.Pid)
+			<-done
+		}
+	}
+}
+
+func processGroupSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setpgid: true}
+}
+
+func killProcessGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGINT)
+}
+
+func forceKillProcessGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+}
+
+// FilterRenditions removes renditions whose resolution exceeds the source.
+// This prevents wasteful upscaling when source is lower than configured maximum.
+func FilterRenditions(renditions []conf.HLSTranscodingRendition, source *SourceInfo) []conf.HLSTranscodingRendition {
+	if source == nil || source.Height == 0 {
+		return append([]conf.HLSTranscodingRendition(nil), renditions...)
+	}
+
+	var filtered []conf.HLSTranscodingRendition
+	for _, r := range renditions {
+		if r.Height <= source.Height {
+			filtered = append(filtered, r)
+		}
+	}
+	if len(filtered) == 0 {
+		if len(renditions) == 0 {
+			return nil
+		}
+		smallest := renditions[0]
+		for _, r := range renditions[1:] {
+			if r.Height < smallest.Height {
+				smallest = r
+			}
+		}
+		return []conf.HLSTranscodingRendition{smallest}
+	}
+	return filtered
+}

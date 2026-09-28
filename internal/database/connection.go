@@ -81,3 +81,10 @@ func MustInitLiveStreamMulticastDatabase() {
 		panic(fmt.Sprintf("failed to migrate LiveStreamMulticast: %v", err))
 	}
 }
+
+func MustInitLiveHLSSegmentDatabase() {
+	err := DB.AutoMigrate(&models.LiveHLSSegment{})
+	if err != nil {
+		panic(fmt.Sprintf("failed to migrate LiveHLSSegment: %v", err))
+	}
+}

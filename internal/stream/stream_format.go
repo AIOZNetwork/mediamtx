@@ -1,116 +1,85 @@
 package stream
 
 import (
+	"crypto/rand"
 	"sync/atomic"
 	"time"
 
-	"github.com/bluenviron/gortsplib/v4/pkg/description"
-	"github.com/bluenviron/gortsplib/v4/pkg/format"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/pion/rtp"
 
-	"github.com/bluenviron/mediamtx/internal/formatprocessor"
+	"github.com/bluenviron/mediamtx/internal/errordumper"
 	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/ntpestimator"
 	"github.com/bluenviron/mediamtx/internal/unit"
 )
 
-func unitSize(u unit.Unit) uint64 {
+func multiplyAndDivide(v, m, d int64) int64 {
+	secs := v / d
+	dec := v % d
+	return (secs*m + dec*m/d)
+}
+
+func unitSize(u *unit.Unit) uint64 {
 	n := uint64(0)
-	for _, pkt := range u.GetRTPPackets() {
+	for _, pkt := range u.RTPPackets {
 		n += uint64(pkt.MarshalSize())
 	}
 	return n
 }
 
-type streamFormat struct {
-	udpMaxPayloadSize  int
-	format             format.Format
-	generateRTPPackets bool
-	decodeErrLogger    logger.Writer
+func randUint32() (uint32, error) {
+	var b [4]byte
+	_, err := rand.Read(b[:])
+	if err != nil {
+		return 0, err
+	}
+	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3]), nil
+}
 
-	proc           formatprocessor.Processor
-	pausedReaders  map[*streamReader]ReadFunc
-	runningReaders map[*streamReader]ReadFunc
+type streamFormat struct {
+	origFormat           format.Format
+	alwaysAvailable      bool
+	rtpMaxPayloadSize    int
+	replaceNTP           bool
+	inboundFramesInError *errordumper.Dumper
+	inboundBytes         *atomic.Uint64
+	outboundBytes        *atomic.Uint64
+	updateLastTime       func(time.Duration)
+	writeRTSP            func([]*rtp.Packet, time.Time)
+	updateOutDesc        func(func())
+	parent               logger.Writer
+
+	outFormat     format.Format
+	forceRemux    bool
+	ptsOffset     int64
+	formatUpdater formatUpdater
+	unitRemuxer   unitRemuxer
+	rtpEncoder    rtpEncoder
+	rtpTimeOffset uint32
+	ntpEstimator  *ntpestimator.Estimator
+	onDatas       map[*Reader]OnDataFunc
 }
 
 func (sf *streamFormat) initialize() error {
-	sf.pausedReaders = make(map[*streamReader]ReadFunc)
-	sf.runningReaders = make(map[*streamReader]ReadFunc)
+	sf.outFormat = cloneFormatShallow(sf.origFormat)
 
-	var err error
-	sf.proc, err = formatprocessor.New(sf.udpMaxPayloadSize, sf.format, sf.generateRTPPackets)
-	if err != nil {
-		return err
+	if forma, ok := sf.outFormat.(*format.H264); ok && forma.PacketizationMode == 0 {
+		sf.parent.Log(logger.Info, "remuxing in order to change H264 packetization-mode from 0 to 1")
+		forma.PacketizationMode = 1
+		sf.forceRemux = true
 	}
+
+	sf.formatUpdater = newFormatUpdater(sf.outFormat)
+	sf.unitRemuxer = newUnitRemuxer(sf.outFormat)
+
+	if sf.replaceNTP {
+		sf.ntpEstimator = &ntpestimator.Estimator{
+			ClockRate: sf.outFormat.ClockRate(),
+		}
+	}
+
+	sf.onDatas = make(map[*Reader]OnDataFunc)
 
 	return nil
-}
-
-func (sf *streamFormat) addReader(sr *streamReader, cb ReadFunc) {
-	sf.pausedReaders[sr] = cb
-}
-
-func (sf *streamFormat) removeReader(sr *streamReader) {
-	delete(sf.pausedReaders, sr)
-	delete(sf.runningReaders, sr)
-}
-
-func (sf *streamFormat) startReader(sr *streamReader) {
-	if cb, ok := sf.pausedReaders[sr]; ok {
-		delete(sf.pausedReaders, sr)
-		sf.runningReaders[sr] = cb
-	}
-}
-
-func (sf *streamFormat) writeUnit(s *Stream, medi *description.Media, u unit.Unit) {
-	err := sf.proc.ProcessUnit(u)
-	if err != nil {
-		sf.decodeErrLogger.Log(logger.Warn, err.Error())
-		return
-	}
-
-	sf.writeUnitInner(s, medi, u)
-}
-
-func (sf *streamFormat) writeRTPPacket(
-	s *Stream,
-	medi *description.Media,
-	pkt *rtp.Packet,
-	ntp time.Time,
-	pts int64,
-) {
-	hasNonRTSPReaders := len(sf.pausedReaders) > 0 || len(sf.runningReaders) > 0
-
-	u, err := sf.proc.ProcessRTPPacket(pkt, ntp, pts, hasNonRTSPReaders)
-	if err != nil {
-		sf.decodeErrLogger.Log(logger.Warn, err.Error())
-		return
-	}
-
-	sf.writeUnitInner(s, medi, u)
-}
-
-func (sf *streamFormat) writeUnitInner(s *Stream, medi *description.Media, u unit.Unit) {
-	size := unitSize(u)
-
-	atomic.AddUint64(s.bytesReceived, size)
-
-	if s.rtspStream != nil {
-		for _, pkt := range u.GetRTPPackets() {
-			s.rtspStream.WritePacketRTPWithNTP(medi, pkt, u.GetNTP()) //nolint:errcheck
-		}
-	}
-
-	if s.rtspsStream != nil {
-		for _, pkt := range u.GetRTPPackets() {
-			s.rtspsStream.WritePacketRTPWithNTP(medi, pkt, u.GetNTP()) //nolint:errcheck
-		}
-	}
-
-	for sr, cb := range sf.runningReaders {
-		ccb := cb
-		sr.push(func() error {
-			atomic.AddUint64(s.bytesSent, size)
-			return ccb(u)
-		})
-	}
 }

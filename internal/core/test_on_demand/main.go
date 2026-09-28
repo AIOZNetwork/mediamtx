@@ -6,17 +6,17 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/bluenviron/gortsplib/v4"
-	"github.com/bluenviron/gortsplib/v4/pkg/description"
-	"github.com/bluenviron/gortsplib/v4/pkg/format"
+	"github.com/bluenviron/gortsplib/v5"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
 )
 
 func main() {
-	if os.Getenv("MTX_QUERY") != "param=value" {
-		panic("unexpected MTX_QUERY")
+	if os.Getenv("MTX_QUERY") != "key1%3Dval1%26key2%3Dval2" {
+		panic("unexpected MTX_QUERY: " + os.Getenv("MTX_QUERY"))
 	}
 	if os.Getenv("G1") != "on" {
-		panic("unexpected G1")
+		panic("unexpected G1: " + os.Getenv("G1"))
 	}
 
 	medi := &description.Media{
