@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -52,9 +53,10 @@ func OnConnect(params OnConnectParams) func() {
 	if params.RunOnConnect != "" || params.RunOnDisconnect != "" {
 		_, port, _ := net.SplitHostPort(params.RTSPAddress)
 		env = externalcmd.Environment{
-			"RTSP_PORT":     port,
-			"MTX_CONN_TYPE": string(params.Desc.Type),
-			"MTX_CONN_ID":   params.Desc.ID,
+			"RTSP_PORT":       port,
+			"MTX_CONN_TYPE":   string(params.Desc.Type),
+			"MTX_CONN_ID":     params.Desc.ID,
+			"WEBHOOK_ADDRESS": conf.WebhookAddress,
 		}
 	}
 
