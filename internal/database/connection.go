@@ -68,20 +68,16 @@ func MustConnectToDatabase(config *conf.Conf) *gorm.DB {
 	return db
 }
 
-func MustInitLiveStreamStatisticsDatabase() {
-	err := DB.AutoMigrate(&models.LiveStreamStatistic{})
-	if err != nil {
-		panic(fmt.Sprintf("failed to migrate LiveStreamStatistic: %v", err))
-	}
-}
-
-func MustInitLiveStreamMulticastDatabase() {
-	err := DB.AutoMigrate(&models.LiveStreamMulticast{})
-	if err != nil {
-		panic(fmt.Sprintf("failed to migrate LiveStreamMulticast: %v", err))
-	}
-}
-
+// MustInitLiveHLSSegmentDatabase creates live_hls_segments, the one table this
+// server owns.
+//
+// The other tables it reads and writes (live_stream_keys, live_stream_media,
+// live_stream_multicasts, live_stream_statistics) belong to aioz-stream, whose
+// migrations create them and add foreign keys gorm does not know about.
+// AutoMigrate on those models rewrote aioz-stream's columns - through the
+// LiveStreamKey association it tried to turn live_stream_keys.user_id into
+// text, which the foreign key to users(id) refuses, and the server panicked
+// at startup.
 func MustInitLiveHLSSegmentDatabase() {
 	err := DB.AutoMigrate(&models.LiveHLSSegment{})
 	if err != nil {

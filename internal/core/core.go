@@ -360,8 +360,6 @@ func New(args []string) (*Core, bool) {
 
 	if loadedConf.PostgresHost != "" && loadedConf.PostgresPort != "" {
 		database.MustConnectToDatabase(loadedConf)
-		database.MustInitLiveStreamMulticastDatabase()
-		database.MustInitLiveStreamStatisticsDatabase()
 		database.MustInitLiveHLSSegmentDatabase()
 	}
 

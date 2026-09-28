@@ -8,7 +8,7 @@ import (
 
 type LiveStreamKey struct {
 	Id                 uuid.UUID `json:"id" gorm:"type:uuid;primaryKey"`
-	UserId             uuid.UUID `json:"user_id"`
+	UserId             uuid.UUID `json:"user_id" gorm:"type:uuid"`
 	Name               string    `json:"name"`
 	Save               bool      `json:"save"`
 	Type               string    `json:"type"`
