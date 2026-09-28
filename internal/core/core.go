@@ -4,7 +4,6 @@ package core
 import (
 	"context"
 	_ "embed"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -399,6 +398,16 @@ func (p *Core) Close() {
 	<-p.done
 }
 
+// rtmpStreamKeys returns the AIOZ stream key resolver of the RTMP servers,
+// or nil without a database, where they publish to the URL path as upstream
+// mediamtx does.
+func (p *Core) rtmpStreamKeys() rtmp.StreamKeys {
+	if database.DB == nil {
+		return nil
+	}
+	return rtmp.NewAIOZStreamKeys(database.DB, database.RedisIdDb, conf.IdentityServer)
+}
+
 // Wait waits for the Core to exit.
 func (p *Core) Wait() {
 	<-p.done
@@ -653,9 +662,6 @@ func (p *Core) createResources(initial bool) error {
 		}
 		p.retryUploader.Initialize()
 		p.Log(logger.Info, "retry uploader initialized successfully")
-	} else if p.retryUploader == nil {
-		p.Log(logger.Warn, "retry uploader not initialized: gRPC client is nil")
-		panic(errors.New("retry services not init"))
 	}
 
 	if currentConf.Playback &&
@@ -689,7 +695,7 @@ func (p *Core) createResources(initial bool) error {
 				Endpoint:           currentConf.S3Endpoint,
 				Bucket:             currentConf.S3Bucket,
 				Region:             currentConf.S3Region,
-				AccessKeyID:        currentConf.S3AccessKeyId,
+				AccessKeyID:        currentConf.S3AccessKeyID,
 				SecretAccessKey:    currentConf.S3SecretAccessKey,
 				DePINIdentityDir:   currentConf.DePINIdentityDir,
 				DePINCoordPeerURL:  currentConf.DePINCoordPeerURL,
@@ -826,22 +832,25 @@ func (p *Core) createResources(initial bool) error {
 			currentConf.RTMPEncryption == conf.EncryptionOptional) &&
 		p.rtmpServer == nil {
 		i := &rtmp.Server{
-			Address:             currentConf.RTMPAddress,
-			DumpPackets:         currentConf.DumpPackets,
-			ReadTimeout:         currentConf.ReadTimeout,
-			WriteTimeout:        currentConf.WriteTimeout,
-			Encryption:          false,
-			ServerCert:          "",
-			ServerKey:           "",
-			RTSPAddress:         currentConf.RTSPAddress,
-			TrustedProxies:      currentConf.RTMPTrustedProxies,
-			RunOnConnect:        currentConf.RunOnConnect,
-			RunOnConnectRestart: currentConf.RunOnConnectRestart,
-			RunOnDisconnect:     currentConf.RunOnDisconnect,
-			ExternalCmdPool:     p.externalCmdPool,
-			Metrics:             p.metrics,
-			PathManager:         p.pathManager,
-			Parent:              p,
+			Address:               currentConf.RTMPAddress,
+			DumpPackets:           currentConf.DumpPackets,
+			ReadTimeout:           currentConf.ReadTimeout,
+			WriteTimeout:          currentConf.WriteTimeout,
+			Encryption:            false,
+			ServerCert:            "",
+			ServerKey:             "",
+			RTSPAddress:           currentConf.RTSPAddress,
+			TrustedProxies:        currentConf.RTMPTrustedProxies,
+			RunOnConnect:          currentConf.RunOnConnect,
+			RunOnConnectRestart:   currentConf.RunOnConnectRestart,
+			RunOnDisconnect:       currentConf.RunOnDisconnect,
+			ExternalCmdPool:       p.externalCmdPool,
+			Metrics:               p.metrics,
+			PathManager:           p.pathManager,
+			Parent:                p,
+			StreamKeys:            p.rtmpStreamKeys(),
+			PublishWebhook:        currentConf.RTMPPublishWebhook,
+			PublishWebhookTimeout: currentConf.RTMPPublishWebhookTimeout,
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -855,22 +864,25 @@ func (p *Core) createResources(initial bool) error {
 			currentConf.RTMPEncryption == conf.EncryptionOptional) &&
 		p.rtmpsServer == nil {
 		i := &rtmp.Server{
-			Address:             currentConf.RTMPSAddress,
-			ReadTimeout:         currentConf.ReadTimeout,
-			WriteTimeout:        currentConf.WriteTimeout,
-			Encryption:          true,
-			ServerCert:          currentConf.RTMPServerCert,
-			ServerKey:           currentConf.RTMPServerKey,
-			DumpPackets:         currentConf.DumpPackets,
-			RTSPAddress:         currentConf.RTSPAddress,
-			TrustedProxies:      currentConf.RTMPTrustedProxies,
-			RunOnConnect:        currentConf.RunOnConnect,
-			RunOnConnectRestart: currentConf.RunOnConnectRestart,
-			RunOnDisconnect:     currentConf.RunOnDisconnect,
-			ExternalCmdPool:     p.externalCmdPool,
-			Metrics:             p.metrics,
-			PathManager:         p.pathManager,
-			Parent:              p,
+			Address:               currentConf.RTMPSAddress,
+			ReadTimeout:           currentConf.ReadTimeout,
+			WriteTimeout:          currentConf.WriteTimeout,
+			Encryption:            true,
+			ServerCert:            currentConf.RTMPServerCert,
+			ServerKey:             currentConf.RTMPServerKey,
+			DumpPackets:           currentConf.DumpPackets,
+			RTSPAddress:           currentConf.RTSPAddress,
+			TrustedProxies:        currentConf.RTMPTrustedProxies,
+			RunOnConnect:          currentConf.RunOnConnect,
+			RunOnConnectRestart:   currentConf.RunOnConnectRestart,
+			RunOnDisconnect:       currentConf.RunOnDisconnect,
+			ExternalCmdPool:       p.externalCmdPool,
+			Metrics:               p.metrics,
+			PathManager:           p.pathManager,
+			Parent:                p,
+			StreamKeys:            p.rtmpStreamKeys(),
+			PublishWebhook:        currentConf.RTMPPublishWebhook,
+			PublishWebhookTimeout: currentConf.RTMPPublishWebhookTimeout,
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -905,7 +917,7 @@ func (p *Core) createResources(initial bool) error {
 					Endpoint:               currentConf.S3Endpoint,
 					Bucket:                 currentConf.S3Bucket,
 					Region:                 currentConf.S3Region,
-					AccessKeyID:            currentConf.S3AccessKeyId,
+					AccessKeyID:            currentConf.S3AccessKeyID,
 					SecretAccessKey:        currentConf.S3SecretAccessKey,
 					DePINIdentityDir:       currentConf.DePINIdentityDir,
 					DePINCoordPeerURL:      currentConf.DePINCoordPeerURL,
@@ -1214,6 +1226,8 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 
 	closeRTMPServer := newConf == nil ||
 		newConf.RTMP != currentConf.RTMP ||
+		newConf.RTMPPublishWebhook != currentConf.RTMPPublishWebhook ||
+		newConf.RTMPPublishWebhookTimeout != currentConf.RTMPPublishWebhookTimeout ||
 		newConf.RTMPEncryption != currentConf.RTMPEncryption ||
 		newConf.RTMPAddress != currentConf.RTMPAddress ||
 		newConf.DumpPackets != currentConf.DumpPackets ||
@@ -1230,6 +1244,8 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 
 	closeRTMPSServer := newConf == nil ||
 		newConf.RTMP != currentConf.RTMP ||
+		newConf.RTMPPublishWebhook != currentConf.RTMPPublishWebhook ||
+		newConf.RTMPPublishWebhookTimeout != currentConf.RTMPPublishWebhookTimeout ||
 		newConf.RTMPEncryption != currentConf.RTMPEncryption ||
 		newConf.RTMPSAddress != currentConf.RTMPSAddress ||
 		newConf.DumpPackets != currentConf.DumpPackets ||
@@ -1265,7 +1281,7 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 		newConf.S3Endpoint != currentConf.S3Endpoint ||
 		newConf.S3Bucket != currentConf.S3Bucket ||
 		newConf.S3Region != currentConf.S3Region ||
-		newConf.S3AccessKeyId != currentConf.S3AccessKeyId ||
+		newConf.S3AccessKeyID != currentConf.S3AccessKeyID ||
 		newConf.S3SecretAccessKey != currentConf.S3SecretAccessKey ||
 		newConf.S3Prefix != currentConf.S3Prefix ||
 		newConf.ReadTimeout != currentConf.ReadTimeout ||

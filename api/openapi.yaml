@@ -374,6 +374,22 @@ components:
           deprecated: true
           items:
             $ref: "#/components/schemas/RTSPAuthMethod"
+        cdnBusinessAddress:
+          type: string
+        cdnEndpoint:
+          type: string
+          description: CDN storage settings (used when storageProvider == "cdn")
+        cdnHubUrl:
+          type: string
+        depinCoordPeerUrl:
+          type: string
+        depinIdentityDir:
+          type: string
+          description: DePIN go-sdk storage settings (used when storageProvider == "depin")
+        depinLinkEndpoint:
+          type: string
+        depinPieceKeyPath:
+          type: string
         dumpPackets:
           type: boolean
         encryption:
@@ -386,6 +402,9 @@ components:
           type: string
           nullable: true
           deprecated: true
+        grpcAddress:
+          type: string
+          description: GRPC
         hls:
           type: boolean
           description: HLS server
@@ -409,6 +428,8 @@ components:
           type: boolean
           nullable: true
           deprecated: true
+        hlsDvrEnabled:
+          type: boolean
         hlsEncryption:
           type: boolean
         hlsMuxerCloseAfter:
@@ -432,6 +453,8 @@ components:
             type: string
         hlsVariant:
           $ref: "#/components/schemas/HLSVariant"
+        identityServer:
+          type: string
         logDestinations:
           type: array
           items:
@@ -532,6 +555,16 @@ components:
           type: array
           items:
             type: string
+        postgresDbName:
+          type: string
+        postgresHost:
+          type: string
+        postgresPassword:
+          type: string
+        postgresPort:
+          type: string
+        postgresUser:
+          type: string
         pprof:
           type: boolean
           description: PPROF
@@ -599,6 +632,21 @@ components:
           type: string
           nullable: true
           deprecated: true
+        redisConnidDb:
+          type: integer
+          format: int64
+        redisHost:
+          type: string
+        redisPassword:
+          type: string
+        redisPort:
+          type: string
+        redisTTLHours:
+          type: integer
+          format: int64
+        redisUuidDb:
+          type: integer
+          format: int64
         rtcpAddress:
           type: string
         rtmp:
@@ -612,6 +660,11 @@ components:
           deprecated: true
         rtmpEncryption:
           $ref: "#/components/schemas/Encryption"
+        rtmpPublishWebhook:
+          type: string
+          description: "RTMPPublishWebhook is requested (HTTP GET) while an RTMP client publishes, after it is authenticated and before the publish is accepted. $VARIABLES are expanded: MTX_CONN_TYPE, MTX_CONN_ID, MTX_PATH, AIOZ_StreamKey, then the process environment. Anything but a 2xx answer within RTMPPublishWebhookTimeout refuses the publish, so a stream the API did not register (and cannot bill) never goes live."
+        rtmpPublishWebhookTimeout:
+          type: string
         rtmpServerCert:
           type: string
         rtmpServerKey:
@@ -668,6 +721,21 @@ components:
           type: boolean
         runOnDisconnect:
           type: string
+        s3AccessKeyId:
+          type: string
+        s3Bucket:
+          type: string
+        s3Endpoint:
+          type: string
+        s3Prefix:
+          type: string
+        s3Region:
+          type: string
+        s3SecretAccessKey:
+          type: string
+        secondCalculate:
+          type: integer
+          format: int64
         srt:
           type: boolean
           description: SRT server
@@ -677,6 +745,9 @@ components:
           type: string
         srtpAddress:
           type: string
+        storageProvider:
+          type: string
+          description: Storage Provider
         sysLogPrefix:
           type: string
         udpMaxPayloadSize:
@@ -685,6 +756,9 @@ components:
         udpReadBufferSize:
           type: integer
           format: uint64
+        webhookAddress:
+          type: string
+          description: Webhooks
         webrtc:
           type: boolean
           description: WebRTC server
@@ -980,6 +1054,26 @@ components:
           description: Forward
           items:
             $ref: "#/components/schemas/PathConfForwardDest"
+        hlsTranscoding:
+          type: boolean
+          description: HLS Transcoding
+        hlsTranscodingAudioCodec:
+          type: string
+        hlsTranscodingInputProtocol:
+          type: string
+        hlsTranscodingPreset:
+          type: string
+        hlsTranscodingRenditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/HLSTranscodingRendition"
+        hlsTranscodingVideoCodec:
+          type: string
+        hostname:
+          type: string
+          description: General
+        isRunMulticast:
+          type: boolean
         maxReaders:
           type: integer
           format: int64
@@ -1251,7 +1345,6 @@ components:
           type: string
         source:
           type: string
-          description: General
         sourceAnyPortEnable:
           type: boolean
           nullable: true
@@ -1911,6 +2004,9 @@ components:
           type: string
         state:
           $ref: "#/components/schemas/RTMPConnState"
+        streamKey:
+          type: string
+          description: StreamKey is the AIOZ stream key a publisher authenticated with; empty for readers. aioz-stream reads it to tie a connection to its key.
         user:
           type: string
         userAgent:

@@ -77,7 +77,11 @@ type PathAddPublisherReq struct {
 	ReplaceNTP    bool
 	ConfToCompare *conf.Path
 	AccessRequest PathAccessRequest
-	Res           chan PathAddPublisherRes
+	// StreamKey is the AIOZ stream key the publisher authenticated with. The
+	// path takes it before it becomes available, so the HLS uploader and the
+	// AIOZ_StreamKey hook variable see it from the first segment on.
+	StreamKey string
+	Res       chan PathAddPublisherRes
 }
 
 // PathRemovePublisherReq contains arguments of RemovePublisher().

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -13,87 +12,15 @@ import (
 	"github.com/bluenviron/gortmplib"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/database"
-	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp"
 	"github.com/bluenviron/mediamtx/internal/stream"
-)
-
-func (c *conn) pathNameAndQuery(inURL *url.URL, isPublish bool, listStreamKey *map[string]bool) (string, url.Values, string, string, error) {
-	tmp := strings.TrimRight(inURL.String(), "/")
-	ur, _ := url.Parse(tmp)
-	pathName := strings.TrimLeft(ur.Path, "/")
-
-	if !isPublish {
-		return pathName, ur.Query(), ur.RawQuery, "", nil
-	}
-
-	streamKeyStr := pathName
-	if idx := strings.LastIndex(pathName, "/"); idx != -1 {
-		streamKeyStr = pathName[idx+1:]
-	}
-
-	if listStreamKey != nil && (*listStreamKey)[streamKeyStr] {
-		return "", nil, "", "", errors.New("this streamkey is streaming")
-	}
-
-	if streamKeyStr == "" {
-		return "", nil, "", "", errors.New("invalid path name")
-	}
-	uuidPathName, err := uuid.Parse(streamKeyStr)
-	if err != nil {
-		return "", nil, "", "", errors.New("invalid path name")
-	}
-
-	videoStreaming, err := c.livestreamVideoRepo.GetStreamMediaAvaialbleByStreamKey(uuidPathName)
-	if err != nil && err != gorm.ErrRecordNotFound {
-		return "", nil, "", "", errors.New("something went wrong")
-	}
-
-	if err == gorm.ErrRecordNotFound { // stream directly without create stream session
-
-		streamKey := c.livestreamVideoRepo.GetStreamKeyExist(uuidPathName)
-		if streamKey == uuid.Nil {
-			return "", nil, "", "", errors.New("invalid path name")
-		}
-
-		newStreamID := uuid.New()
-
-		return newStreamID.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
-	}
-
-	if videoStreaming.Status == "streaming" {
-		value, _ := database.RedisIdDb.Get(c.ctx, videoStreaming.Id.String()).Result()
-		if value != "" {
-			// If Redis says this server is streaming it, but listStreamKey does not have it,
-			// then the previous session on this server crashed or was terminated without clean disconnect.
-			if value == conf.IdentityServer && (listStreamKey == nil || !(*listStreamKey)[streamKeyStr]) {
-				_ = database.RedisIdDb.Del(c.ctx, videoStreaming.Id.String()).Err()
-				_ = c.livestreamVideoRepo.UpdateStreamMediaStatus(videoStreaming.Id, "ended")
-
-				newStreamID := uuid.New()
-				return newStreamID.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
-			}
-			return "", nil, "", "", errors.New("this streamkey is streaming")
-		}
-	}
-
-	return videoStreaming.Id.String(), ur.Query(), ur.RawQuery, streamKeyStr, nil
-}
-
-type connState int
-
-const (
-	connStateRead connState = iota + 1
-	connStatePublish
 )
 
 type conn struct {
@@ -110,7 +37,6 @@ type conn struct {
 	externalCmdPool     *externalcmd.Pool
 	pathManager         serverPathManager
 	parent              *Server
-	livestreamVideoRepo *repository.LiveStreamVideoRepository
 
 	ctx       context.Context
 	ctxCancel func()
@@ -120,6 +46,7 @@ type conn struct {
 	rconn     *gortmplib.ServerConn
 	state     defs.APIRTMPConnState
 	pathName  string
+	streamKey string
 	query     string
 	user      string
 	userAgent string
@@ -128,7 +55,6 @@ type conn struct {
 
 func (c *conn) initialize() {
 	c.ctx, c.ctxCancel = context.WithCancel(c.parentCtx)
-	c.livestreamVideoRepo = repository.NewLiveStreamVideoRepository(database.DB)
 
 	c.uuid = uuid.New()
 	c.created = time.Now()
@@ -320,6 +246,27 @@ func (c *conn) runPublish() error {
 	pathName := strings.TrimLeft(c.rconn.URL.Path, "/")
 	query := c.rconn.URL.Query()
 
+	var target *PublishTarget
+
+	if c.parent.StreamKeys != nil {
+		var err error
+		target, err = c.parent.StreamKeys.ResolvePublish(c.ctx, c.rconn.URL, c.parent.isStreamKeyPublishing)
+		if err != nil {
+			c.rconn.RejectAction() //nolint:errcheck
+			return err
+		}
+
+		// ResolvePublish only saw that the key was free; two publishers can
+		// both get that far, and the claim lets exactly one through.
+		if !c.parent.claimStreamKey(target.StreamKey) {
+			c.rconn.RejectAction() //nolint:errcheck
+			return errStreamKeyPublishing
+		}
+		defer c.parent.releaseStreamKey(target.StreamKey)
+
+		pathName = target.PathName
+	}
+
 	res1, err := c.pathManager.FindPathConf(defs.PathFindPathConfReq{
 		Author: c,
 		AccessRequest: defs.PathAccessRequest{
@@ -348,6 +295,25 @@ func (c *conn) runPublish() error {
 		return err
 	}
 
+	if c.parent.PublishWebhook != "" {
+		// The API reads the connection back through the control API while it
+		// handles the webhook, so the path and key must be visible first.
+		c.mutex.Lock()
+		c.pathName = pathName
+		c.streamKey = target.streamKey()
+		c.mutex.Unlock()
+
+		err = c.callPublishWebhook(pathName, target.streamKey())
+		if err != nil {
+			c.rconn.RejectAction() //nolint:errcheck
+			return err
+		}
+
+		// The webhook may have used most of the read deadline set before the
+		// handshake; the tracks are read next.
+		c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
+	}
+
 	err = c.rconn.AcceptAction()
 	if err != nil {
 		return err
@@ -368,6 +334,15 @@ func (c *conn) runPublish() error {
 		return err
 	}
 
+	// An audio stream key publishes its audio alone, whatever the encoder
+	// sends.
+	if target != nil && target.KeyType == liveStreamKeyTypeAudio {
+		medias, err = dropVideo(r, medias)
+		if err != nil {
+			return err
+		}
+	}
+
 	res2, err := c.pathManager.AddPublisher(defs.PathAddPublisherReq{
 		Author:        c,
 		Desc:          &description.Session{Medias: medias},
@@ -380,6 +355,7 @@ func (c *conn) runPublish() error {
 			Publish:  true,
 			SkipAuth: true,
 		},
+		StreamKey: target.streamKey(),
 	})
 	if err != nil {
 		return err
@@ -392,9 +368,34 @@ func (c *conn) runPublish() error {
 	c.mutex.Lock()
 	c.state = defs.APIRTMPConnStatePublish
 	c.pathName = pathName
+	c.streamKey = target.streamKey()
 	c.query = c.rconn.URL.RawQuery
 	c.user = res1.User
 	c.mutex.Unlock()
+
+	if target != nil {
+		mediaID, err2 := uuid.Parse(target.PathName)
+		if err2 != nil {
+			return err2
+		}
+
+		stats := &publishStatistics{
+			mediaID:       mediaID,
+			bytesReceived: c.rconn.BytesReceived,
+			repo:          c.parent.StreamKeys.Statistics(),
+			parent:        c,
+		}
+		statsCtx, statsCancel := context.WithCancel(c.ctx)
+		statsDone := make(chan struct{})
+		go func() {
+			defer close(statsDone)
+			stats.run(statsCtx, subStream.Stream, medias)
+		}()
+		defer func() {
+			statsCancel()
+			<-statsDone
+		}()
+	}
 
 	c.nconn.SetWriteDeadline(time.Time{})
 
@@ -464,5 +465,6 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		BytesReceived:           bytesReceived,
 		BytesSent:               bytesSent,
 		OutboundFramesDiscarded: outboundFramesDiscarded,
+		StreamKey:               c.streamKey,
 	}
 }
