@@ -300,6 +300,21 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		}
 
 		if shouldRenderABRMaster(dir, pathConf) {
+			sx := &session{
+				remoteAddr:      httpp.RemoteAddr(ctx),
+				pathName:        dir,
+				externalCmdPool: s.parent.ExternalCmdPool,
+				pathManager:     s.pathManager,
+				server:          s.parent,
+			}
+			if err := sx.initialize(ctx); err != nil {
+				if s.handleAuthError(ctx, err) {
+					return
+				}
+				s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
+				return
+			}
+
 			var mi *muxerInstance
 			mux, err := s.parent.getMuxer(serverGetMuxerReq{
 				path:           dir,
@@ -315,6 +330,16 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			if mi != nil {
 				hasAudio = mi.hasAudio()
 			}
+
+			http.SetCookie(ctx.Writer, &http.Cookie{
+				Name:        sessionCookieName,
+				Value:       sx.secret.String(),
+				Path:        "/" + dir + "/",
+				SameSite:    http.SameSiteNoneMode,
+				Secure:      s.encryption,
+				Partitioned: true,
+				HttpOnly:    true,
+			})
 
 			ctx.Header("Cache-Control", "no-cache")
 			ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
@@ -394,7 +419,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		}
 
 		if abrChild {
-			muxer, err := s.parent.getMuxer(serverGetMuxerReq{path: dir, create: false})
+			muxer, err := s.parent.getMuxer(serverGetMuxerReq{path: abrBasePath(dir), create: false})
 			if err != nil {
 				writeABRWarmupPlaylist(ctx)
 				return
@@ -480,8 +505,12 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		}
 
 	default:
+		muxerPath := dir
+		if isABRChildPlaylistPath(dir) {
+			muxerPath = abrBasePath(dir)
+		}
 		muxer, err := s.parent.getMuxer(serverGetMuxerReq{
-			path:   dir,
+			path:   muxerPath,
 			create: false,
 		})
 		if err != nil {

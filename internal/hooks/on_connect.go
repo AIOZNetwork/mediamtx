@@ -40,6 +40,7 @@ type OnConnectParams struct {
 	ExternalCmdPool     *externalcmd.Pool
 	RunOnConnect        string
 	RunOnConnectRestart bool
+	OnConnectError      func(error)
 	RunOnDisconnect     string
 	RTSPAddress         string
 	Desc                defs.APIPathReader
@@ -70,6 +71,9 @@ func OnConnect(params OnConnectParams) func() {
 			Env:     env,
 			OnExit: func(err error) {
 				params.Logger.Log(logger.Info, "runOnConnect command exited: %v", err)
+				if params.OnConnectError != nil {
+					params.OnConnectError(err)
+				}
 			},
 		}
 		onConnectCmd.Start()

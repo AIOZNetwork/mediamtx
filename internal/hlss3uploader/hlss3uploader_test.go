@@ -18,10 +18,11 @@ import (
 )
 
 type mockProvider struct {
-	name        string
-	uploadCount int32
-	uploadErr   error
-	delay       time.Duration
+	name         string
+	uploadCount  int32
+	deletePrefix string
+	uploadErr    error
+	delay        time.Duration
 }
 
 type readableMockProvider struct {
@@ -56,11 +57,67 @@ func (m *mockProvider) UploadFile(ctx context.Context, localPath, remoteKey, con
 }
 
 func (m *mockProvider) DeleteFolder(ctx context.Context, remoteKey string) error {
+	m.deletePrefix = remoteKey
 	return nil
 }
 
 func (m *mockProvider) Close() error {
 	return nil
+}
+
+func TestHLSS3UploaderFlushAndCloseDeletesRemoteFolder(t *testing.T) {
+	provider := &mockProvider{}
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  filepath.Join(t.TempDir(), "stream1"),
+			Prefix:     "live-hls",
+			StreamName: "stream1/720",
+		},
+		provider: provider,
+		done:     make(chan struct{}),
+		taskChan: make(chan string),
+	}
+	close(uploader.done)
+
+	uploader.FlushAndClose()
+
+	if provider.deletePrefix != "live-hls/stream1/720" {
+		t.Fatalf("expected DeleteFolder prefix live-hls/stream1/720, got %q", provider.deletePrefix)
+	}
+}
+
+func TestHLSS3UploaderFlushAndCloseUploadsFinalFilesAfterClosed(t *testing.T) {
+	tmpDir := t.TempDir()
+	playlistPath := filepath.Join(tmpDir, "video0_stream.m3u8")
+	if err := os.WriteFile(playlistPath, []byte("#EXTM3U\n#EXT-X-ENDLIST\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &mockProvider{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "live-hls",
+			StreamName: "stream1/720",
+			Workers:    1,
+		},
+		provider:  provider,
+		ctx:       ctx,
+		ctxCancel: cancel,
+		done:      make(chan struct{}),
+		taskChan:  make(chan string, 10),
+	}
+	uploader.wg.Add(1)
+	go uploader.workerLoop()
+	close(uploader.done)
+
+	uploader.FlushAndClose()
+
+	if got := atomic.LoadInt32(&provider.uploadCount); got == 0 {
+		t.Fatal("expected final scan to upload playlist even after uploader is marked closed")
+	}
 }
 
 func (m *readableMockProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, string, int64, error) {
