@@ -49,6 +49,7 @@ func TestServerABRChildWithoutSession(t *testing.T) {
 		HLSTranscoding: true,
 		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
 			{Name: "720", Width: 1280, Height: 720},
+			{Name: "480", Width: 854, Height: 480},
 		},
 	}
 
@@ -63,7 +64,7 @@ func TestServerABRChildWithoutSession(t *testing.T) {
 			}
 		},
 		findPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
-			if req.AccessRequest.Name == "live" {
+			if req.AccessRequest.Name == "live" || req.AccessRequest.Name == "gone" {
 				return &defs.PathFindPathConfRes{Conf: transcoded}, nil
 			}
 			return &defs.PathFindPathConfRes{Conf: &conf.Path{}}, nil
@@ -135,25 +136,56 @@ func TestServerABRChildWithoutSession(t *testing.T) {
 		return ""
 	}
 
-	// Follow each ABR output the way a player does: its multivariant
-	// playlist, the media playlist it links, then a segment of that.
+	// Follow each ABR output the way a player does. The output is a variant
+	// of the master playlist, so its index.m3u8 is a media playlist - a
+	// master naming another master is invalid HLS and video.js rejects it -
+	// that links segments directly; then fetch a segment.
 	for _, child := range []string{"live/720", "live/original"} {
-		var mediaURI string
-		require.Eventually(t, func() bool {
-			code, body := get(child + "/index.m3u8")
-			mediaURI = firstURI(body)
-			return code == http.StatusOK && strings.HasSuffix(strings.Split(mediaURI, "?")[0], ".m3u8")
-		}, 10*time.Second, 200*time.Millisecond, "%s/index.m3u8", child)
-
 		var segmentURI string
 		require.Eventually(t, func() bool {
-			code, body := get(child + "/" + mediaURI)
+			code, body := get(child + "/index.m3u8")
 			segmentURI = firstURI(body)
 			return code == http.StatusOK && segmentURI != ""
-		}, 10*time.Second, 200*time.Millisecond, "%s/%s", child, mediaURI)
+		}, 10*time.Second, 200*time.Millisecond, "%s/index.m3u8", child)
+
+		_, body := get(child + "/index.m3u8")
+		require.Contains(t, body, "#EXT-X-TARGETDURATION", child)
+		require.NotContains(t, body, "#EXT-X-STREAM-INF", child)
+		require.NotContains(t, body, "#EXT-X-GAP", child)
 
 		code, _ := get(child + "/" + segmentURI)
 		require.Equal(t, http.StatusOK, code, "%s/%s", child, segmentURI)
+	}
+
+	// The master playlist lists every rendition while the stream is starting,
+	// then only those served here: 480 is configured but never published.
+	prevWarmup := abrRenditionWarmup
+	defer func() { abrRenditionWarmup = prevWarmup }()
+
+	abrRenditionWarmup = time.Hour
+	code, body := get("live/index.m3u8")
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, "720/index.m3u8")
+	require.Contains(t, body, "480/index.m3u8")
+
+	abrRenditionWarmup = 0
+	code, body = get("live/index.m3u8")
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, "original/index.m3u8")
+	require.Contains(t, body, "720/index.m3u8")
+	require.NotContains(t, body, "480/index.m3u8")
+
+	// live/480 is configured but not published yet: the stream is live here,
+	// so players get an empty playlist and retry.
+	code, body = get("live/480/index.m3u8")
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, "#EXT-X-MEDIA-SEQUENCE")
+
+	// "gone" is not live on this server: 404, so that a proxy in front of
+	// several servers asks the next one instead of serving an empty playlist.
+	for _, p := range []string{"gone/720/index.m3u8", "gone/720/main_stream.m3u8", "gone/original/index.m3u8"} {
+		code, _ = get(p)
+		require.Equal(t, http.StatusNotFound, code, p)
 	}
 
 	// No transcoding: a session is still required, even for a name that
@@ -162,7 +194,7 @@ func TestServerABRChildWithoutSession(t *testing.T) {
 		"cam/720/stream.m3u8",
 		"cam/stream.m3u8",
 	} {
-		code, _ := get(p)
+		code, _ = get(p)
 		require.Equal(t, http.StatusUnauthorized, code, p)
 	}
 }

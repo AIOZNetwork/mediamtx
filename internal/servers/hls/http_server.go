@@ -228,21 +228,73 @@ func (s *httpServer) abrChild(ctx *gin.Context, dir string) (muxerPath string, o
 	return dir, true, nil
 }
 
-// serveABRChild serves a file of an ABR output from its muxer. Until the
-// muxer exists - the transcoder takes a few seconds to publish a rendition -
-// playlists answer with an empty live playlist, so that players retry
-// instead of giving up.
-func (s *httpServer) serveABRChild(ctx *gin.Context, muxerPath string, fname string, isCDN bool) {
+// abrRenditionWarmup is how long after a stream starts its master playlist
+// lists every rendition, published or not: the transcoder needs a few seconds
+// to publish them, and players read the master playlist once, so a rendition
+// left out of it at the start would never be played.
+var abrRenditionWarmup = 30 * time.Second
+
+// liveABRRenditions returns the renditions the master playlist of the stream
+// at basePath lists: after abrRenditionWarmup, only those served here. A
+// rendition the transcoder lost is left out, so that new viewers do not pick
+// a variant that answers an empty playlist until the transcoder is back.
+// Viewers already on it keep reloading it and resume when it is.
+func (s *httpServer) liveABRRenditions(
+	basePath string,
+	base *muxer,
+	renditions []conf.HLSTranscodingRendition,
+) []conf.HLSTranscodingRendition {
+	if base == nil || time.Since(base.created) < abrRenditionWarmup {
+		return renditions
+	}
+
+	var live []conf.HLSTranscodingRendition
+	for _, r := range renditions {
+		_, err := s.parent.getMuxer(serverGetMuxerReq{path: basePath + "/" + r.Name, create: false})
+		if err == nil {
+			live = append(live, r)
+		}
+	}
+	return live
+}
+
+// serveABRChild serves a file of an ABR output of the stream at basePath
+// from its muxer.
+//
+// Each output is a variant of the master playlist, so its index.m3u8 is its
+// video media playlist - a master cannot name another master, which video.js
+// does not accept - and the audio comes from the master's audio group.
+//
+// While the stream is live here but an output has no media playlist yet - the
+// transcoder takes a few seconds to publish a rendition, and a muxer a segment
+// to write one - playlists answer with an empty live playlist, so that players
+// retry instead of stopping on a 404. When the stream is not live here at all
+// the answer is 404, so that a proxy in front of several servers (HAProxy
+// retries on 404) asks the one that has it.
+func (s *httpServer) serveABRChild(ctx *gin.Context, basePath string, muxerPath string, fname string, isCDN bool) {
 	isPlaylist := strings.HasSuffix(fname, ".m3u8")
 
 	muxer, err := s.parent.getMuxer(serverGetMuxerReq{path: muxerPath, create: false})
 	if err != nil {
-		if isPlaylist {
-			writeABRWarmupPlaylist(ctx)
-			return
+		if isPlaylist && muxerPath != basePath {
+			if _, err2 := s.parent.getMuxer(serverGetMuxerReq{path: basePath, create: false}); err2 == nil {
+				writeHLSPlaceholderPlaylist(ctx)
+				return
+			}
 		}
 		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
 		return
+	}
+
+	if isPlaylist {
+		mi := muxer.getInstance()
+		if mi == nil || !mi.isMediaPlaylistReady() {
+			writeHLSPlaceholderPlaylist(ctx)
+			return
+		}
+		if fname == "index.m3u8" {
+			fname = mi.primaryVideoPlaylist()
+		}
 	}
 
 	ctx.Request.URL.Path = fname
@@ -250,18 +302,11 @@ func (s *httpServer) serveABRChild(ctx *gin.Context, muxerPath string, fname str
 	err = muxer.handleRequest(ctx, isCDN)
 	if err != nil {
 		if isPlaylist {
-			writeABRWarmupPlaylist(ctx)
+			writeHLSPlaceholderPlaylist(ctx)
 			return
 		}
 		s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 	}
-}
-
-func writeABRWarmupPlaylist(ctx *gin.Context) {
-	ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
-	ctx.Writer.WriteHeader(http.StatusOK)
-	ctx.Writer.Write([]byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"))
 }
 
 func (s *httpServer) onRequest(ctx *gin.Context) {
@@ -342,7 +387,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			return
 		}
 		if ok {
-			s.serveABRChild(ctx, muxerPath, fname, isCDN)
+			s.serveABRChild(ctx, abrBasePath(dir), muxerPath, fname, isCDN)
 			return
 		}
 	}
@@ -390,7 +435,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
 			ctx.Writer.WriteHeader(http.StatusOK)
 			ctx.Writer.Write(renderABRMasterPlaylist(
-				masterPlaylistRenditions(pathConf, mi),
+				s.liveABRRenditions(dir, mux, masterPlaylistRenditions(pathConf, mi)),
 				codecStringForTranscodedOutput(pathConf, nil),
 				hasAudio))
 			return

@@ -248,13 +248,15 @@ func TestMuxerInstanceEffectiveVariant(t *testing.T) {
 		pathName string
 		expected conf.HLSVariant
 	}{
-		{"stream1", conf.HLSVariant(gohlslib.MuxerVariantLowLatency)},                // root stream: LL-HLS
-		{"stream1/original", conf.HLSVariant(gohlslib.MuxerVariantLowLatency)},       // original: LL-HLS
-		{"stream1/video/original", conf.HLSVariant(gohlslib.MuxerVariantLowLatency)}, // video/original compat: LL-HLS
-		{"stream1/1080", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},                 // transcoded 1080: fMP4 segments
-		{"stream1/720", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},                  // transcoded 720: fMP4 segments
-		{"stream1/480", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},                  // transcoded 480: fMP4 segments
-		{"stream1/video/1080", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},           // video/1080 compat: fMP4 segments
+		// The source is a variant of the ABR master like the renditions, and
+		// LL-HLS gap segments break video.js: fMP4 everywhere.
+		{"stream1", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},                // root stream
+		{"stream1/original", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},       // original
+		{"stream1/video/original", conf.HLSVariant(gohlslib.MuxerVariantFMP4)}, // video/original compat
+		{"stream1/1080", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},           // transcoded 1080: fMP4 segments
+		{"stream1/720", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},            // transcoded 720: fMP4 segments
+		{"stream1/480", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},            // transcoded 480: fMP4 segments
+		{"stream1/video/1080", conf.HLSVariant(gohlslib.MuxerVariantFMP4)},     // video/1080 compat: fMP4 segments
 	} {
 		mi := &muxerInstance{
 			variant:  conf.HLSVariant(gohlslib.MuxerVariantLowLatency),

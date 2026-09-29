@@ -86,14 +86,19 @@ func isOriginalPath(pathName string) bool {
 		strings.HasSuffix(pathName, "/audio/original")
 }
 
+// effectiveVariant is the variant of this muxer.
+//
+// A transcoded stream plays through its ABR master playlist, so the source and
+// every rendition are variants of one playlist and share one variant. That is
+// never low-latency: a low-latency muxer opens every playlist with EXT-X-GAP
+// segments (gap.mp4, which iOS LL-HLS needs), and video.js does not support
+// them - it requests gap.mp4, gets 404 and stops.
 func (mi *muxerInstance) effectiveVariant() conf.HLSVariant {
 	if mi.pathConf != nil && mi.pathConf.HLSTranscoding {
-		if isABROutputPath(mi.pathName) && !isOriginalPath(mi.pathName) {
-			if mi.variant == conf.HLSVariant(gohlslib.MuxerVariantMPEGTS) {
-				return conf.HLSVariant(gohlslib.MuxerVariantMPEGTS)
-			}
-			return conf.HLSVariant(gohlslib.MuxerVariantFMP4)
+		if mi.variant == conf.HLSVariant(gohlslib.MuxerVariantMPEGTS) {
+			return conf.HLSVariant(gohlslib.MuxerVariantMPEGTS)
 		}
+		return conf.HLSVariant(gohlslib.MuxerVariantFMP4)
 	}
 	return mi.variant
 }
@@ -297,7 +302,11 @@ func (mi *muxerInstance) isMediaPlaylistReady() bool {
 
 func (mi *muxerInstance) handleRequest(ctx *gin.Context, isCDN bool) {
 	if mi.variant == conf.HLSVariant(gohlslib.MuxerVariantLowLatency) {
-		mi.hmuxer.Handle(ctx.Writer, ctx.Request)
+		// Counted like the other variants: the API bills from bytesSent.
+		mi.hmuxer.Handle(&responseWriterCounter{
+			ResponseWriter: ctx.Writer,
+			bytesSent:      mi.bytesSent,
+		}, ctx.Request)
 		return
 	}
 
