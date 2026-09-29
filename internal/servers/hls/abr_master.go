@@ -116,6 +116,18 @@ func isConfiguredABRChildPath(pathName string, pathConf *conf.Path) bool {
 	return false
 }
 
+// isABRSourceChild reports whether pathName names the source rendition of an
+// ABR stream ("original", legacy "main", "video/source", "audio/main"). The
+// transcoder does not publish it: the base path's own muxer serves it.
+func isABRSourceChild(pathName string) bool {
+	basePath := abrBasePath(pathName)
+	switch strings.TrimPrefix(pathName[len(basePath):], "/") {
+	case "original", "main", "video/source", "audio/main":
+		return true
+	}
+	return false
+}
+
 func abrChildRenditionName(pathName string) (string, bool) {
 	if !isABRChildPlaylistPath(pathName) {
 		return "", false

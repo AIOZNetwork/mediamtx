@@ -197,6 +197,66 @@ func (s *httpServer) handleAuthError(ctx *gin.Context, err error) bool {
 	return false
 }
 
+// abrChild resolves a request for an output of an ABR stream: a rendition the
+// transcoder publishes (<path>/720) or the source (<path>/original). It
+// returns the path of the muxer that serves it - the rendition's own, or the
+// base path's for the source. ok is false for anything else, including a path
+// that only looks like a rendition on a path without transcoding.
+//
+// ABR outputs are served without HLS sessions. The master playlist that links
+// them is rendered here, not by a muxer, so there is no session to carry into
+// their URIs, and a session-bound media playlist or segment would answer 401.
+// Read access is checked on every request instead, and the muxer still counts
+// the bytes it serves.
+func (s *httpServer) abrChild(ctx *gin.Context, dir string) (muxerPath string, ok bool, err error) {
+	if !isABRChildPlaylistPath(dir) {
+		return "", false, nil
+	}
+
+	pathConf, _, err := s.findPathConf(ctx, dir)
+	if err != nil {
+		return "", false, err
+	}
+
+	if !isConfiguredABRChildPath(dir, pathConf) {
+		return "", false, nil
+	}
+
+	if isABRSourceChild(dir) {
+		return abrBasePath(dir), true, nil
+	}
+	return dir, true, nil
+}
+
+// serveABRChild serves a file of an ABR output from its muxer. Until the
+// muxer exists - the transcoder takes a few seconds to publish a rendition -
+// playlists answer with an empty live playlist, so that players retry
+// instead of giving up.
+func (s *httpServer) serveABRChild(ctx *gin.Context, muxerPath string, fname string, isCDN bool) {
+	isPlaylist := strings.HasSuffix(fname, ".m3u8")
+
+	muxer, err := s.parent.getMuxer(serverGetMuxerReq{path: muxerPath, create: false})
+	if err != nil {
+		if isPlaylist {
+			writeABRWarmupPlaylist(ctx)
+			return
+		}
+		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+		return
+	}
+
+	ctx.Request.URL.Path = fname
+
+	err = muxer.handleRequest(ctx, isCDN)
+	if err != nil {
+		if isPlaylist {
+			writeABRWarmupPlaylist(ctx)
+			return
+		}
+		s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
+	}
+}
+
 func writeABRWarmupPlaylist(ctx *gin.Context) {
 	ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 	ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
@@ -276,6 +336,17 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	isCDN := (s.cdnSecret != "" && ctx.Request.Header.Get("Authorization") == "Bearer "+s.cdnSecret)
 
+	if contentTyp != index {
+		muxerPath, ok, err := s.abrChild(ctx, dir)
+		if err != nil && s.handleAuthError(ctx, err) {
+			return
+		}
+		if ok {
+			s.serveABRChild(ctx, muxerPath, fname, isCDN)
+			return
+		}
+	}
+
 	switch contentTyp {
 	case index:
 		_, _, err := s.findPathConf(ctx, dir)
@@ -293,10 +364,9 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		ctx.Writer.Write(hlsIndex)
 
 	case multivariantPlaylist:
-		pathConf, abrChild, err := s.findPathConf(ctx, dir)
+		pathConf, _, err := s.findPathConf(ctx, dir)
 		if err != nil {
 			pathConf = nil
-			abrChild = isABRChildPlaylistPath(dir)
 		}
 
 		if shouldRenderABRMaster(dir, pathConf) {
@@ -389,19 +459,6 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			err = sx.muxer.handleRequest(ctx, isCDN)
 			if err != nil {
 				s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
-			}
-			return
-		}
-
-		if abrChild {
-			muxer, err := s.parent.getMuxer(serverGetMuxerReq{path: dir, create: false})
-			if err != nil {
-				writeABRWarmupPlaylist(ctx)
-				return
-			}
-			ctx.Request.URL.Path = fname
-			if err := muxer.handleRequest(ctx, false); err != nil {
-				writeABRWarmupPlaylist(ctx)
 			}
 			return
 		}
