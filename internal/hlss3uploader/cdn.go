@@ -349,7 +349,7 @@ func (h *CdnHelper) Uploads(
 		"Content-Type",
 		writer.FormDataContentType(),
 	)
-	resp, err := h.handleRequest( //nolint:bodyclose // ownership of resp.Body is returned to the caller
+	resp, err := h.handleRequest(
 		ctx,
 		req,
 		http.StatusOK,
@@ -698,7 +698,6 @@ func (h *CdnHelper) UploadRaw(
 	}, nil
 }
 
-//nolint:bodyclose // returns resp.Body to the caller; caller owns closing it.
 func (h *CdnHelper) Download(ctx context.Context, obj *Object) (
 	io.Reader, error,
 ) {
