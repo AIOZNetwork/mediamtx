@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os/exec"
 	"strconv"
@@ -77,44 +78,109 @@ func (t *FFmpegTranscoder) Log(level logger.Level, format string, args ...interf
 	t.Parent.Log(level, "[Transcoder %s] "+format, append([]interface{}{t.StreamID}, args...)...)
 }
 
+// Backoff between FFmpeg restarts: it doubles from restartMinBackoff up to
+// restartMaxBackoff, and starts over once a process has run for
+// restartStableAfter. Variables so that tests can shorten them.
+var (
+	restartMinBackoff  = 1 * time.Second
+	restartMaxBackoff  = 30 * time.Second
+	restartStableAfter = 60 * time.Second
+)
+
+// Start runs FFmpeg for the stream and keeps it running until Stop.
+//
+// FFmpeg exits on its own while the stream is still published when it falls
+// behind: the server drops frames to it ("reader is too slow") and then closes
+// its input ("too many reordered frames"), and FFmpeg stops on the broken pipe.
+// Its renditions went with it for the rest of the stream, and players kept
+// asking for them. It is now started again after a backoff, so the renditions
+// come back.
 func (t *FFmpegTranscoder) Start() error {
 	t.Log(logger.Info, "Starting FFmpeg transcoder for stream %s", t.StreamID)
-	args := t.BuildArgs()
 
-	cmd := exec.CommandContext(t.ctx, "ffmpeg", args...)
-	cmd.SysProcAttr = processGroupSysProcAttr()
-
-	stderr, err := cmd.StderrPipe()
+	cmd, stderr, err := t.startProcess()
 	if err != nil {
 		return err
 	}
 
-	if err := cmd.Start(); err != nil {
-		return err
+	done := make(chan struct{})
+	t.cmdMutex.Lock()
+	t.done = done
+	t.cmdMutex.Unlock()
+
+	go t.supervise(done, cmd, stderr)
+	return nil
+}
+
+func (t *FFmpegTranscoder) startProcess() (*exec.Cmd, io.ReadCloser, error) {
+	cmd := exec.CommandContext(t.ctx, "ffmpeg", t.BuildArgs()...)
+	cmd.SysProcAttr = processGroupSysProcAttr()
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	err = cmd.Start()
+	if err != nil {
+		return nil, nil, err
 	}
 
 	t.cmdMutex.Lock()
 	t.cmd = cmd
-	t.done = make(chan struct{})
 	t.cmdMutex.Unlock()
 
-	go func() {
-		defer close(t.done)
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			t.Log(logger.Warn, "FFmpeg: %s", scanner.Text())
+	return cmd, stderr, nil
+}
+
+// supervise waits for the running FFmpeg and restarts it until Stop.
+func (t *FFmpegTranscoder) supervise(done chan struct{}, cmd *exec.Cmd, stderr io.ReadCloser) {
+	defer close(done)
+
+	backoff := restartMinBackoff
+
+	for {
+		started := time.Now()
+
+		if cmd != nil {
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				t.Log(logger.Warn, "FFmpeg: %s", scanner.Text())
+			}
+
+			// Wait only after the scanner has read all of stderr (EOF).
+			err := cmd.Wait()
+
+			if t.ctx.Err() != nil {
+				t.Log(logger.Info, "FFmpeg transcoder stopped")
+				return
+			}
+
+			t.Log(logger.Error, "FFmpeg transcoder exited with the stream still live (%v)", err)
+
+			if time.Since(started) >= restartStableAfter {
+				backoff = restartMinBackoff
+			}
 		}
 
-		// Wait only after scanner finishes reading all stderr output (EOF)
-		err := cmd.Wait()
-		if err != nil && t.ctx.Err() == nil {
-			t.Log(logger.Error, "FFmpeg transcoder exited with error: %v", err)
-		} else {
+		t.Log(logger.Info, "restarting FFmpeg transcoder in %v", backoff)
+
+		select {
+		case <-t.ctx.Done():
 			t.Log(logger.Info, "FFmpeg transcoder stopped")
+			return
+		case <-time.After(backoff):
 		}
-	}()
 
-	return nil
+		backoff = min(backoff*2, restartMaxBackoff)
+
+		var err error
+		cmd, stderr, err = t.startProcess()
+		if err != nil {
+			t.Log(logger.Error, "unable to restart FFmpeg transcoder: %v", err)
+			cmd = nil
+		}
+	}
 }
 
 // BuildArgs builds FFmpeg arguments without starting the process.
