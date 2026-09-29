@@ -641,6 +641,8 @@ func (pa *path) doAddPublisher(req defs.PathAddPublisherReq) {
 		pa.executeRemovePublisher()
 	}
 
+	pa.streamKey = req.StreamKey
+
 	if !pa.conf.AlwaysAvailable {
 		err := pa.setAvailable(req.Author, req.AccessRequest.Query, req.Desc, req.ReplaceNTP)
 		if err != nil {
@@ -1032,8 +1034,8 @@ func (pa *path) setAvailable(
 			time.Duration(pa.hlsSegmentDuration))
 		pa.transcoder.SourceInfo = sourceInfo
 
-		if err := pa.transcoder.Start(); err != nil {
-			pa.Log(logger.Error, "failed to start transcoder: %v", err)
+		if startErr := pa.transcoder.Start(); startErr != nil {
+			pa.Log(logger.Error, "failed to start transcoder: %v", startErr)
 		}
 	}
 

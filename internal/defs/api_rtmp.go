@@ -36,6 +36,9 @@ type APIRTMPConn struct {
 	InboundBytes            uint64           `json:"inboundBytes"`
 	OutboundBytes           uint64           `json:"outboundBytes"`
 	OutboundFramesDiscarded uint64           `json:"outboundFramesDiscarded"`
+	// StreamKey is the AIOZ stream key a publisher authenticated with; empty
+	// for readers. aioz-stream reads it to tie a connection to its key.
+	StreamKey string `json:"streamKey"`
 
 	// deprecated
 	BytesReceived uint64 `json:"bytesReceived" deprecated:"true"`

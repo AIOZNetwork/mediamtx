@@ -24,11 +24,21 @@ import (
 
 // ErrPathNotFound is returned when a path is not found.
 var ErrPathNotFound = errors.New("path not found")
-var SecondCalculate = 5
-var IdentityServer string
-var RedisTTLHours = 24
-var WebhookAddress string
-var GrpcAddress string
+
+// Copies of the AIOZ settings of the loaded configuration, for code that has
+// no access to it. Load sets them.
+var (
+	// SecondCalculate is Conf.SecondCalculate.
+	SecondCalculate = 5
+	// IdentityServer is Conf.IdentityServer.
+	IdentityServer string
+	// RedisTTLHours is Conf.RedisTTLHours.
+	RedisTTLHours = 24
+	// WebhookAddress is Conf.WebhookAddress.
+	WebhookAddress string
+	// GrpcAddress is Conf.GrpcAddress.
+	GrpcAddress string
+)
 
 func sortedKeys(paths map[string]*OptionalPath) []string {
 	ret := make([]string, len(paths))
@@ -249,11 +259,19 @@ type Conf struct {
 	RedisPort      string `json:"redisPort"`
 	RedisPassword  string `json:"redisPassword"`
 	RedisTTLHours  int    `json:"redisTTLHours"`
-	RedisUuidDB    int    `json:"redisUuidDb"`
+	RedisUUIDDB    int    `json:"redisUuidDb"`
 	RedisConnidsDB int    `json:"redisConnidDb"`
 
 	// Webhooks
 	WebhookAddress string `json:"webhookAddress"`
+	// RTMPPublishWebhook is requested (HTTP GET) while an RTMP client
+	// publishes, after it is authenticated and before the publish is accepted.
+	// $VARIABLES are expanded: MTX_CONN_TYPE, MTX_CONN_ID, MTX_PATH,
+	// AIOZ_StreamKey, then the process environment. Anything but a 2xx answer
+	// within RTMPPublishWebhookTimeout refuses the publish, so a stream the API
+	// did not register (and cannot bill) never goes live.
+	RTMPPublishWebhook        string   `json:"rtmpPublishWebhook"`
+	RTMPPublishWebhookTimeout Duration `json:"rtmpPublishWebhookTimeout"`
 
 	// GRPC
 	GrpcAddress string `json:"grpcAddress"`
@@ -399,7 +417,7 @@ type Conf struct {
 	S3Endpoint        string `json:"s3Endpoint"`
 	S3Bucket          string `json:"s3Bucket"`
 	S3Region          string `json:"s3Region"`
-	S3AccessKeyId     string `json:"s3AccessKeyId"`
+	S3AccessKeyID     string `json:"s3AccessKeyId"`
 	S3SecretAccessKey string `json:"s3SecretAccessKey"`
 	S3Prefix          string `json:"s3Prefix"`
 
@@ -471,6 +489,9 @@ type Conf struct {
 }
 
 func (conf *Conf) setDefaults() {
+	// Webhooks
+	conf.RTMPPublishWebhookTimeout = 10 * Duration(time.Second)
+
 	// General
 	conf.LogLevel = LogLevel(logger.Info)
 	conf.LogDestinations = LogDestinations{LogDestination(logger.DestinationStdout)}

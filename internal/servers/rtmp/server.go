@@ -91,6 +91,13 @@ type Server struct {
 	Metrics             serverMetrics
 	PathManager         serverPathManager
 	Parent              serverParent
+	// StreamKeys, when set, maps the AIOZ stream key of a publish URL to the
+	// path it publishes under. See StreamKeys.
+	StreamKeys StreamKeys
+	// PublishWebhook, when set, is requested before a publish is accepted;
+	// see conf.Conf.RTMPPublishWebhook.
+	PublishWebhook        string
+	PublishWebhookTimeout conf.Duration
 
 	ctx       context.Context
 	ctxCancel func()
@@ -98,6 +105,11 @@ type Server struct {
 	ln        net.Listener
 	conns     map[*conn]struct{}
 	loader    *certloader.CertLoader
+
+	// AIOZ stream keys being published through this server. A key publishes
+	// once at a time; Redis covers a key published through another server.
+	streamKeysMutex sync.Mutex
+	streamKeys      map[string]struct{}
 
 	// in
 	chNewConn      chan net.Conn
@@ -331,6 +343,42 @@ outer:
 	s.ctxCancel()
 
 	s.ln.Close()
+}
+
+// isStreamKeyPublishing reports whether a stream key is being published
+// through this server.
+func (s *Server) isStreamKeyPublishing(key string) bool {
+	s.streamKeysMutex.Lock()
+	defer s.streamKeysMutex.Unlock()
+
+	_, ok := s.streamKeys[key]
+	return ok
+}
+
+// claimStreamKey marks a stream key as published through this server. It
+// reports false when the key already is, so that of two publishers racing for
+// one key exactly one wins.
+func (s *Server) claimStreamKey(key string) bool {
+	s.streamKeysMutex.Lock()
+	defer s.streamKeysMutex.Unlock()
+
+	if _, ok := s.streamKeys[key]; ok {
+		return false
+	}
+
+	if s.streamKeys == nil {
+		s.streamKeys = make(map[string]struct{})
+	}
+	s.streamKeys[key] = struct{}{}
+	return true
+}
+
+// releaseStreamKey frees a stream key claimed with claimStreamKey.
+func (s *Server) releaseStreamKey(key string) {
+	s.streamKeysMutex.Lock()
+	defer s.streamKeysMutex.Unlock()
+
+	delete(s.streamKeys, key)
 }
 
 func (s *Server) findConnByUUID(uuid uuid.UUID) *conn {

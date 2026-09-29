@@ -23,7 +23,7 @@ func MustConnectToRedis(config *conf.Conf) {
 	rdUuidDb := redis.NewClient(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%s", config.RedisHost, config.RedisPort),
 		Password: config.RedisPassword,
-		DB:       config.RedisUuidDB,
+		DB:       config.RedisUUIDDB,
 	})
 	_, err := rdUuidDb.Ping(ctx).Result()
 	if err != nil {

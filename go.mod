@@ -42,7 +42,7 @@ require (
 	github.com/quic-go/webtransport-go v0.11.0
 	github.com/stretchr/testify v1.12.1
 	github.com/wlynxg/anet v0.0.5
-	gitlab.internal/aioz-depin/go-sdk v0.0.0-20260921104014-ef2115da4a3b
+	gitlab.internal/aioz-depin/go-sdk v0.0.0-20260929023639-e852afb8bdd5
 	golang.org/x/crypto v0.55.0
 	golang.org/x/net v0.58.0
 	golang.org/x/sync v0.22.0
