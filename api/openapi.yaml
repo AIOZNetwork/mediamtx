@@ -402,9 +402,6 @@ components:
           type: string
           nullable: true
           deprecated: true
-        grpcAddress:
-          type: string
-          description: GRPC
         hls:
           type: boolean
           description: HLS server

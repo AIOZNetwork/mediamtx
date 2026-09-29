@@ -29,14 +29,12 @@ import (
 	"github.com/bluenviron/mediamtx/internal/database/repository"
 	"github.com/bluenviron/mediamtx/internal/dvr"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
-	"github.com/bluenviron/mediamtx/internal/grpc_service"
 	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/playback"
 	"github.com/bluenviron/mediamtx/internal/pprof"
 	"github.com/bluenviron/mediamtx/internal/recordcleaner"
-	"github.com/bluenviron/mediamtx/internal/retryuploader"
 	"github.com/bluenviron/mediamtx/internal/rlimit"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
 	"github.com/bluenviron/mediamtx/internal/servers/moq"
@@ -225,7 +223,6 @@ type Core struct {
 	metrics         *metrics.Metrics
 	pprof           *pprof.PPROF
 	recordCleaner   *recordcleaner.Cleaner
-	retryUploader   *retryuploader.RetryUploader
 	playbackServer  *playback.Server
 	dvrService      *dvr.Service
 	pathManager     *pathManager
@@ -375,16 +372,6 @@ func New(args []string) (*Core, bool) {
 		}
 		p.closeResources(nil)
 		return nil, false
-	}
-
-	if conf.GrpcAddress != "" {
-		_, err = grpc_service.NewW3streamClient(conf.GrpcAddress)
-		if err != nil {
-			p.Log(logger.Warn, "failed to initialize gRPC client: %v", err)
-			return nil, false
-		}
-
-		p.Log(logger.Info, "gRPC client initialized successfully at %s", conf.GrpcAddress)
 	}
 
 	go p.run()
@@ -650,18 +637,6 @@ func (p *Core) createResources(initial bool) error {
 			Parent:    p,
 		}
 		p.recordCleaner.Initialize()
-	}
-
-	if p.retryUploader == nil {
-		p.Log(logger.Info, "initializing retry uploader with delay 5m and directory ./retry")
-		p.retryUploader = &retryuploader.RetryUploader{
-			PathConfs:   currentConf.Paths,
-			Parent:      p,
-			UploadDelay: 5 * time.Minute,
-			RetryDir:    "./retry",
-		}
-		p.retryUploader.Initialize()
-		p.Log(logger.Info, "retry uploader initialized successfully")
 	}
 
 	if currentConf.Playback &&
@@ -1136,12 +1111,6 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 		p.recordCleaner.ReloadPathConfs(newConf.Paths)
 	}
 
-	closeRetryUploader := newConf == nil ||
-		closeLogger
-	if !closeRetryUploader && p.retryUploader != nil && !reflect.DeepEqual(newConf.Paths, currentConf.Paths) {
-		p.retryUploader.ReloadPathConfs(newConf.Paths)
-	}
-
 	closePlaybackServer := newConf == nil ||
 		newConf.Playback != currentConf.Playback ||
 		newConf.PlaybackAddress != currentConf.PlaybackAddress ||
@@ -1452,11 +1421,6 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 	if closeRecorderCleaner && p.recordCleaner != nil {
 		p.recordCleaner.Close()
 		p.recordCleaner = nil
-	}
-
-	if closeRetryUploader && p.retryUploader != nil {
-		p.retryUploader.Close()
-		p.retryUploader = nil
 	}
 
 	if newConf == nil && p.dvrService != nil {
