@@ -582,12 +582,8 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 		}
 
 	default:
-		muxerPath := dir
-		if isABRChildPlaylistPath(dir) {
-			muxerPath = abrBasePath(dir)
-		}
 		muxer, err := s.parent.getMuxer(serverGetMuxerReq{
-			path:   muxerPath,
+			path:   dir,
 			create: false,
 		})
 		if err != nil {
