@@ -208,17 +208,15 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 	audioAttr := ""
 	if hasAudio {
 		b.WriteString(
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"original/audio2_stream.m3u8\"\n",
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",LANGUAGE=\"und\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",URI=\"original/audio2_stream.m3u8\"\n",
 		)
 		audioAttr = "AUDIO=\"audio\","
 	}
 
-	// 1. Original quality (LL-HLS, not uploaded to provider). When source codec
-	// metadata is not available here, omit CODECS rather than advertising the
-	// normalized transcoder codec.
+	// 1. Original quality (LL-HLS, not uploaded to provider).
 	b.WriteString(fmt.Sprintf(
-		"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,%s%sCLOSED-CAPTIONS=NONE,NAME=\"original\"\n",
-		originalBandwidth, originalBandwidth, resolutionAttr, audioAttr,
+		"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,%sCODECS=\"%s\",%sCLOSED-CAPTIONS=NONE\n",
+		originalBandwidth, originalBandwidth, resolutionAttr, codecStr, audioAttr,
 	))
 	b.WriteString("original/index.m3u8\n")
 
@@ -230,8 +228,8 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 			bandwidth = defaultFallbackVideoBandwidth + sharedAudioBandwidth
 		}
 		b.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CODECS=\"%s\",%sCLOSED-CAPTIONS=NONE,NAME=\"%sp\"\n",
-			bandwidth, bandwidth, r.Width, r.Height, codecStr, audioAttr, r.Name,
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CODECS=\"%s\",%sCLOSED-CAPTIONS=NONE\n",
+			bandwidth, bandwidth, r.Width, r.Height, codecStr, audioAttr,
 		))
 		b.WriteString(r.Name)
 		b.WriteString("/index.m3u8\n")
