@@ -55,8 +55,34 @@ func TestCDNStorageProvider_Accessors(t *testing.T) {
 	require.Equal(t, "https://hub.aioz.network", p.HubURL())
 	require.Equal(t, "0x123456", p.BusinessAddress())
 	require.NotNil(t, p.Helper())
-	require.NoError(t, p.DeleteFolder(context.Background(), "live-hls/stream1"))
 	require.NoError(t, p.Close())
+}
+
+func TestCDNStorageProvider_DeleteFolder(t *testing.T) {
+	var deleted []string
+	cdnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/endFileRecord" && r.Method == http.MethodDelete {
+			deleted = append(deleted, r.URL.Query().Get("file_record_id"))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer cdnServer.Close()
+
+	p, err := NewCDNStorageProvider(cdnServer.URL, "https://hub.aioz.network", "")
+	require.NoError(t, err)
+	p.RegisterKeyFileInfo("live-hls/stream1/720/video0.m4s", "file-720", 0, 100)
+	p.RegisterKeyFileInfo("live-hls/stream1/720/video1.m4s", "file-720", 100, 100)
+	p.RegisterKeyFileInfo("live-hls/stream1/480/video0.m4s", "file-480", 0, 80)
+
+	require.NoError(t, p.DeleteFolder(context.Background(), "live-hls/stream1/720"))
+	require.Equal(t, []string{"file-720"}, deleted)
+
+	_, ok := p.getObject("live-hls/stream1/720/video0.m4s")
+	require.False(t, ok)
+	_, ok = p.getObject("live-hls/stream1/480/video0.m4s")
+	require.True(t, ok)
 }
 
 func TestCDNStorageProvider_UploadFile(t *testing.T) {

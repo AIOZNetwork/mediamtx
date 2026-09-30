@@ -77,7 +77,6 @@ func isABROutputPath(pathName string) bool {
 	return isABRChildPlaylistPath(pathName)
 }
 
-
 func abrBasePath(pathName string) string {
 	if !isABRChildPlaylistPath(pathName) {
 		return pathName
@@ -156,13 +155,10 @@ func abrChildRenditionAdvertised(pathName string, renditions []conf.HLSTranscodi
 	return false
 }
 
-
 func shouldRenderABRMaster(pathName string, pathConf *conf.Path) bool {
 	return pathConf != nil && pathConf.HLSTranscoding && len(pathConf.HLSTranscodingRenditions) > 0 &&
 		!isABROutputPath(pathName) && !isConfiguredABRChildPath(pathName, pathConf)
 }
-
-
 
 func masterPlaylistRenditions(pathConf *conf.Path, mi *muxerInstance) []conf.HLSTranscodingRendition {
 	if mi != nil && mi.hlsTranscodingRenditions != nil {
@@ -188,7 +184,6 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 	if codecStr == "" {
 		codecStr = defaultMasterCodecString
 	}
-
 
 	// Derive original bandwidth and top resolution from the highest configured rendition
 	originalBandwidth := sourceBandwidth
