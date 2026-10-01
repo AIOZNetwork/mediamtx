@@ -356,7 +356,6 @@ func New(args []string) (*Core, bool) {
 
 	if loadedConf.PostgresHost != "" && loadedConf.PostgresPort != "" {
 		database.MustConnectToDatabase(loadedConf)
-		database.MustInitLiveHLSSegmentDatabase()
 	}
 
 	if loadedConf.RedisHost != "" && loadedConf.RedisPort != "" {
