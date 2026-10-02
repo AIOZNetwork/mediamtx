@@ -371,6 +371,7 @@ type Path struct {
 	// HLS Transcoding
 	HLSTranscoding           bool                      `json:"hlsTranscoding"`
 	HLSTranscodingInputProto string                    `json:"hlsTranscodingInputProtocol"`
+	HLSTranscodingThreads    int                       `json:"hlsTranscodingThreads"`
 	HLSTranscodingRenditions []HLSTranscodingRendition `json:"hlsTranscodingRenditions"`
 	HLSTranscodingVideoCodec string                    `json:"hlsTranscodingVideoCodec"`
 	HLSTranscodingAudioCodec string                    `json:"hlsTranscodingAudioCodec"`
@@ -490,6 +491,10 @@ func (pconf *Path) validate(
 
 	if pconf.Source != "redirect" && pconf.SourceRedirect != "" {
 		return fmt.Errorf("'sourceRedirect' is useless when source is not 'redirect'")
+	}
+
+	if pconf.HLSTranscodingThreads < 0 {
+		return fmt.Errorf("'hlsTranscodingThreads' must be non-negative")
 	}
 
 	// General

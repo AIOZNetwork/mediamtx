@@ -209,9 +209,14 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		"-flags", "low_delay",
 		"-analyzeduration", "5000000",
 		"-probesize", "5000000",
+	}
+	if t.Conf.HLSTranscodingThreads > 0 {
+		args = append(args, "-threads:v", strconv.Itoa(t.Conf.HLSTranscodingThreads))
+	}
+	args = append(args,
 		"-i", sourceURL,
 		"-filter_complex", filterGraph,
-	}
+	)
 
 	videoCodec := defaultString(t.Conf.HLSTranscodingVideoCodec, defaultVideoCodec)
 	preset := defaultString(t.Conf.HLSTranscodingPreset, defaultPreset)
@@ -231,6 +236,11 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		outURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s/%s", t.rtspPort(), t.StreamID, r.Name)
 		args = append(args,
 			"-map", fmt.Sprintf("[out%s]", r.Name),
+		)
+		if t.Conf.HLSTranscodingThreads > 0 {
+			args = append(args, "-threads:v", strconv.Itoa(t.Conf.HLSTranscodingThreads))
+		}
+		args = append(args,
 			"-c:v", videoCodec,
 			"-pix_fmt", defaultPixelFormat,
 			"-b:v", r.VideoBitrate,

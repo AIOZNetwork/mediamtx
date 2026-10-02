@@ -111,6 +111,17 @@ func TestConfFromFile(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("hls transcoding threads", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"paths:\n"+
+				"  mypath:\n"+
+				"    hlsTranscodingThreads: 2\n"))
+
+		conf, _, err := Load(tmpf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, 2, conf.Paths["mypath"].HLSTranscodingThreads)
+	})
+
 	for _, ca := range []struct {
 		name   string
 		source string
@@ -491,6 +502,13 @@ func TestConfErrors(t *testing.T) {
 				"  mypath:\n" +
 				"    srtReadPassphrase: a\n",
 			`invalid 'readRTPassphrase': must be between 10 and 79 characters`,
+		},
+		{
+			"invalid hls transcoding threads",
+			"paths:\n" +
+				"  mypath:\n" +
+				"    hlsTranscodingThreads: -1\n",
+			`'hlsTranscodingThreads' must be non-negative`,
 		},
 		{
 			"all_others aliases",
