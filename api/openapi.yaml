@@ -1060,6 +1060,9 @@ components:
           type: string
         hlsTranscodingPreset:
           type: string
+        hlsTranscodingThreads:
+          type: integer
+          format: int64
         hlsTranscodingRenditions:
           type: array
           items:

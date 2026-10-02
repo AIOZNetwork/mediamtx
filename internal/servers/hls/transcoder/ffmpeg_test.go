@@ -3,6 +3,7 @@ package transcoder
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -25,7 +26,7 @@ func TestTranscoderInit(t *testing.T) {
 	}
 
 	l := &mockLogger{t: t}
-	tr := NewTranscoder(cfg, "test_stream", l, ":1935", "127.0.0.1:8554")
+	tr := NewTranscoder(cfg, "test_stream", l, ":1935", "127.0.0.1:8554", 2*time.Second)
 
 	if tr.StreamID != "test_stream" {
 		t.Errorf("expected streamID test_stream, got %s", tr.StreamID)
@@ -45,7 +46,7 @@ func TestFFmpegBuildArgsSharedAudioNestedOutputs(t *testing.T) {
 		HLSTranscodingPreset:     "veryfast",
 	}
 
-	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554")
+	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554", 2*time.Second)
 	args := strings.Join(tr.BuildArgs(), " ")
 
 	for _, expected := range []string{
@@ -66,6 +67,77 @@ func TestFFmpegBuildArgsSharedAudioNestedOutputs(t *testing.T) {
 	}
 }
 
+func TestFFmpegBuildArgsThreads(t *testing.T) {
+	baseConf := func() *conf.Path {
+		return &conf.Path{
+			HLSTranscoding: true,
+			HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
+				{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+				{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
+			},
+		}
+	}
+
+	t.Run("default omits threads", func(t *testing.T) {
+		tr := NewFFmpegTranscoder(baseConf(), "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554", 2*time.Second)
+		args := strings.Join(tr.BuildArgs(), " ")
+		if strings.Contains(args, "-threads:v") {
+			t.Fatalf("args unexpectedly contain -threads:v:\n%s", args)
+		}
+	})
+
+	t.Run("configured scopes decoder and encoders", func(t *testing.T) {
+		cfg := baseConf()
+		cfg.HLSTranscodingThreads = 2
+		tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554", 2*time.Second)
+		args := tr.BuildArgs()
+
+		threads := positions(args, "-threads:v")
+		if len(threads) != 3 {
+			t.Fatalf("expected decoder plus 2 encoder -threads:v, got %d in %v", len(threads), args)
+		}
+		for _, pos := range threads {
+			if pos+1 >= len(args) || args[pos+1] != "2" {
+				t.Fatalf("expected -threads:v 2 at position %d in %v", pos, args)
+			}
+		}
+
+		input := position(args, "-i")
+		if !(threads[0] < input) {
+			t.Fatalf("decoder -threads:v must be before -i in %v", args)
+		}
+
+		videoCodecs := positions(args, "-c:v")
+		if len(videoCodecs) != 2 {
+			t.Fatalf("expected 2 video encoders, got %d in %v", len(videoCodecs), args)
+		}
+		for i, codec := range videoCodecs {
+			if !(threads[i+1] < codec) {
+				t.Fatalf("encoder -threads:v must be before -c:v at position %d in %v", codec, args)
+			}
+		}
+	})
+}
+
+func position(args []string, needle string) int {
+	for i, arg := range args {
+		if arg == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+func positions(args []string, needle string) []int {
+	var out []int
+	for i, arg := range args {
+		if arg == needle {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 func TestFFmpegBuildArgsGOPMatchesSourceFPS(t *testing.T) {
 	cfg := &conf.Path{
 		HLSTranscoding: true,
@@ -74,13 +146,34 @@ func TestFFmpegBuildArgsGOPMatchesSourceFPS(t *testing.T) {
 		},
 	}
 
-	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554")
+	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554", 2*time.Second)
 	tr.SourceInfo = &SourceInfo{FPS: 25}
 	args := strings.Join(tr.BuildArgs(), " ")
 
 	for _, expected := range []string{
 		"fps=25.00,setpts=PTS-STARTPTS",
 		"-g 50 -keyint_min 50 -sc_threshold 0 -force_key_frames expr:gte(t,n_forced*2)",
+	} {
+		if !strings.Contains(args, expected) {
+			t.Fatalf("args missing %q:\n%s", expected, args)
+		}
+	}
+}
+
+func TestFFmpegBuildArgsGOPMatchesHLSSegmentDuration(t *testing.T) {
+	cfg := &conf.Path{
+		HLSTranscoding: true,
+		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
+			{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+		},
+	}
+
+	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554", 1500*time.Millisecond)
+	tr.SourceInfo = &SourceInfo{FPS: 30}
+	args := strings.Join(tr.BuildArgs(), " ")
+
+	for _, expected := range []string{
+		"-g 45 -keyint_min 45 -sc_threshold 0 -force_key_frames expr:gte(t,n_forced*1.5)",
 	} {
 		if !strings.Contains(args, expected) {
 			t.Fatalf("args missing %q:\n%s", expected, args)

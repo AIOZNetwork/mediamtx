@@ -861,7 +861,7 @@ func (h *CdnHelper) GetLink(ctx context.Context, obj *Object) (
 	), ticket.ExpiredAt - time.Second.Nanoseconds(), nil
 }
 
-func (c *CdnHelper) GetFileRecord(
+func (h *CdnHelper) GetFileRecord(
 	ctx context.Context,
 	fileId string,
 ) (*GetFileRecordResponse, error) {
@@ -875,38 +875,15 @@ func (c *CdnHelper) GetFileRecord(
 		)
 	}()
 
-	req, err := http.NewRequest(
-		http.MethodGet,
-		fmt.Sprintf("%s/getFileRecord/%s", c.cdnUrl, fileId),
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.handleRequest(
-		ctx,
-		req,
-		http.StatusOK,
-		3*time.Second,
-		false,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-
 	var rs GetFileRecordResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rs); err != nil {
+	if err := h.getJSON(ctx, fmt.Sprintf("%s/getFileRecord/%s", h.cdnUrl, fileId), &rs); err != nil {
 		return nil, err
 	}
 
 	return &rs, nil
 }
 
-func (c *CdnHelper) GetZipHeader(ctx context.Context, fileId string) (*zipHeader, error) {
+func (h *CdnHelper) GetZipHeader(ctx context.Context, fileId string) (*zipHeader, error) {
 	now := time.Now().UTC()
 	defer func() {
 		cdnLogger.DebugContext(
@@ -917,35 +894,27 @@ func (c *CdnHelper) GetZipHeader(ctx context.Context, fileId string) (*zipHeader
 		)
 	}()
 
-	req, err := http.NewRequest(
-		http.MethodGet,
-		fmt.Sprintf("%s/getZipHeaders/%s", c.cdnUrl, fileId),
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.handleRequest(
-		ctx,
-		req,
-		http.StatusOK,
-		3*time.Second,
-		false,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-
 	var rs zipHeader
-	if err := json.NewDecoder(resp.Body).Decode(&rs); err != nil {
+	if err := h.getJSON(ctx, fmt.Sprintf("%s/getZipHeaders/%s", h.cdnUrl, fileId), &rs); err != nil {
 		return nil, err
 	}
 
 	return &rs, nil
+}
+
+func (h *CdnHelper) getJSON(ctx context.Context, rawURL string, out any) error {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := h.handleRequest(ctx, req, http.StatusOK, 3*time.Second, false, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func (h *CdnHelper) GetTranscodeStatus(ctx context.Context, fileId string) (string, error) {
@@ -1312,7 +1281,49 @@ func (p *CDNStorageProvider) GetObject(ctx context.Context, key string) (io.Read
 }
 
 func (p *CDNStorageProvider) DeleteFolder(ctx context.Context, prefix string) error {
-	// CDN storage handles retention and lifecycle independently
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return fmt.Errorf("cdn: delete folder prefix is empty")
+	}
+	prefixWithSlash := prefix + "/"
+
+	seenFileRecords := make(map[string]struct{})
+	var deleteErrs []string
+	deleted := 0
+
+	p.keyToObj.Range(func(key, value any) bool {
+		remoteKey, ok := key.(string)
+		if !ok || (remoteKey != prefix && !strings.HasPrefix(remoteKey, prefixWithSlash)) {
+			return true
+		}
+
+		obj, ok := value.(*Object)
+		if !ok || obj == nil || strings.TrimSpace(obj.Id) == "" {
+			return true
+		}
+
+		if _, exists := seenFileRecords[obj.Id]; exists {
+			p.keyToObj.Delete(remoteKey)
+			return true
+		}
+		seenFileRecords[obj.Id] = struct{}{}
+
+		if err := p.helper.Delete(ctx, obj); err != nil {
+			deleteErrs = append(deleteErrs, fmt.Sprintf("%s: %v", obj.Id, err))
+			return true
+		}
+
+		deleted++
+		p.keyToObj.Delete(remoteKey)
+		return true
+	})
+
+	if len(deleteErrs) > 0 {
+		return fmt.Errorf("cdn: delete folder %s: %s", prefix, strings.Join(deleteErrs, "; "))
+	}
+	if deleted == 0 {
+		return fmt.Errorf("cdn: no file records found under prefix %s", prefix)
+	}
 	return nil
 }
 
@@ -1323,7 +1334,13 @@ func (p *CDNStorageProvider) Close() error {
 func NewCDNStorageProviderFromConfig(_ context.Context, cfg StorageConfig) (StorageProvider, error) {
 	cdnURL := getResolvedValue(cfg.CDNEndpoint, "MTX_CDNENDPOINT", "CDN_ENDPOINT", "CDN_URL", cfg.Endpoint)
 	hubURL := getResolvedValue(cfg.CDNHubURL, "MTX_CDNHUBURL", "CDN_HUBURL", "CDN_HUB_URL", "")
-	businessAddress := getResolvedValue(cfg.CDNBusinessAddress, "MTX_CDNBUSINESSADDRESS", "CDN_BUSINESSADDRESS", "CDN_BUSINESS_ADDRESS", "")
+	businessAddress := getResolvedValue(
+		cfg.CDNBusinessAddress,
+		"MTX_CDNBUSINESSADDRESS",
+		"CDN_BUSINESSADDRESS",
+		"CDN_BUSINESS_ADDRESS",
+		"",
+	)
 
 	return NewCDNStorageProvider(cdnURL, hubURL, businessAddress)
 }

@@ -24,7 +24,6 @@ const (
 	defaultRTMPAddress     = ":1935"
 	defaultFPS             = "30"
 	defaultPixelFormat     = "yuv420p"
-	defaultSegmentDuration = 2.0
 	defaultAudioBitrate    = "128k"
 	defaultAudioSampleRate = "48000"
 	defaultAudioChannels   = "2"
@@ -33,12 +32,13 @@ const (
 )
 
 type FFmpegTranscoder struct {
-	Conf        *conf.Path
-	StreamID    string
-	Parent      logger.Writer
-	rtmpAddress string
-	rtspAddress string
-	SourceInfo  *SourceInfo
+	Conf            *conf.Path
+	StreamID        string
+	Parent          logger.Writer
+	rtmpAddress     string
+	rtspAddress     string
+	segmentDuration time.Duration
+	SourceInfo      *SourceInfo
 
 	ctx       context.Context
 	ctxCancel context.CancelFunc
@@ -48,19 +48,23 @@ type FFmpegTranscoder struct {
 	done     chan struct{}
 }
 
-func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtmpAddress string, rtspAddress string) *FFmpegTranscoder {
+func NewFFmpegTranscoder(cfg *conf.Path, streamID string, parent logger.Writer, rtmpAddress string, rtspAddress string, segmentDuration time.Duration) *FFmpegTranscoder {
 	ctx, cancel := context.WithCancel(context.Background())
 	if strings.TrimSpace(rtmpAddress) == "" {
 		rtmpAddress = defaultRTMPAddress
 	}
+	if segmentDuration <= 0 {
+		segmentDuration = 2 * time.Second
+	}
 	return &FFmpegTranscoder{
-		Conf:        cfg,
-		StreamID:    streamID,
-		Parent:      parent,
-		rtmpAddress: rtmpAddress,
-		rtspAddress: rtspAddress,
-		ctx:         ctx,
-		ctxCancel:   cancel,
+		Conf:            cfg,
+		StreamID:        streamID,
+		Parent:          parent,
+		rtmpAddress:     rtmpAddress,
+		rtspAddress:     rtspAddress,
+		segmentDuration: segmentDuration,
+		ctx:             ctx,
+		ctxCancel:       cancel,
 	}
 }
 
@@ -192,7 +196,8 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 	if t.SourceInfo != nil && t.SourceInfo.FPS > 0 {
 		fps = fmt.Sprintf("%.2f", t.SourceInfo.FPS)
 	}
-	gopSize := gopSizeForFPS(fps)
+	segmentDurationSeconds := t.segmentDuration.Seconds()
+	gopSize := gopSizeForFPS(fps, segmentDurationSeconds)
 	filterGraph := t.videoFilterGraph(renditions, fps)
 
 	args := []string{
@@ -202,11 +207,16 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		"-err_detect", "ignore_err",
 		"-fflags", "nobuffer+fastseek+genpts+discardcorrupt",
 		"-flags", "low_delay",
-		"-analyzeduration", "500000",
-		"-probesize", "500000",
+		"-analyzeduration", "5000000",
+		"-probesize", "5000000",
+	}
+	if t.Conf.HLSTranscodingThreads > 0 {
+		args = append(args, "-threads:v", strconv.Itoa(t.Conf.HLSTranscodingThreads))
+	}
+	args = append(args,
 		"-i", sourceURL,
 		"-filter_complex", filterGraph,
-	}
+	)
 
 	videoCodec := defaultString(t.Conf.HLSTranscodingVideoCodec, defaultVideoCodec)
 	preset := defaultString(t.Conf.HLSTranscodingPreset, defaultPreset)
@@ -226,6 +236,11 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 		outURL := fmt.Sprintf("rtsp://127.0.0.1:%s/%s/%s", t.rtspPort(), t.StreamID, r.Name)
 		args = append(args,
 			"-map", fmt.Sprintf("[out%s]", r.Name),
+		)
+		if t.Conf.HLSTranscodingThreads > 0 {
+			args = append(args, "-threads:v", strconv.Itoa(t.Conf.HLSTranscodingThreads))
+		}
+		args = append(args,
 			"-c:v", videoCodec,
 			"-pix_fmt", defaultPixelFormat,
 			"-b:v", r.VideoBitrate,
@@ -234,7 +249,7 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 			"-g", gopSize,
 			"-keyint_min", gopSize,
 			"-sc_threshold", "0",
-			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%.0f)", defaultSegmentDuration),
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%s)", formatDurationSeconds(segmentDurationSeconds)),
 			"-x264-params", x264ClosedGOPParams,
 			"-map", audioMap,
 			"-c:a", audioCodec,
@@ -250,12 +265,19 @@ func (t *FFmpegTranscoder) BuildArgs() []string {
 	return args
 }
 
-func gopSizeForFPS(fps string) string {
+func gopSizeForFPS(fps string, segmentDurationSeconds float64) string {
 	v, err := strconv.ParseFloat(strings.TrimSpace(fps), 64)
 	if err != nil || v <= 0 {
 		v, _ = strconv.ParseFloat(defaultFPS, 64)
 	}
-	return strconv.Itoa(int(v*defaultSegmentDuration + 0.5))
+	if segmentDurationSeconds <= 0 {
+		segmentDurationSeconds = 2
+	}
+	return strconv.Itoa(int(v*segmentDurationSeconds + 0.5))
+}
+
+func formatDurationSeconds(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 func (t *FFmpegTranscoder) rtmpURL(parts ...string) string {
