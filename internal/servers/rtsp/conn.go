@@ -80,7 +80,7 @@ func (c *conn) initialize() {
 	c.uuid = uuid.New()
 	c.created = time.Now()
 
-	c.Log(logger.Info, "opened")
+	c.Log(logger.Info, "RTSP connection opened")
 
 	// The path associated with a RTSP connection is not known when the TCP
 	// connection opens. Start runOnConnect only after a publisher successfully
@@ -92,6 +92,8 @@ func (c *conn) maybeStartOnConnectHook(pathName string) {
 	if hooks.IsTranscoderChildPath(pathName) {
 		return
 	}
+
+	c.Log(logger.Info, "RTSP client connected for stream path '%s'", pathName)
 
 	c.onDisconnectMu.Lock()
 	defer c.onDisconnectMu.Unlock()

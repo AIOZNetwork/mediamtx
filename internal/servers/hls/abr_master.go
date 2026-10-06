@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/servers/hls/transcoder"
 )
 
 const (
@@ -108,7 +107,8 @@ func isConfiguredABRChildPath(pathName string, pathConf *conf.Path) bool {
 	}
 	// legacy: video/<renditionName>
 	for _, rendition := range pathConf.HLSTranscodingRenditions {
-		if childName == "video/"+rendition.Name || childName == rendition.Name {
+		if childName == "video/"+rendition.Name || childName == rendition.Name ||
+			strings.TrimSuffix(childName, "p") == strings.TrimSuffix(rendition.Name, "p") {
 			return true
 		}
 	}
@@ -148,7 +148,7 @@ func abrChildRenditionAdvertised(pathName string, renditions []conf.HLSTranscodi
 		return true
 	}
 	for _, r := range renditions {
-		if r.Name == name {
+		if strings.TrimSuffix(r.Name, "p") == name {
 			return true
 		}
 	}
@@ -255,7 +255,7 @@ func parseBitrate(raw string) int {
 	return v * multiplier
 }
 
-func codecStringForTranscodedOutput(pathConf *conf.Path, info *transcoder.SourceInfo) string {
+func codecStringForTranscodedOutput(pathConf *conf.Path) string {
 	videoCodec := codecLibx264
 	audioCodec := codecAAC
 	profile := ""
@@ -263,10 +263,6 @@ func codecStringForTranscodedOutput(pathConf *conf.Path, info *transcoder.Source
 	if pathConf != nil {
 		videoCodec = defaultString(pathConf.HLSTranscodingVideoCodec, videoCodec)
 		audioCodec = defaultString(pathConf.HLSTranscodingAudioCodec, audioCodec)
-	}
-	if info != nil {
-		profile = info.Profile
-		level = info.Level
 	}
 	return codecStringFromInfo(videoCodec, profile, level, audioCodec)
 }

@@ -105,31 +105,32 @@ type serverParent interface {
 
 // Server is a HLS server.
 type Server struct {
-	Address         string
-	DumpPackets     bool
-	Encryption      bool
-	ServerKey       string
-	ServerCert      string
-	AllowOrigins    []string
-	TrustedProxies  conf.IPNetworks
-	AlwaysRemux     bool
-	Variant         conf.HLSVariant
-	SegmentCount    int
-	SegmentDuration conf.Duration
-	PartDuration    conf.Duration
-	SegmentMaxSize  conf.StringSize
-	Directory       string
-	UploadConfig    *MuxerUploadConfig
-	DVRService      *dvr.Service
-	DVREnabled      bool
-	CDNSecret       string
-	ReadTimeout     conf.Duration
-	WriteTimeout    conf.Duration
-	MuxerCloseAfter conf.Duration
-	ExternalCmdPool *externalcmd.Pool
-	Metrics         serverMetrics
-	PathManager     serverPathManager
-	Parent          serverParent
+	Address                  string
+	DumpPackets              bool
+	Encryption               bool
+	ServerKey                string
+	ServerCert               string
+	AllowOrigins             []string
+	TrustedProxies           conf.IPNetworks
+	AlwaysRemux              bool
+	Variant                  conf.HLSVariant
+	SegmentCount             int
+	SegmentDuration          conf.Duration
+	PartDuration             conf.Duration
+	SegmentMaxSize           conf.StringSize
+	Directory                string
+	DVRService               *dvr.Service
+	DVREnabled               bool
+	ProviderPlayback         *ProviderPlaybackService
+	ProviderPlaybackRequired bool
+	CDNSecret                string
+	ReadTimeout              conf.Duration
+	WriteTimeout             conf.Duration
+	MuxerCloseAfter          conf.Duration
+	ExternalCmdPool          *externalcmd.Pool
+	Metrics                  serverMetrics
+	PathManager              serverPathManager
+	Parent                   serverParent
 
 	ctx        context.Context
 	ctxCancel  func()
@@ -167,18 +168,20 @@ func (s *Server) Initialize() error {
 	s.chAPISessionsKick = make(chan serverAPISessionsKickReq)
 
 	s.httpServer = &httpServer{
-		address:        s.Address,
-		dumpPackets:    s.DumpPackets,
-		encryption:     s.Encryption,
-		serverKey:      s.ServerKey,
-		serverCert:     s.ServerCert,
-		allowOrigins:   s.AllowOrigins,
-		trustedProxies: s.TrustedProxies,
-		readTimeout:    s.ReadTimeout,
-		writeTimeout:   s.WriteTimeout,
-		cdnSecret:      s.CDNSecret,
-		pathManager:    s.PathManager,
-		parent:         s,
+		address:                  s.Address,
+		dumpPackets:              s.DumpPackets,
+		encryption:               s.Encryption,
+		serverKey:                s.ServerKey,
+		serverCert:               s.ServerCert,
+		allowOrigins:             s.AllowOrigins,
+		trustedProxies:           s.TrustedProxies,
+		readTimeout:              s.ReadTimeout,
+		writeTimeout:             s.WriteTimeout,
+		cdnSecret:                s.CDNSecret,
+		providerPlayback:         s.ProviderPlayback,
+		providerPlaybackRequired: s.ProviderPlaybackRequired,
+		pathManager:              s.PathManager,
+		parent:                   s,
 	}
 	err := s.httpServer.initialize()
 	if err != nil {
@@ -357,7 +360,6 @@ func (s *Server) createMuxer(pathName string, remoteAddr string, query string) *
 		partDuration:    s.PartDuration,
 		segmentMaxSize:  s.SegmentMaxSize,
 		directory:       s.Directory,
-		uploadConfig:    s.UploadConfig,
 		wg:              &s.wg,
 		pathName:        pathName,
 		pathManager:     s.PathManager,

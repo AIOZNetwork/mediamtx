@@ -1,35 +1,24 @@
 package dvr
 
 import (
-	"context"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/models"
 )
 
 const (
-	Window                       = 2 * time.Hour
-	defaultStoragePrefix         = "live-hls"
-	defaultTargetDurationSec     = 1
-	defaultSegmentDurationSec    = 2.0
-	cacheControlNoCache          = "no-cache"
-	cacheControlImmutableSegment = "public, max-age=31536000, immutable"
-	mediaTypePlaylistM3U8        = ".m3u8"
-	mediaTypeInitKeyword         = "init"
+	Window               = 2 * time.Hour
+	mediaTypeInitKeyword = "init"
 
 	contentTypeMP4     = "video/mp4"
 	contentTypeM4S     = "video/iso.segment"
@@ -38,12 +27,10 @@ const (
 )
 
 type Service struct {
-	Config       hlss3uploader.StorageConfig
 	Repository   models.LiveHLSSegmentRepository
 	Parent       logger.Writer
 	SegmentCount int
 
-	provider hlss3uploader.StorageProvider
 	mu       sync.Mutex
 	sessions map[string]string
 	active   map[string]bool
@@ -52,23 +39,9 @@ type Service struct {
 func (s *Service) Initialize() {
 	s.sessions = make(map[string]string)
 	s.active = make(map[string]bool)
-	if s.Config.Prefix == "" {
-		s.Config.Prefix = defaultStoragePrefix
-	}
-	provider, err := hlss3uploader.NewProviderSelector().Select(context.Background(), s.Config)
-	if err != nil {
-		s.log(logger.Info, "DVR external storage disabled: %v", err)
-		return
-	}
-	s.provider = provider
-	s.log(logger.Info, "DVR storage initialized (provider: %s, bucket: %s, endpoint: %s)", provider.Name(), s.Config.Bucket, s.Config.Endpoint)
 }
 
-func (s *Service) Close() {
-	if s.provider != nil {
-		_ = s.provider.Close()
-	}
-}
+func (s *Service) Close() {}
 
 func (s *Service) StartSession(streamID string) {
 	s.mu.Lock()
@@ -300,41 +273,6 @@ func (s *Service) ServeMedia(w http.ResponseWriter, r *http.Request, streamID, s
 		}
 	}
 
-	// 2. Fallback to remote storage (Redirect Link or Proxy)
-	storageKey := ""
-	if segment != nil && segment.StorageKey != "" {
-		storageKey = segment.StorageKey
-	} else {
-		prefix := strings.Trim(s.Config.Prefix, "/")
-		if prefix == "" {
-			prefix = defaultStoragePrefix
-		}
-		storageKey = path.Join(prefix, streamID, segmentName)
-	}
-
-	if storageKey != "" && s.provider != nil {
-		// If segment has StorageETag (file UUID or CDN format), ensure provider mapping is primed
-		if segment != nil && segment.StorageETag != "" {
-			if depinProv, ok := s.provider.(*hlss3uploader.DePINStorageProvider); ok {
-				depinProv.RegisterKeyUUID(storageKey, segment.StorageETag)
-			}
-			if cdnProv, ok := s.provider.(*hlss3uploader.CDNStorageProvider); ok {
-				cdnProv.RegisterKeyETag(storageKey, segment.StorageETag)
-			}
-		}
-
-		// 1. Prioritize Direct Download / Presigned Redirect Link (HTTP 302)
-		if link, err := s.presign(r.Context(), storageKey); err == nil && link != "" {
-			http.Redirect(w, r, link, http.StatusFound)
-			return true
-		}
-
-		// 2. Fallback to proxy streaming if link generation is unavailable
-		if s.proxyStorageObject(r.Context(), w, storageKey) {
-			return true
-		}
-	}
-
 	return false
 }
 
@@ -342,47 +280,6 @@ func (s *Service) currentSessionID(streamID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessions[streamID]
-}
-
-func (s *Service) presign(ctx context.Context, remoteKey string) (string, error) {
-	if linkProv, ok := s.provider.(hlss3uploader.LinkStorageProvider); ok {
-		return linkProv.GetLink(ctx, remoteKey)
-	}
-	return "", fmt.Errorf("provider does not support presign or link generation")
-}
-
-func (s *Service) proxyStorageObject(ctx context.Context, w http.ResponseWriter, key string) bool {
-	readable, ok := s.provider.(hlss3uploader.ReadableStorageProvider)
-	if !ok {
-		return false
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	body, contentType, contentLength, err := readable.GetObject(ctx, key)
-	if err != nil {
-		return false
-	}
-	defer body.Close()
-
-	if contentType != "" {
-		w.Header().Set("Content-Type", contentType)
-	} else {
-		w.Header().Set("Content-Type", contentTypeForExt(key))
-	}
-	if contentLength >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
-	}
-
-	if strings.HasSuffix(key, mediaTypePlaylistM3U8) {
-		w.Header().Set("Cache-Control", cacheControlNoCache)
-	} else {
-		w.Header().Set("Cache-Control", cacheControlImmutableSegment)
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, body)
-	return true
 }
 
 func (s *Service) log(level logger.Level, format string, args ...interface{}) {

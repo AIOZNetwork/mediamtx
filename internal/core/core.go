@@ -30,7 +30,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/dvr"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/grpc_service"
-	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/playback"
@@ -689,22 +688,6 @@ func (p *Core) createResources(initial bool) error {
 
 	if p.dvrService == nil {
 		p.dvrService = &dvr.Service{
-			Config: hlss3uploader.StorageConfig{
-				Provider:           currentConf.StorageProvider,
-				Prefix:             currentConf.S3Prefix,
-				Endpoint:           currentConf.S3Endpoint,
-				Bucket:             currentConf.S3Bucket,
-				Region:             currentConf.S3Region,
-				AccessKeyID:        currentConf.S3AccessKeyID,
-				SecretAccessKey:    currentConf.S3SecretAccessKey,
-				DePINIdentityDir:   currentConf.DePINIdentityDir,
-				DePINCoordPeerURL:  currentConf.DePINCoordPeerURL,
-				DePINPieceKeyPath:  currentConf.DePINPieceKeyPath,
-				DePINLinkEndpoint:  currentConf.DePINLinkEndpoint,
-				CDNEndpoint:        currentConf.CDNEndpoint,
-				CDNHubURL:          currentConf.CDNHubURL,
-				CDNBusinessAddress: currentConf.CDNBusinessAddress,
-			},
 			Repository:   repository.NewLiveHLSSegmentRepository(database.DB),
 			Parent:       p,
 			SegmentCount: currentConf.HLSSegmentCount,
@@ -894,51 +877,40 @@ func (p *Core) createResources(initial bool) error {
 
 	if currentConf.HLS &&
 		p.hlsServer == nil {
+		var providerPlayback *hls.ProviderPlaybackService
+		if currentConf.HLSProviderPlayback || hlsPathProviderPlaybackEnabled(currentConf.Paths) {
+			providerPlayback = &hls.ProviderPlaybackService{
+				Repository: repository.NewProviderHLSMetadataRepository(database.DB),
+			}
+		}
+
 		i := &hls.Server{
-			Address:         currentConf.HLSAddress,
-			DumpPackets:     currentConf.DumpPackets,
-			Encryption:      currentConf.HLSEncryption,
-			ServerKey:       currentConf.HLSServerKey,
-			ServerCert:      currentConf.HLSServerCert,
-			AllowOrigins:    currentConf.HLSAllowOrigins,
-			TrustedProxies:  currentConf.HLSTrustedProxies,
-			AlwaysRemux:     currentConf.HLSAlwaysRemux,
-			Variant:         currentConf.HLSVariant,
-			SegmentCount:    currentConf.HLSSegmentCount,
-			SegmentDuration: currentConf.HLSSegmentDuration,
-			PartDuration:    currentConf.HLSPartDuration,
-			SegmentMaxSize:  currentConf.HLSSegmentMaxSize,
-			Directory:       currentConf.HLSDirectory,
-			DVRService:      p.dvrService,
-			DVREnabled:      currentConf.HLSDVREnabled,
-			UploadConfig: &hls.MuxerUploadConfig{
-				Storage: hlss3uploader.StorageConfig{
-					Provider:               currentConf.StorageProvider,
-					Prefix:                 currentConf.S3Prefix,
-					Endpoint:               currentConf.S3Endpoint,
-					Bucket:                 currentConf.S3Bucket,
-					Region:                 currentConf.S3Region,
-					AccessKeyID:            currentConf.S3AccessKeyID,
-					SecretAccessKey:        currentConf.S3SecretAccessKey,
-					DePINIdentityDir:       currentConf.DePINIdentityDir,
-					DePINCoordPeerURL:      currentConf.DePINCoordPeerURL,
-					DePINPieceKeyPath:      currentConf.DePINPieceKeyPath,
-					DePINLinkEndpoint:      currentConf.DePINLinkEndpoint,
-					CDNEndpoint:            currentConf.CDNEndpoint,
-					CDNHubURL:              currentConf.CDNHubURL,
-					CDNBusinessAddress:     currentConf.CDNBusinessAddress,
-					DeleteLocalAfterUpload: true,
-					Workers:                4,
-				},
-			},
-			CDNSecret:       currentConf.HLSCDNSecret,
-			ReadTimeout:     currentConf.ReadTimeout,
-			WriteTimeout:    currentConf.WriteTimeout,
-			MuxerCloseAfter: currentConf.HLSMuxerCloseAfter,
-			ExternalCmdPool: p.externalCmdPool,
-			Metrics:         p.metrics,
-			PathManager:     p.pathManager,
-			Parent:          p,
+			Address:                  currentConf.HLSAddress,
+			DumpPackets:              currentConf.DumpPackets,
+			Encryption:               currentConf.HLSEncryption,
+			ServerKey:                currentConf.HLSServerKey,
+			ServerCert:               currentConf.HLSServerCert,
+			AllowOrigins:             currentConf.HLSAllowOrigins,
+			TrustedProxies:           currentConf.HLSTrustedProxies,
+			AlwaysRemux:              currentConf.HLSAlwaysRemux,
+			Variant:                  currentConf.HLSVariant,
+			SegmentCount:             currentConf.HLSSegmentCount,
+			SegmentDuration:          currentConf.HLSSegmentDuration,
+			PartDuration:             currentConf.HLSPartDuration,
+			SegmentMaxSize:           currentConf.HLSSegmentMaxSize,
+			Directory:                currentConf.HLSDirectory,
+			DVRService:               p.dvrService,
+			DVREnabled:               currentConf.HLSDVREnabled,
+			ProviderPlayback:         providerPlayback,
+			ProviderPlaybackRequired: currentConf.HLSProviderPlayback,
+			CDNSecret:                currentConf.HLSCDNSecret,
+			ReadTimeout:              currentConf.ReadTimeout,
+			WriteTimeout:             currentConf.WriteTimeout,
+			MuxerCloseAfter:          currentConf.HLSMuxerCloseAfter,
+			ExternalCmdPool:          p.externalCmdPool,
+			Metrics:                  p.metrics,
+			PathManager:              p.pathManager,
+			Parent:                   p,
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -1033,28 +1005,29 @@ func (p *Core) createResources(initial bool) error {
 	if currentConf.API &&
 		p.api == nil {
 		i := &api.API{
-			Version:        string(version),
-			Started:        started,
-			Address:        currentConf.APIAddress,
-			DumpPackets:    currentConf.DumpPackets,
-			Encryption:     currentConf.APIEncryption,
-			ServerKey:      currentConf.APIServerKey,
-			ServerCert:     currentConf.APIServerCert,
-			AllowOrigins:   currentConf.APIAllowOrigins,
-			TrustedProxies: currentConf.APITrustedProxies,
-			ReadTimeout:    currentConf.ReadTimeout,
-			WriteTimeout:   currentConf.WriteTimeout,
-			AuthManager:    p.authManager,
-			PathManager:    p.pathManager,
-			RTSPServer:     p.rtspServer,
-			RTSPSServer:    p.rtspsServer,
-			RTMPServer:     p.rtmpServer,
-			RTMPSServer:    p.rtmpsServer,
-			HLSServer:      p.hlsServer,
-			WebRTCServer:   p.webRTCServer,
-			SRTServer:      p.srtServer,
-			MoQServer:      p.moqServer,
-			Parent:         p,
+			Version:                       string(version),
+			Started:                       started,
+			Address:                       currentConf.APIAddress,
+			DumpPackets:                   currentConf.DumpPackets,
+			Encryption:                    currentConf.APIEncryption,
+			ServerKey:                     currentConf.APIServerKey,
+			ServerCert:                    currentConf.APIServerCert,
+			AllowOrigins:                  currentConf.APIAllowOrigins,
+			TrustedProxies:                currentConf.APITrustedProxies,
+			ReadTimeout:                   currentConf.ReadTimeout,
+			WriteTimeout:                  currentConf.WriteTimeout,
+			AuthManager:                   p.authManager,
+			PathManager:                   p.pathManager,
+			RTSPServer:                    p.rtspServer,
+			RTSPSServer:                   p.rtspsServer,
+			RTMPServer:                    p.rtmpServer,
+			RTMPSServer:                   p.rtmpsServer,
+			HLSServer:                     p.hlsServer,
+			WebRTCServer:                  p.webRTCServer,
+			SRTServer:                     p.srtServer,
+			MoQServer:                     p.moqServer,
+			ProviderHLSMetadataRepository: repository.NewProviderHLSMetadataRepository(database.DB),
+			Parent:                        p,
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -1073,6 +1046,15 @@ func (p *Core) createResources(initial bool) error {
 	}
 
 	return nil
+}
+
+func hlsPathProviderPlaybackEnabled(paths map[string]*conf.Path) bool {
+	for _, pathConf := range paths {
+		if pathConf != nil && (pathConf.HLSPlaybackMode == "provider" || pathConf.HLSPlaybackMode == "hybrid") {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Core) closeResources(newConf *conf.Conf) {

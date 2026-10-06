@@ -209,45 +209,6 @@ func TestCodecStringFromInfoAVCAndFallback(t *testing.T) {
 	}
 }
 
-func TestShouldUploadToProvider(t *testing.T) {
-	transcodingConf := &conf.Path{
-		HLSTranscoding: true,
-		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
-			{Name: "1080", Width: 1920, Height: 1080, VideoBitrate: "6000k"},
-			{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
-			{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
-		},
-	}
-
-	for _, ca := range []struct {
-		pathName     string
-		shouldUpload bool
-	}{
-		{"stream1", false},                // root original stream: no upload
-		{"stream1/original", false},       // original: no upload (LL-HLS live only)
-		{"stream1/video/original", false}, // video/original compat: no upload
-		{"stream1/1080", true},            // transcoded 1080: upload
-		{"stream1/720", true},             // transcoded 720: upload
-		{"stream1/480", true},             // transcoded 480: upload
-		{"stream1/video/1080", true},      // video/1080 compat: upload
-	} {
-		mi := &muxerInstance{
-			pathName: ca.pathName,
-			pathConf: transcodingConf,
-		}
-		if got := mi.shouldUploadToProvider(); got != ca.shouldUpload {
-			t.Fatalf("expected shouldUploadToProvider(%q) = %v, got %v", ca.pathName, ca.shouldUpload, got)
-		}
-	}
-
-	// When transcoding is disabled, root stream uploads
-	noTranscodeConf := &conf.Path{HLSTranscoding: false}
-	mi := &muxerInstance{pathName: "stream1", pathConf: noTranscodeConf}
-	if !mi.shouldUploadToProvider() {
-		t.Fatalf("expected shouldUploadToProvider to be true when transcoding is disabled")
-	}
-}
-
 func TestMuxerInstanceEffectiveVariant(t *testing.T) {
 	transcodingConf := &conf.Path{
 		HLSTranscoding: true,

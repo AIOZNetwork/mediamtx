@@ -441,6 +441,11 @@ func (s *session) onRecord(_ *gortsplib.ServerHandlerOnRecordCtx) (*base.Respons
 
 	s.path = res.Path
 
+	s.Log(logger.Info, "is publishing to path '%s', with %s, %s",
+		s.path.Name(),
+		s.rsession.Transport().Protocol,
+		defs.MediasInfo(s.rsession.AnnouncedDescription().Medias))
+
 	return &base.Response{
 		StatusCode: base.StatusOK,
 	}, nil

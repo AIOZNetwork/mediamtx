@@ -70,7 +70,7 @@ func TestServerRunOnConnectPublisherPaths(t *testing.T) {
 		{name: "base", path: "teststream", expectHooks: true},
 		{name: "video_original_child", path: "teststream/video/original", expectHooks: false},
 		{name: "video_720_child", path: "teststream/video/720", expectHooks: false},
-		{name: "original_path", path: "teststream/original", expectHooks: true},
+		{name: "original_path", path: "teststream/original", expectHooks: false},
 		{name: "transcoded_720_child", path: "teststream/720", expectHooks: false},
 	} {
 		t.Run(ca.name, func(t *testing.T) {
@@ -83,7 +83,7 @@ func TestServerRunOnConnectPublisherPaths(t *testing.T) {
 			var disconnectedOnce sync.Once
 
 			onConnectHook = func(params hooks.OnConnectParams) func() {
-				require.Equal(t, "rtspConn", params.Desc.Type)
+				require.Equal(t, defs.APIPathReaderTypeRTSPConn, params.Desc.Type)
 				require.NotEmpty(t, params.Desc.ID)
 				connectedOnce.Do(func() { close(connected) })
 				return func() {

@@ -17,7 +17,6 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
-	"github.com/bluenviron/mediamtx/internal/hlss3uploader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/hls"
 	"github.com/bluenviron/mediamtx/internal/stream"
@@ -62,7 +61,6 @@ type muxerInstance struct {
 	partDuration             conf.Duration
 	segmentMaxSize           conf.StringSize
 	directory                string
-	uploadConfig             *MuxerUploadConfig
 	pathConf                 *conf.Path
 	hlsTranscodingRenditions []conf.HLSTranscodingRendition
 	pathName                 string
@@ -77,13 +75,6 @@ type muxerInstance struct {
 	ctxCancel func()
 	hmuxer    *gohlslib.Muxer
 	reader    *stream.Reader
-	uploader  *hlss3uploader.HLSS3Uploader
-}
-
-func isOriginalPath(pathName string) bool {
-	return strings.HasSuffix(pathName, "/original") ||
-		strings.HasSuffix(pathName, "/video/original") ||
-		strings.HasSuffix(pathName, "/audio/original")
 }
 
 // effectiveVariant is the variant of this muxer.
@@ -103,16 +94,6 @@ func (mi *muxerInstance) effectiveVariant() conf.HLSVariant {
 	return mi.variant
 }
 
-func (mi *muxerInstance) shouldUploadToProvider() bool {
-	if mi.pathConf == nil || !mi.pathConf.HLSTranscoding {
-		return true
-	}
-	if !isABROutputPath(mi.pathName) {
-		return false
-	}
-	return !isOriginalPath(mi.pathName)
-}
-
 func (mi *muxerInstance) initialize() error {
 	mi.variant = mi.effectiveVariant()
 	mi.Log(logger.Debug, "instance created")
@@ -129,14 +110,6 @@ func (mi *muxerInstance) initialize() error {
 		err = os.MkdirAll(muxerDirectory, 0o755)
 		if err != nil {
 			return err
-		}
-	}
-
-	if muxerDirectory != "" && mi.uploadConfig != nil && mi.shouldUploadToProvider() {
-		mi.uploader = mi.uploadConfig.NewUploader(muxerDirectory, mi.pathName, mi.streamKey, mi)
-		if err := mi.uploader.Initialize(); err != nil {
-			mi.Log(logger.Warn, "failed to initialize HLS uploader: %v", err)
-			mi.uploader = nil
 		}
 	}
 
@@ -203,11 +176,6 @@ func (mi *muxerInstance) run() {
 	mi.stream.RemoveReader(mi.reader)
 
 	mi.hmuxer.Close()
-
-	if mi.uploader != nil {
-		mi.uploader.FlushAndClose()
-		mi.uploader = nil
-	}
 
 	if mi.hmuxer.Directory != "" {
 		os.Remove(mi.hmuxer.Directory)
@@ -333,27 +301,5 @@ func (mi *muxerInstance) handleRequest(ctx *gin.Context, isCDN bool) {
 		return
 	}
 
-	if mi.uploader == nil {
-		ctx.Status(http.StatusNotFound)
-		return
-	}
-
-	remoteKey := mi.uploader.BuildRemoteKey(mi.pathName, fileName)
-	if !mi.uploader.IsUploaded(remoteKey) {
-		ctx.Status(http.StatusNotFound)
-		return
-	}
-
-	mi.Log(logger.Info, "[HLS Resolver] Local miss for %s. Proxying from remote.", fileName)
-	if mi.uploader.ProxyObject(ctx.Request.Context(), ctx.Writer, remoteKey) {
-		return
-	}
-
-	url, err := mi.uploader.Presign(remoteKey)
-	if err != nil {
-		ctx.Status(http.StatusBadGateway)
-		return
-	}
-	mi.Log(logger.Info, "[HLS Resolver] Local miss for %s. S3 fallback successful, redirecting to remote.", fileName)
-	ctx.Redirect(http.StatusFound, url)
+	ctx.Status(http.StatusNotFound)
 }

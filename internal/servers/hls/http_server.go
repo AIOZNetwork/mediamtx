@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,18 +63,20 @@ func sanitizeLocation(rawPath string, rawQuery string) string {
 }
 
 type httpServer struct {
-	address        string
-	dumpPackets    bool
-	encryption     bool
-	serverKey      string
-	serverCert     string
-	allowOrigins   []string
-	trustedProxies conf.IPNetworks
-	readTimeout    conf.Duration
-	writeTimeout   conf.Duration
-	cdnSecret      string
-	pathManager    serverPathManager
-	parent         *Server
+	address                  string
+	dumpPackets              bool
+	encryption               bool
+	serverKey                string
+	serverCert               string
+	allowOrigins             []string
+	trustedProxies           conf.IPNetworks
+	readTimeout              conf.Duration
+	writeTimeout             conf.Duration
+	cdnSecret                string
+	providerPlayback         *ProviderPlaybackService
+	providerPlaybackRequired bool
+	pathManager              serverPathManager
+	parent                   *Server
 
 	inner *httpp.Server
 }
@@ -197,6 +200,314 @@ func (s *httpServer) handleAuthError(ctx *gin.Context, err error) bool {
 	return false
 }
 
+func (s *httpServer) providerGeneration(ctx *gin.Context) (int64, bool) {
+	generationRaw := ctx.Request.URL.Query().Get("generation")
+	if generationRaw == "" {
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation query parameter is required for provider HLS playback"))
+		return 0, false
+	}
+	generation, err := strconv.ParseInt(generationRaw, 10, 64)
+	if err != nil || generation == 0 {
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation query parameter is invalid"))
+		return 0, false
+	}
+	return generation, true
+}
+
+func (s *httpServer) onProviderHLSPlaylistRequest(ctx *gin.Context, dir string, indexPlaylist bool) bool {
+	generation, ok := s.providerGeneration(ctx)
+	if !ok {
+		return true
+	}
+
+	var playlist []byte
+	var err error
+	if indexPlaylist && strings.Contains(dir, "/") {
+		base, rendition := path.Split(dir)
+		streamID := strings.TrimSuffix(base, "/")
+		_, _, err = s.findPathConf(ctx, streamID)
+		if err != nil {
+			if s.handleAuthError(ctx, err) {
+				return true
+			}
+			s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+			return true
+		}
+		playlist, err = s.providerPlayback.RenderMediaPlaylist(ProviderPlaylistRequest{
+			StreamID:      streamID,
+			RenditionName: rendition,
+			Generation:    generation,
+		})
+	} else if indexPlaylist {
+		_, _, err = s.findPathConf(ctx, dir)
+		if err != nil {
+			if s.handleAuthError(ctx, err) {
+				return true
+			}
+			s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+			return true
+		}
+		playlist, err = s.providerPlayback.RenderMasterPlaylist(ProviderPlaylistRequest{
+			StreamID:   dir,
+			Generation: generation,
+		})
+	} else {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("provider HLS playlist not found"))
+		return true
+	}
+
+	if err != nil {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+		return true
+	}
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+	ctx.Writer.WriteHeader(http.StatusOK)
+	ctx.Writer.Write(playlist)
+	return true
+}
+
+func (s *httpServer) hlsPlaybackMode(ctx *gin.Context, dir string) (*conf.Path, string, bool) {
+	pathConf, _, err := s.findPathConf(ctx, dir)
+	if err != nil {
+		if s.handleAuthError(ctx, err) {
+			return nil, "", false
+		}
+		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+		return nil, "", false
+	}
+	if pathConf == nil {
+		return nil, "local", true
+	}
+	mode := pathConf.HLSPlaybackMode
+	if mode == "" {
+		mode = "local"
+	}
+	return pathConf, mode, true
+}
+
+func (s *httpServer) onHybridHLSPlaylistRequest(ctx *gin.Context, dir string, fname string, indexPlaylist bool, isCDN bool) bool {
+	basePath := dir
+	childName := ""
+	if strings.Contains(dir, "/") {
+		basePath = abrBasePath(dir)
+		childName = strings.TrimPrefix(dir[len(basePath):], "/")
+	}
+
+	pathConf, mode, ok := s.hlsPlaybackMode(ctx, basePath)
+	if !ok {
+		return true
+	}
+	if mode == "local" {
+		return false
+	}
+	if s.providerPlayback == nil {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("provider HLS playback is not enabled"))
+		return true
+	}
+
+	if mode == "provider" {
+		return s.onProviderHLSPlaylistRequest(ctx, dir, indexPlaylist)
+	}
+
+	if mode != "hybrid" {
+		return false
+	}
+
+	if !indexPlaylist {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("hybrid HLS playlist not found"))
+		return true
+	}
+
+	if childName == "original" {
+		if s.parent == nil {
+			s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("muxer not found"))
+			return true
+		}
+		s.serveHybridOriginalChild(ctx, basePath, fname, isCDN, pathConf)
+		return true
+	}
+	if childName != "" {
+		generation, ok := s.providerGeneration(ctx)
+		if !ok {
+			return true
+		}
+		playlist, err := s.providerPlayback.RenderMediaPlaylist(ProviderPlaylistRequest{
+			StreamID: basePath, RenditionName: childName, Generation: generation,
+		})
+		if err != nil {
+			s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+			return true
+		}
+		ctx.Header("Cache-Control", "no-cache")
+		ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+		ctx.Writer.WriteHeader(http.StatusOK)
+		ctx.Writer.Write(playlist)
+		return true
+	}
+
+	generation, ok := s.providerGeneration(ctx)
+	if !ok {
+		return true
+	}
+	if s.parent != nil {
+		sourceOnDemand := false
+		if pathConf != nil {
+			sourceOnDemand = pathConf.SourceOnDemand
+		}
+		mux, err := s.parent.getMuxer(serverGetMuxerReq{
+			path:           dir,
+			create:         true,
+			remoteAddr:     httpp.RemoteAddr(ctx),
+			query:          ctx.Request.URL.RawQuery,
+			sourceOnDemand: sourceOnDemand,
+		})
+		if err != nil {
+			if s.handleAuthError(ctx, err) {
+				return true
+			}
+			s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+			return true
+		}
+		_ = mux
+	}
+	playlist, err := s.providerPlayback.RenderHybridMasterPlaylist(ProviderPlaylistRequest{
+		StreamID: dir, Generation: generation, OriginalQuery: ctx.Request.URL.RawQuery,
+	})
+	if err != nil {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+		return true
+	}
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("Content-Type", "application/vnd.apple.mpegurl")
+	ctx.Writer.WriteHeader(http.StatusOK)
+	ctx.Writer.Write(playlist)
+	return true
+}
+
+func hybridOriginalChildBasePath(dir string) (string, bool) {
+	if !strings.Contains(dir, "/") {
+		return "", false
+	}
+
+	basePath := abrBasePath(dir)
+	childName := strings.TrimPrefix(dir[len(basePath):], "/")
+	return basePath, childName == "original"
+}
+
+func (s *httpServer) serveHybridOriginalChild(
+	ctx *gin.Context,
+	basePath string,
+	fname string,
+	isCDN bool,
+	pathConf *conf.Path,
+) {
+	sourceOnDemand := false
+	if pathConf != nil {
+		sourceOnDemand = pathConf.SourceOnDemand
+	}
+	muxer, err := s.parent.getMuxer(serverGetMuxerReq{
+		path:           basePath,
+		create:         true,
+		remoteAddr:     httpp.RemoteAddr(ctx),
+		query:          ctx.Request.URL.RawQuery,
+		sourceOnDemand: sourceOnDemand,
+	})
+	if err != nil {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+		return
+	}
+
+	if strings.HasSuffix(fname, ".m3u8") {
+		mi := muxer.getInstance()
+		if mi == nil || !mi.isMediaPlaylistReady() {
+			writeHLSPlaceholderPlaylist(ctx)
+			return
+		}
+		if fname == "index.m3u8" {
+			fname = mi.primaryVideoPlaylist()
+		}
+	}
+
+	ctx.Request.URL.Path = fname
+	err = muxer.handleRequest(ctx, isCDN)
+	if err != nil {
+		if strings.HasSuffix(fname, ".m3u8") {
+			writeHLSPlaceholderPlaylist(ctx)
+			return
+		}
+		s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
+	}
+}
+
+func (s *httpServer) onHybridHLSOriginalChildRequest(ctx *gin.Context, dir string, fname string, isCDN bool) bool {
+	basePath, ok := hybridOriginalChildBasePath(dir)
+	if !ok {
+		return false
+	}
+
+	pathConf, mode, ok := s.hlsPlaybackMode(ctx, basePath)
+	if !ok {
+		return true
+	}
+	if mode != "hybrid" {
+		return false
+	}
+
+	if s.parent == nil {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("muxer not found"))
+		return true
+	}
+	s.serveHybridOriginalChild(ctx, basePath, fname, isCDN, pathConf)
+	return true
+}
+
+func (s *httpServer) onProviderHLSMediaRequest(ctx *gin.Context, mediaPath string) {
+	parts := strings.SplitN(mediaPath, "/", 4)
+	if len(parts) != 4 {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("provider HLS object not found"))
+		return
+	}
+	streamID, err := url.PathUnescape(parts[0])
+	if err != nil {
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, err)
+		return
+	}
+	renditionName, err := url.PathUnescape(parts[1])
+	if err != nil {
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, err)
+		return
+	}
+	generation, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || generation == 0 {
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation is invalid"))
+		return
+	}
+	objectName, err := url.PathUnescape(parts[3])
+	if err != nil {
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, err)
+		return
+	}
+	if s.providerPlayback == nil {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("provider HLS playback is not enabled"))
+		return
+	}
+	_, _, err = s.findPathConf(ctx, streamID)
+	if err != nil {
+		if s.handleAuthError(ctx, err) {
+			return
+		}
+		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+		return
+	}
+	err = s.providerPlayback.RedirectObject(ctx.Writer, ctx.Request, ProviderObjectRequest{
+		StreamID: streamID, RenditionName: renditionName, Generation: generation, ObjectName: objectName,
+	})
+	if err != nil {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+	}
+}
+
 // abrChild resolves a request for an output of an ABR stream: a rendition the
 // transcoder publishes (<path>/720) or the source (<path>/original). It
 // returns the path of the muxer that serves it - the rendition's own, or the
@@ -244,14 +555,28 @@ func (s *httpServer) liveABRRenditions(
 	base *muxer,
 	renditions []conf.HLSTranscodingRendition,
 ) []conf.HLSTranscodingRendition {
-	if base == nil || time.Since(base.created) < abrRenditionWarmup {
-		return renditions
-	}
-
 	var live []conf.HLSTranscodingRendition
 	for _, r := range renditions {
-		_, err := s.parent.getMuxer(serverGetMuxerReq{path: basePath + "/" + r.Name, create: false})
+		targetName := r.Name
+		_, err := s.parent.getMuxer(serverGetMuxerReq{path: basePath + "/" + targetName, create: false})
+		if err != nil {
+			altName := targetName
+			if strings.HasSuffix(targetName, "p") {
+				altName = strings.TrimSuffix(targetName, "p")
+			} else {
+				altName = targetName + "p"
+			}
+			if _, altErr := s.parent.getMuxer(serverGetMuxerReq{path: basePath + "/" + altName, create: false}); altErr == nil {
+				targetName = altName
+				err = nil
+			}
+		}
+
 		if err == nil {
+			rCopy := r
+			rCopy.Name = targetName
+			live = append(live, rCopy)
+		} else if base == nil || time.Since(base.created) < abrRenditionWarmup {
 			live = append(live, r)
 		}
 	}
@@ -315,6 +640,10 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 	}
 
 	pa := ctx.Request.URL.Path[1:]
+	if strings.HasPrefix(pa, "provider-hls/media/") {
+		s.onProviderHLSMediaRequest(ctx, strings.TrimPrefix(pa, "provider-hls/media/"))
+		return
+	}
 	if strings.HasPrefix(pa, "media/") {
 		s.onMediaRequest(ctx, strings.TrimPrefix(pa, "media/"))
 		return
@@ -381,6 +710,27 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	isCDN := (s.cdnSecret != "" && ctx.Request.Header.Get("Authorization") == "Bearer "+s.cdnSecret)
 
+	if contentTyp != index && s.onHybridHLSOriginalChildRequest(ctx, dir, fname, isCDN) {
+		return
+	}
+
+	if (s.providerPlaybackRequired || s.pathManager == nil) && s.providerPlayback != nil &&
+		(contentTyp == multivariantPlaylist || contentTyp == mediaPlaylist) {
+		if s.onProviderHLSPlaylistRequest(ctx, dir, contentTyp == multivariantPlaylist) {
+			return
+		}
+		return
+	}
+	if (s.providerPlaybackRequired || s.pathManager == nil) && s.providerPlayback != nil && contentTyp == segment {
+		s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("provider HLS playback requires /provider-hls/media URLs"))
+		return
+	}
+	if s.providerPlayback != nil && (contentTyp == multivariantPlaylist || contentTyp == mediaPlaylist) {
+		if s.onHybridHLSPlaylistRequest(ctx, dir, fname, contentTyp == multivariantPlaylist, isCDN) {
+			return
+		}
+	}
+
 	if contentTyp != index {
 		muxerPath, ok, err := s.abrChild(ctx, dir)
 		if err != nil && s.handleAuthError(ctx, err) {
@@ -436,7 +786,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			ctx.Writer.WriteHeader(http.StatusOK)
 			ctx.Writer.Write(renderABRMasterPlaylist(
 				s.liveABRRenditions(dir, mux, masterPlaylistRenditions(pathConf, mi)),
-				codecStringForTranscodedOutput(pathConf, nil),
+				codecStringForTranscodedOutput(pathConf),
 				hasAudio))
 			return
 		}

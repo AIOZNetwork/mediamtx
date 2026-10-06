@@ -15,6 +15,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/models"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
 )
 
@@ -65,28 +66,29 @@ type apiParent interface {
 
 // API is an API server.
 type API struct {
-	Version        string
-	Started        time.Time
-	Address        string
-	DumpPackets    bool
-	Encryption     bool
-	ServerKey      string
-	ServerCert     string
-	AllowOrigins   []string
-	TrustedProxies conf.IPNetworks
-	ReadTimeout    conf.Duration
-	WriteTimeout   conf.Duration
-	AuthManager    apiAuthManager
-	PathManager    defs.APIPathManager
-	RTSPServer     defs.APIRTSPServer
-	RTSPSServer    defs.APIRTSPServer
-	RTMPServer     defs.APIRTMPServer
-	RTMPSServer    defs.APIRTMPServer
-	HLSServer      defs.APIHLSServer
-	WebRTCServer   defs.APIWebRTCServer
-	SRTServer      defs.APISRTServer
-	MoQServer      defs.APIMoQServer
-	Parent         apiParent
+	Version                       string
+	Started                       time.Time
+	Address                       string
+	DumpPackets                   bool
+	Encryption                    bool
+	ServerKey                     string
+	ServerCert                    string
+	AllowOrigins                  []string
+	TrustedProxies                conf.IPNetworks
+	ReadTimeout                   conf.Duration
+	WriteTimeout                  conf.Duration
+	AuthManager                   apiAuthManager
+	PathManager                   defs.APIPathManager
+	RTSPServer                    defs.APIRTSPServer
+	RTSPSServer                   defs.APIRTSPServer
+	RTMPServer                    defs.APIRTMPServer
+	RTMPSServer                   defs.APIRTMPServer
+	HLSServer                     defs.APIHLSServer
+	WebRTCServer                  defs.APIWebRTCServer
+	SRTServer                     defs.APISRTServer
+	MoQServer                     defs.APIMoQServer
+	ProviderHLSMetadataRepository models.ProviderHLSMetadataRepository
+	Parent                        apiParent
 
 	httpServer *httpp.Server
 }
@@ -101,6 +103,7 @@ func (a *API) Initialize() error {
 	group := router.Group("/v3")
 
 	group.GET("/info", a.onInfo)
+	group.POST("/internal/provider-hls/metadata", a.onProviderHLSMetadataIngest)
 
 	group.POST("/auth/jwks/refresh", a.onAuthJwksRefresh)
 

@@ -392,25 +392,26 @@ type Conf struct {
 	RTMPTrustedProxies IPNetworks `json:"rtmpTrustedProxies"`
 
 	// HLS server
-	HLS                bool       `json:"hls"`
-	HLSDisable         *bool      `json:"hlsDisable,omitempty" deprecated:"true"`
-	HLSAddress         string     `json:"hlsAddress"`
-	HLSEncryption      bool       `json:"hlsEncryption"`
-	HLSServerKey       string     `json:"hlsServerKey"`
-	HLSServerCert      string     `json:"hlsServerCert"`
-	HLSAllowOrigin     *string    `json:"hlsAllowOrigin,omitempty" deprecated:"true"`
-	HLSAllowOrigins    []string   `json:"hlsAllowOrigins"`
-	HLSTrustedProxies  IPNetworks `json:"hlsTrustedProxies"`
-	HLSAlwaysRemux     bool       `json:"hlsAlwaysRemux"`
-	HLSVariant         HLSVariant `json:"hlsVariant"`
-	HLSSegmentCount    int        `json:"hlsSegmentCount"`
-	HLSSegmentDuration Duration   `json:"hlsSegmentDuration"`
-	HLSPartDuration    Duration   `json:"hlsPartDuration"`
-	HLSSegmentMaxSize  StringSize `json:"hlsSegmentMaxSize"`
-	HLSDirectory       string     `json:"hlsDirectory"`
-	HLSMuxerCloseAfter Duration   `json:"hlsMuxerCloseAfter"`
-	HLSDVREnabled      bool       `json:"hlsDvrEnabled"`
-	HLSCDNSecret       string     `json:"hlsCDNSecret"`
+	HLS                 bool       `json:"hls"`
+	HLSDisable          *bool      `json:"hlsDisable,omitempty" deprecated:"true"`
+	HLSAddress          string     `json:"hlsAddress"`
+	HLSEncryption       bool       `json:"hlsEncryption"`
+	HLSServerKey        string     `json:"hlsServerKey"`
+	HLSServerCert       string     `json:"hlsServerCert"`
+	HLSAllowOrigin      *string    `json:"hlsAllowOrigin,omitempty" deprecated:"true"`
+	HLSAllowOrigins     []string   `json:"hlsAllowOrigins"`
+	HLSTrustedProxies   IPNetworks `json:"hlsTrustedProxies"`
+	HLSAlwaysRemux      bool       `json:"hlsAlwaysRemux"`
+	HLSVariant          HLSVariant `json:"hlsVariant"`
+	HLSSegmentCount     int        `json:"hlsSegmentCount"`
+	HLSSegmentDuration  Duration   `json:"hlsSegmentDuration"`
+	HLSPartDuration     Duration   `json:"hlsPartDuration"`
+	HLSSegmentMaxSize   StringSize `json:"hlsSegmentMaxSize"`
+	HLSDirectory        string     `json:"hlsDirectory"`
+	HLSMuxerCloseAfter  Duration   `json:"hlsMuxerCloseAfter"`
+	HLSDVREnabled       bool       `json:"hlsDvrEnabled"`
+	HLSProviderPlayback bool       `json:"hlsProviderPlayback"`
+	HLSCDNSecret        string     `json:"hlsCDNSecret"`
 
 	// Storage Provider
 	StorageProvider   string `json:"storageProvider"`
@@ -1021,6 +1022,9 @@ func (conf *Conf) Validate(l logger.Writer) error {
 	if conf.HLS {
 		if conf.HLSAddress == "" {
 			return fmt.Errorf("'hlsAddress' must be set when HLS is enabled")
+		}
+		if conf.HLSProviderPlayback && conf.HLSVariant != HLSVariant(gohlslib.MuxerVariantFMP4) {
+			return fmt.Errorf("'hlsProviderPlayback' requires 'hlsVariant' to be 'fmp4'")
 		}
 
 		// gohlslib enforces these minimums when the muxer is started:

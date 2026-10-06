@@ -68,8 +68,7 @@ func MustConnectToDatabase(config *conf.Conf) *gorm.DB {
 	return db
 }
 
-// MustInitLiveHLSSegmentDatabase creates live_hls_segments, the one table this
-// server owns.
+// MustInitLiveHLSSegmentDatabase creates tables this server owns.
 //
 // The other tables it reads and writes (live_stream_keys, live_stream_media,
 // live_stream_multicasts, live_stream_statistics) belong to aioz-stream, whose
@@ -79,8 +78,8 @@ func MustConnectToDatabase(config *conf.Conf) *gorm.DB {
 // text, which the foreign key to users(id) refuses, and the server panicked
 // at startup.
 func MustInitLiveHLSSegmentDatabase() {
-	err := DB.AutoMigrate(&models.LiveHLSSegment{})
+	err := DB.AutoMigrate(&models.LiveHLSSegment{}, &models.ProviderHLSMetadata{})
 	if err != nil {
-		panic(fmt.Sprintf("failed to migrate LiveHLSSegment: %v", err))
+		panic(fmt.Sprintf("failed to migrate MediaMTX-owned tables: %v", err))
 	}
 }

@@ -369,6 +369,7 @@ type Path struct {
 	RunOnOffline            string   `json:"runOnOffline"`
 
 	// HLS Transcoding
+	HLSPlaybackMode          string                    `json:"hlsPlaybackMode"`
 	HLSTranscoding           bool                      `json:"hlsTranscoding"`
 	HLSTranscodingInputProto string                    `json:"hlsTranscodingInputProtocol"`
 	HLSTranscodingRenditions []HLSTranscodingRendition `json:"hlsTranscodingRenditions"`
@@ -441,6 +442,7 @@ func (pconf *Path) setDefaults() {
 	// Hooks
 	pconf.RunOnDemandStartTimeout = 10 * Duration(time.Second)
 	pconf.RunOnDemandCloseAfter = 10 * Duration(time.Second)
+
 }
 
 func newPath(defaults *Path, partial *OptionalPath) *Path {
@@ -483,6 +485,9 @@ func (pconf *Path) validate(
 	}
 
 	// common configuration errors
+	if pconf.HLSPlaybackMode != "" && pconf.HLSPlaybackMode != "local" && pconf.HLSPlaybackMode != "provider" && pconf.HLSPlaybackMode != "hybrid" {
+		return fmt.Errorf("invalid 'hlsPlaybackMode': '%s'", pconf.HLSPlaybackMode)
+	}
 
 	if pconf.SRTPublishPassphrase != "" && pconf.Source != "publisher" {
 		return fmt.Errorf("'srtPublishPassphase' can only be used when source is 'publisher'")

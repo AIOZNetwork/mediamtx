@@ -47,7 +47,6 @@ type muxer struct {
 	partDuration    conf.Duration
 	segmentMaxSize  conf.StringSize
 	directory       string
-	uploadConfig    *MuxerUploadConfig
 	closeAfter      conf.Duration
 	wg              *sync.WaitGroup
 	pathName        string
@@ -282,7 +281,6 @@ func (m *muxer) createInstance(strm *stream.Stream) (*muxerInstance, error) {
 		partDuration:             m.partDuration,
 		segmentMaxSize:           m.segmentMaxSize,
 		directory:                m.directory,
-		uploadConfig:             m.uploadConfig,
 		pathConf:                 m.path.SafeConf(),
 		hlsTranscodingRenditions: m.safeHLSTranscodingRenditions(),
 		pathName:                 m.pathName,
