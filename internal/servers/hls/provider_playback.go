@@ -53,8 +53,13 @@ func (s *ProviderPlaybackService) RenderMasterPlaylist(req ProviderPlaylistReque
 			r.Bandwidth, r.Bandwidth, r.Width, r.Height, r.Codecs,
 		))
 		b.WriteString(escapePathSegment(r.Name))
-		b.WriteString("/index.m3u8?generation=")
-		b.WriteString(fmt.Sprintf("%d", req.Generation))
+		if req.OriginalQuery != "" {
+			b.WriteString("/index.m3u8?" + req.OriginalQuery)
+		} else if req.Generation > 1 {
+			b.WriteString(fmt.Sprintf("/index.m3u8?generation=%d", req.Generation))
+		} else {
+			b.WriteString("/index.m3u8")
+		}
 		b.WriteString("\n")
 	}
 	return []byte(b.String()), nil
@@ -109,8 +114,13 @@ func (s *ProviderPlaybackService) RenderHybridMasterPlaylist(req ProviderPlaylis
 			r.Bandwidth, r.Bandwidth, r.Width, r.Height, r.Codecs,
 		))
 		b.WriteString(escapePathSegment(r.Name))
-		b.WriteString("/index.m3u8?generation=")
-		b.WriteString(fmt.Sprintf("%d", req.Generation))
+		if req.OriginalQuery != "" {
+			b.WriteString("/index.m3u8?" + req.OriginalQuery)
+		} else if req.Generation > 1 {
+			b.WriteString(fmt.Sprintf("/index.m3u8?generation=%d", req.Generation))
+		} else {
+			b.WriteString("/index.m3u8")
+		}
 		b.WriteString("\n")
 	}
 	return []byte(b.String()), nil

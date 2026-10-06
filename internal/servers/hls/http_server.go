@@ -203,8 +203,7 @@ func (s *httpServer) handleAuthError(ctx *gin.Context, err error) bool {
 func (s *httpServer) providerGeneration(ctx *gin.Context) (int64, bool) {
 	generationRaw := ctx.Request.URL.Query().Get("generation")
 	if generationRaw == "" {
-		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation query parameter is required for provider HLS playback"))
-		return 0, false
+		return 1, true
 	}
 	generation, err := strconv.ParseInt(generationRaw, 10, 64)
 	if err != nil || generation == 0 {
