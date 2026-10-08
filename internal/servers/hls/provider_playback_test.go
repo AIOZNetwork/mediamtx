@@ -32,7 +32,7 @@ func (r *providerPlaybackRepo) ListWindow(query models.ProviderHLSMetadataWindow
 	r.calls = append(r.calls, query)
 	out := make([]models.ProviderHLSMetadata, 0)
 	for _, item := range r.items {
-		if item.StreamID != query.StreamID || item.Generation != query.Generation {
+		if item.StreamID != query.StreamID || (query.Generation > 0 && item.Generation != query.Generation) {
 			continue
 		}
 		if query.RenditionName != "" && item.RenditionName != query.RenditionName {
@@ -210,7 +210,7 @@ func TestProviderPlaybackHTTPRoutesBypassPathManager(t *testing.T) {
 	require.Equal(t, "https://provider.example/seg-10.m4s", rec.Header().Get("Location"))
 }
 
-func TestHybridPlaybackMasterContainsOriginalAndProviderRenditions(t *testing.T) {
+func TestHybridPlaybackMasterContainsOnlyProviderRenditions(t *testing.T) {
 	repo := &providerPlaybackRepo{items: hybridProviderFixtures()}
 	server := newHybridHTTPServer(repo)
 
@@ -219,10 +219,71 @@ func TestHybridPlaybackMasterContainsOriginalAndProviderRenditions(t *testing.T)
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusOK, rec.Code)
 	body := rec.Body.String()
-	require.Contains(t, body, "original/index.m3u8?generation=3")
+	require.NotContains(t, body, "original/index.m3u8")
 	require.Contains(t, body, "1080p/index.m3u8?generation=3")
 	require.Contains(t, body, "720p/index.m3u8?generation=3")
 	require.Contains(t, body, "480p/index.m3u8?generation=3")
+}
+
+func TestProviderPlaybackLatestMasterAndNestedPath(t *testing.T) {
+	items := providerPlaybackFixtures()
+	for i := range items {
+		items[i].Generation = 4
+	}
+	older := providerPlaybackFixtures()
+	items = append(items, older...)
+	repo := &providerPlaybackRepo{items: items}
+	server := &httpServer{providerPlayback: &ProviderPlaybackService{Repository: repo}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/camera/one/index.m3u8", nil)
+	server.onRequest(newGinContext(rec, req))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "main/index.m3u8?generation=4")
+	require.Equal(t, "camera/one", repo.calls[0].StreamID)
+}
+
+func TestProviderPlaybackCrossGenerationWindow(t *testing.T) {
+	items := providerPlaybackFixtures()
+	for i := range items {
+		items[i].Generation = 3
+	}
+	newItems := providerPlaybackFixtures()
+	for i := range newItems {
+		newItems[i].Generation = 4
+		newItems[i].ObjectName = strings.ReplaceAll(newItems[i].ObjectName, "init.mp4", "init-4.mp4")
+		newItems[i].ObjectName = strings.ReplaceAll(newItems[i].ObjectName, "seg-10", "seg-12")
+		newItems[i].ObjectName = strings.ReplaceAll(newItems[i].ObjectName, "seg-11", "seg-13")
+		newItems[i].StorageKey += "-4"
+		if newItems[i].Kind == models.ProviderHLSObjectKindSegment {
+			seq := *newItems[i].MediaSequence + 2
+			newItems[i].MediaSequence = &seq
+			newItems[i].InitSegmentName = "init-4.mp4"
+			newItems[i].InitStorageKey = "streams/camera-one/init.mp4-4"
+		}
+	}
+	service := &ProviderPlaybackService{Repository: &providerPlaybackRepo{items: append(items, newItems...)}}
+	pl, err := service.RenderMediaPlaylist(ProviderPlaylistRequest{
+		StreamID: "camera/one", RenditionName: "main", Generation: 3,
+	})
+	require.NoError(t, err)
+	body := string(pl)
+	require.Contains(t, body, "#EXT-X-MEDIA-SEQUENCE:10")
+	require.Contains(t, body, "#EXT-X-DISCONTINUITY-SEQUENCE:0")
+	require.Equal(t, 1, strings.Count(body, "#EXT-X-DISCONTINUITY\n"))
+	require.Contains(t, body, "/main/3/init.mp4")
+	require.Contains(t, body, "/main/4/init-4.mp4")
+	require.True(t, strings.Index(body, "seg-11.m4s") < strings.Index(body, "seg-12.m4s"))
+}
+
+func TestProviderPlaybackMalformedGeneration(t *testing.T) {
+	repo := &providerPlaybackRepo{items: providerPlaybackFixtures()}
+	server := &httpServer{providerPlayback: &ProviderPlaybackService{Repository: repo}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/camera/one/index.m3u8?generation=bad", nil)
+	server.onRequest(newGinContext(rec, req))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Empty(t, repo.calls)
 }
 
 func TestHybridPlaybackMasterCreatesBaseMuxer(t *testing.T) {
@@ -292,8 +353,9 @@ func TestHybridPlaybackProviderChildUsesMetadata(t *testing.T) {
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "#EXT-X-MAP")
-	require.Len(t, repo.calls, 1)
-	require.Equal(t, "720p", repo.calls[0].RenditionName)
+	require.Len(t, repo.calls, 2)
+	require.Equal(t, "camera-one/720p", repo.calls[0].StreamID)
+	require.Equal(t, "720p", repo.calls[1].RenditionName)
 }
 
 func TestHybridPlaybackProviderChildRequiresGenerationNoFallback(t *testing.T) {
@@ -304,7 +366,8 @@ func TestHybridPlaybackProviderChildRequiresGenerationNoFallback(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/camera-one/720p/index.m3u8", nil)
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.Empty(t, repo.calls)
+	require.Len(t, repo.calls, 1)
+	require.Equal(t, "camera-one/720p", repo.calls[0].StreamID)
 }
 
 func TestProviderPlaybackInternalE2EFromPersistedMetadata(t *testing.T) {

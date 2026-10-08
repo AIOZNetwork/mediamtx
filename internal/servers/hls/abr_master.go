@@ -1,9 +1,14 @@
 package hls
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	codecsh264 "github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 )
@@ -37,6 +42,8 @@ const (
 	avcProfileMainHex     = "4d"
 	avcProfileHighHex     = "64"
 	avcProfileHigh10Hex   = "6e"
+	avcConstraintNoneHex  = "00"
+	avcConstraintMainHex  = "40"
 	avcDefaultLevelHex    = "28"
 
 	// H.264 Profile names
@@ -47,7 +54,7 @@ const (
 	avcProfileNameHigh10              = "high 10"
 
 	// Codec format strings
-	avcCodecFormat = "avc1.%s00%s"
+	avcCodecFormat = "avc1.%s%s%s"
 	codecSeparator = ","
 
 	// Path markers
@@ -170,10 +177,23 @@ func masterPlaylistRenditions(pathConf *conf.Path, mi *muxerInstance) []conf.HLS
 	return append([]conf.HLSTranscodingRendition(nil), pathConf.HLSTranscodingRenditions...)
 }
 
-func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr string, hasAudioOpts ...bool) []byte {
+type abrMasterSourceInfo struct {
+	codecString string
+	width       int
+	height      int
+	fps         float64
+}
+
+func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr string, opts ...any) []byte {
 	hasAudio := false
-	if len(hasAudioOpts) > 0 {
-		hasAudio = hasAudioOpts[0]
+	sourceInfo := abrMasterSourceInfo{}
+	for _, opt := range opts {
+		switch v := opt.(type) {
+		case bool:
+			hasAudio = v
+		case abrMasterSourceInfo:
+			sourceInfo = v
+		}
 	}
 
 	var b strings.Builder
@@ -200,25 +220,40 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 	}
 	originalBandwidth = originalBandwidth * 120 / 100
 
+	originalCodecStr := codecStr
+	if sourceInfo.codecString != "" {
+		originalCodecStr = sourceInfo.codecString
+	}
+	originalFrameRate := sourceInfo.fps
+	if originalFrameRate <= 0 {
+		originalFrameRate = 30
+	}
+
 	resolutionAttr := ""
-	if topWidth > 0 && topHeight > 0 {
-		resolutionAttr = fmt.Sprintf("RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,", topWidth, topHeight)
+	if sourceInfo.width > 0 && sourceInfo.height > 0 {
+		resolutionAttr = fmt.Sprintf("RESOLUTION=%dx%d,FRAME-RATE=%.3f,VIDEO-RANGE=SDR,", sourceInfo.width, sourceInfo.height, originalFrameRate)
+	} else if sourceInfo == (abrMasterSourceInfo{}) && topWidth > 0 && topHeight > 0 {
+		// Backward-compatible fallback for callers that cannot inspect the source track.
+		resolutionAttr = fmt.Sprintf("RESOLUTION=%dx%d,FRAME-RATE=%.3f,VIDEO-RANGE=SDR,", topWidth, topHeight, originalFrameRate)
 	}
 
 	audioAttr := ""
-	if hasAudio {
+	if hasAudio && len(renditions) == 0 {
 		b.WriteString(
 			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",LANGUAGE=\"und\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",URI=\"original/audio2_stream.m3u8\"\n",
 		)
 		audioAttr = "AUDIO=\"audio\","
 	}
 
-	// 1. Original quality (LL-HLS, not uploaded to provider).
-	b.WriteString(fmt.Sprintf(
-		"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,%sCODECS=\"%s\",%sCLOSED-CAPTIONS=NONE\n",
-		originalBandwidth, originalBandwidth, resolutionAttr, codecStr, audioAttr,
-	))
-	b.WriteString("original/index.m3u8\n")
+	// Never mix the source and transcoded outputs: independently produced HLS
+	// timelines are not guaranteed to be switch-aligned.
+	if len(renditions) == 0 {
+		b.WriteString(fmt.Sprintf(
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,%sCODECS=\"%s\",%sCLOSED-CAPTIONS=NONE\n",
+			originalBandwidth, originalBandwidth, resolutionAttr, originalCodecStr, audioAttr,
+		))
+		b.WriteString("original/index.m3u8\n")
+	}
 
 	// 2. Transcoded qualities from config (uploaded to provider, fMP4 segment)
 	for _, r := range renditions {
@@ -227,15 +262,80 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 		if bandwidth == sharedAudioBandwidth {
 			bandwidth = defaultFallbackVideoBandwidth + sharedAudioBandwidth
 		}
+		renditionFrameRate := renditionFrameRate(r)
 		b.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CODECS=\"%s\",%sCLOSED-CAPTIONS=NONE\n",
-			bandwidth, bandwidth, r.Width, r.Height, codecStr, audioAttr,
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%.3f,VIDEO-RANGE=SDR,CODECS=\"%s\",%sCLOSED-CAPTIONS=NONE\n",
+			bandwidth, bandwidth, r.Width, r.Height, renditionFrameRate, codecStringForRendition(r, codecStr), audioAttr,
 		))
 		b.WriteString(r.Name)
 		b.WriteString("/index.m3u8\n")
 	}
 
 	return []byte(b.String())
+}
+
+func sourceInfoFromDescription(desc *description.Session, fallbackCodecStr string) abrMasterSourceInfo {
+	info := abrMasterSourceInfo{codecString: fallbackCodecStr}
+	if desc == nil {
+		return info
+	}
+
+	for _, media := range desc.Medias {
+		if media.Type != description.MediaTypeVideo {
+			continue
+		}
+		for _, forma := range media.Formats {
+			if formaH264, ok := forma.(*format.H264); ok {
+				if len(formaH264.SPS) >= 4 {
+					info.codecString = "avc1." + hex.EncodeToString(formaH264.SPS[1:4]) + codecSeparator + defaultAACCodecString
+					var s codecsh264.SPS
+					if err := s.Unmarshal(formaH264.SPS); err == nil {
+						info.width = s.Width()
+						info.height = s.Height()
+					}
+				}
+				return info
+			}
+		}
+	}
+	return info
+}
+
+func sourceInfoFromMuxerInstance(mi *muxerInstance, fallbackCodecStr string) abrMasterSourceInfo {
+	if mi == nil || mi.stream == nil {
+		return abrMasterSourceInfo{codecString: fallbackCodecStr}
+	}
+	return sourceInfoFromDescription(mi.stream.OutDescCopy(), fallbackCodecStr)
+}
+
+func codecStringForRendition(r conf.HLSTranscodingRendition, fallbackCodecStr string) string {
+	profile, level := transcodedRenditionAVCProfileLevel(r)
+	if fallbackCodecStr == "" {
+		return codecStringFromInfo(codecLibx264, profile, level, codecAAC)
+	}
+	if strings.HasPrefix(fallbackCodecStr, defaultAVCCodecString[:5]) {
+		parts := strings.SplitN(fallbackCodecStr, codecSeparator, 2)
+		audio := defaultAACCodecString
+		if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+			audio = strings.TrimSpace(parts[1])
+		}
+		return avcCodecString(profile, level) + codecSeparator + audio
+	}
+	return fallbackCodecStr
+}
+
+func transcodedRenditionAVCProfileLevel(r conf.HLSTranscodingRendition) (string, string) {
+	if r.Height >= 1080 || r.Width >= 1920 {
+		return avcProfileNameHigh, "4.0"
+	}
+	if r.Height >= 480 || r.Width >= 854 {
+		return avcProfileNameMain, "3.1"
+	}
+	return avcProfileNameMain, "3.0"
+}
+
+func renditionFrameRate(_ conf.HLSTranscodingRendition) float64 {
+	return 30
 }
 
 func parseBitrate(raw string) int {
@@ -289,11 +389,13 @@ func codecStringFromInfo(videoCodec, profile, level string, audioCodec string) s
 
 func avcCodecString(profile, level string) string {
 	profileHex := avcProfileHighHex
+	constraintHex := avcConstraintNoneHex
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case avcProfileNameBaseline, avcProfileNameConstrainedBaseline:
 		profileHex = avcProfileBaselineHex
 	case avcProfileNameMain:
 		profileHex = avcProfileMainHex
+		constraintHex = avcConstraintMainHex
 	case avcProfileNameHigh:
 		profileHex = avcProfileHighHex
 	case avcProfileNameHigh10:
@@ -315,7 +417,7 @@ func avcCodecString(profile, level string) string {
 		}
 		levelHex = fmt.Sprintf("%02x", major*10+minor)
 	}
-	return fmt.Sprintf(avcCodecFormat, profileHex, levelHex)
+	return fmt.Sprintf(avcCodecFormat, profileHex, constraintHex, levelHex)
 }
 
 func defaultString(v string, def string) string {

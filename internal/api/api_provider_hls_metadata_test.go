@@ -83,7 +83,7 @@ func TestProviderHLSMetadataNestedAPIContract(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "idem-header", repo.metadata.IdempotencyKey)
 	require.Equal(t, "event-1", repo.metadata.EventID)
-	require.Equal(t, "stream-1", repo.metadata.StreamID)
+	require.Equal(t, "live/stream-1", repo.metadata.StreamID)
 	require.Equal(t, "live/stream-1", repo.metadata.MediaMTXPath)
 	require.Equal(t, int64(2), repo.metadata.Generation)
 	require.Equal(t, "main", repo.metadata.RenditionName)

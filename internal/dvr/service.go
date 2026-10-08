@@ -235,6 +235,9 @@ func (s *Service) renderFMP4Playlist(streamID string, now time.Time) ([]byte, bo
 		b.WriteString(url.PathEscape(seg.SegmentName))
 		b.WriteByte('\n')
 	}
+	if !s.IsActive(streamID) {
+		b.WriteString("#EXT-X-ENDLIST\n")
+	}
 	return []byte(b.String()), true, nil
 }
 

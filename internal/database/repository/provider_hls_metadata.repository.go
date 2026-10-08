@@ -11,10 +11,11 @@ import (
 )
 
 var (
-	ErrProviderHLSIdempotencyConflict = errors.New("provider HLS metadata idempotency key conflict")
-	ErrProviderHLSDuplicateObject     = errors.New("provider HLS metadata duplicate object")
-	ErrProviderHLSDuplicateSequence   = errors.New("provider HLS metadata duplicate media sequence")
-	ErrProviderHLSMissingInit         = errors.New("provider HLS metadata matching init segment is required before segment")
+	ErrProviderHLSIdempotencyConflict  = errors.New("provider HLS metadata idempotency key conflict")
+	ErrProviderHLSDuplicateObject      = errors.New("provider HLS metadata duplicate object")
+	ErrProviderHLSDuplicateSequence    = errors.New("provider HLS metadata duplicate media sequence")
+	ErrProviderHLSNonMonotonicSequence = errors.New("provider HLS metadata media sequence must increase")
+	ErrProviderHLSMissingInit          = errors.New("provider HLS metadata matching init segment is required before segment")
 )
 
 type ProviderHLSMetadataRepository struct {
@@ -92,8 +93,8 @@ func ensureProviderHLSInsertAllowed(tx *gorm.DB, metadata models.ProviderHLSMeta
 	if metadata.Kind == models.ProviderHLSObjectKindSegment {
 		err = tx.Model(&models.ProviderHLSMetadata{}).
 			Where(
-				"stream_id = ? AND rendition_name = ? AND generation = ? AND kind = ? AND media_sequence = ?",
-				metadata.StreamID, metadata.RenditionName, metadata.Generation, models.ProviderHLSObjectKindSegment, *metadata.MediaSequence,
+				"stream_id = ? AND rendition_name = ? AND kind = ? AND media_sequence = ?",
+				metadata.StreamID, metadata.RenditionName, models.ProviderHLSObjectKindSegment, *metadata.MediaSequence,
 			).
 			Count(&count).Error
 		if err != nil {
@@ -101,6 +102,21 @@ func ensureProviderHLSInsertAllowed(tx *gorm.DB, metadata models.ProviderHLSMeta
 		}
 		if count > 0 {
 			return fmt.Errorf("%w: %d", ErrProviderHLSDuplicateSequence, *metadata.MediaSequence)
+		}
+
+		var maxSequence *int64
+		err = tx.Model(&models.ProviderHLSMetadata{}).
+			Where(
+				"stream_id = ? AND rendition_name = ? AND kind = ?",
+				metadata.StreamID, metadata.RenditionName, models.ProviderHLSObjectKindSegment,
+			).
+			Select("MAX(media_sequence)").Scan(&maxSequence).Error
+		if err != nil {
+			return err
+		}
+		if maxSequence != nil && *metadata.MediaSequence <= *maxSequence {
+			return fmt.Errorf("%w: got %d after %d", ErrProviderHLSNonMonotonicSequence,
+				*metadata.MediaSequence, *maxSequence)
 		}
 
 		err = tx.Model(&models.ProviderHLSMetadata{}).
@@ -124,7 +140,10 @@ func (r *ProviderHLSMetadataRepository) ListWindow(query models.ProviderHLSMetad
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
-	db := r.db.Where("stream_id = ? AND generation = ?", query.StreamID, query.Generation)
+	db := r.db.Where("stream_id = ?", query.StreamID)
+	if query.Generation > 0 {
+		db = db.Where("generation = ?", query.Generation)
+	}
 	if query.RenditionName != "" {
 		db = db.Where("rendition_name = ?", query.RenditionName)
 	}

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/bluenviron/mediamtx/internal/database/repository"
@@ -52,11 +54,16 @@ type providerHLSMetadataHLS struct {
 }
 
 func (req providerHLSMetadataIngestRequest) toModel(idempotencyKey string) models.ProviderHLSMetadata {
+	mediaMTXPath := normalizeProviderHLSPath(req.MediaMTXPath)
+	streamID := mediaMTXPath
+	if streamID == "" {
+		streamID = normalizeProviderHLSPath(req.StreamID)
+	}
 	return models.ProviderHLSMetadata{
 		EventID:         req.EventID,
 		IdempotencyKey:  idempotencyKey,
-		StreamID:        req.StreamID,
-		MediaMTXPath:    req.MediaMTXPath,
+		StreamID:        streamID,
+		MediaMTXPath:    mediaMTXPath,
 		JobID:           req.JobID,
 		Generation:      req.Generation,
 		RenditionName:   req.Rendition.Name,
@@ -80,6 +87,14 @@ func (req providerHLSMetadataIngestRequest) toModel(idempotencyKey string) model
 		InitStorageKey:  req.HLS.InitStorageKey,
 		PublishedAt:     req.PublishedAt,
 	}
+}
+
+func normalizeProviderHLSPath(v string) string {
+	v = strings.Trim(strings.TrimSpace(v), "/")
+	if v == "" {
+		return ""
+	}
+	return strings.TrimPrefix(path.Clean("/"+v), "/")
 }
 
 func (a *API) onProviderHLSMetadataIngest(ctx *gin.Context) {

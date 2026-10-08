@@ -66,6 +66,9 @@ func TestRenderFMP4PlaylistUsesLocalMetadata(t *testing.T) {
 	if string(playlist) == "" || !strings.Contains(string(playlist), want) {
 		t.Fatalf("playlist missing %q:\n%s", want, playlist)
 	}
+	if !strings.Contains(string(playlist), "#EXT-X-ENDLIST\n") {
+		t.Fatalf("inactive fMP4 playlist is missing ENDLIST:\n%s", playlist)
+	}
 }
 
 func TestServeMediaServesLocalObjectOnly(t *testing.T) {

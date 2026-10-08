@@ -21,7 +21,7 @@ type ProviderHLSMetadata struct {
 	StreamID        string         `json:"stream_id" gorm:"index:idx_provider_hls_stream_rendition_generation;uniqueIndex:idx_provider_hls_object_identity;uniqueIndex:idx_provider_hls_sequence_identity"`
 	MediaMTXPath    string         `json:"mediamtx_path" gorm:"column:mediamtx_path;index"`
 	JobID           string         `json:"job_id" gorm:"index"`
-	Generation      int64          `json:"generation" gorm:"index:idx_provider_hls_stream_rendition_generation;uniqueIndex:idx_provider_hls_object_identity;uniqueIndex:idx_provider_hls_sequence_identity"`
+	Generation      int64          `json:"generation" gorm:"index:idx_provider_hls_stream_rendition_generation;uniqueIndex:idx_provider_hls_object_identity"`
 	RenditionName   string         `json:"rendition_name" gorm:"index:idx_provider_hls_stream_rendition_generation;uniqueIndex:idx_provider_hls_object_identity;uniqueIndex:idx_provider_hls_sequence_identity"`
 	Width           int            `json:"width"`
 	Height          int            `json:"height"`
@@ -61,7 +61,7 @@ func (m ProviderHLSMetadata) Validate() error {
 	if m.MediaMTXPath == "" {
 		return fmt.Errorf("mediamtx_path is required")
 	}
-	if m.Generation == 0 {
+	if m.Generation <= 0 {
 		return fmt.Errorf("generation is required")
 	}
 	if m.RenditionName == "" {

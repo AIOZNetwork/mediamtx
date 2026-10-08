@@ -33,12 +33,18 @@ type ProviderObjectRequest struct {
 	ObjectName    string
 }
 
+const providerPlaylistSegmentCount = 7
+
 func (s *ProviderPlaybackService) RenderMasterPlaylist(req ProviderPlaylistRequest) ([]byte, error) {
-	items, err := s.list(req.StreamID, "", req.Generation)
+	items, err := s.list(req.StreamID, "", 0)
 	if err != nil {
 		return nil, err
 	}
-	renditions := providerRenditions(items)
+	latestGeneration := latestProviderGeneration(items)
+	if latestGeneration == 0 {
+		return nil, fmt.Errorf("provider HLS metadata not found")
+	}
+	renditions := providerRenditionsForGeneration(items, latestGeneration)
 	if len(renditions) == 0 {
 		return nil, fmt.Errorf("provider HLS metadata not found")
 	}
@@ -53,74 +59,34 @@ func (s *ProviderPlaybackService) RenderMasterPlaylist(req ProviderPlaylistReque
 			r.Bandwidth, r.Bandwidth, r.Width, r.Height, r.Codecs,
 		))
 		b.WriteString(escapePathSegment(r.Name))
-		if req.OriginalQuery != "" {
-			b.WriteString("/index.m3u8?" + req.OriginalQuery)
-		} else if req.Generation > 1 {
-			b.WriteString(fmt.Sprintf("/index.m3u8?generation=%d", req.Generation))
-		} else {
-			b.WriteString("/index.m3u8")
-		}
+		b.WriteString(fmt.Sprintf("/index.m3u8?generation=%d", latestGeneration))
 		b.WriteString("\n")
 	}
 	return []byte(b.String()), nil
 }
 
 func (s *ProviderPlaybackService) RenderHybridMasterPlaylist(req ProviderPlaylistRequest) ([]byte, error) {
-	items, err := s.list(req.StreamID, "", req.Generation)
+	items, err := s.list(req.StreamID, "", 0)
 	if err != nil {
 		return nil, err
 	}
-	renditions := providerRenditions(items)
+	latestGeneration := latestProviderGeneration(items)
+	renditions := providerRenditionsForGeneration(items, latestGeneration)
 	if len(renditions) == 0 {
-		return nil, fmt.Errorf("provider HLS metadata not found")
-	}
-
-	originalBandwidth := sourceBandwidth
-	topWidth := 0
-	topHeight := 0
-	codecStr := defaultMasterCodecString
-	for _, r := range renditions {
-		if int(r.Bandwidth) > originalBandwidth {
-			originalBandwidth = int(r.Bandwidth) * 120 / 100
-		}
-		if r.Width > topWidth {
-			topWidth = r.Width
-			topHeight = r.Height
-			codecStr = r.Codecs
-		}
-	}
-	resolutionAttr := ""
-	if topWidth > 0 && topHeight > 0 {
-		resolutionAttr = fmt.Sprintf("RESOLUTION=%dx%d,", topWidth, topHeight)
-	}
-	originalURI := "original/index.m3u8"
-	if req.OriginalQuery != "" {
-		originalURI += "?" + req.OriginalQuery
+		return renderABRMasterPlaylist(nil, defaultMasterCodecString), nil
 	}
 
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:7\n")
 	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
-	b.WriteString(fmt.Sprintf(
-		"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,%sCODECS=\"%s\",CLOSED-CAPTIONS=NONE\n",
-		originalBandwidth, originalBandwidth, resolutionAttr, codecStr,
-	))
-	b.WriteString(originalURI)
-	b.WriteString("\n")
 	for _, r := range renditions {
 		b.WriteString(fmt.Sprintf(
 			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\",CLOSED-CAPTIONS=NONE\n",
 			r.Bandwidth, r.Bandwidth, r.Width, r.Height, r.Codecs,
 		))
 		b.WriteString(escapePathSegment(r.Name))
-		if req.OriginalQuery != "" {
-			b.WriteString("/index.m3u8?" + req.OriginalQuery)
-		} else if req.Generation > 1 {
-			b.WriteString(fmt.Sprintf("/index.m3u8?generation=%d", req.Generation))
-		} else {
-			b.WriteString("/index.m3u8")
-		}
+		b.WriteString(fmt.Sprintf("/index.m3u8?generation=%d", latestGeneration))
 		b.WriteString("\n")
 	}
 	return []byte(b.String()), nil
@@ -130,29 +96,40 @@ func (s *ProviderPlaybackService) RenderMediaPlaylist(req ProviderPlaylistReques
 	if req.RenditionName == "" {
 		return nil, fmt.Errorf("rendition_name is required")
 	}
-	items, err := s.list(req.StreamID, req.RenditionName, req.Generation)
+	items, err := s.list(req.StreamID, req.RenditionName, 0)
 	if err != nil {
 		return nil, err
 	}
-	var init *models.ProviderHLSMetadata
+	inits := make(map[string]models.ProviderHLSMetadata)
 	segments := make([]models.ProviderHLSMetadata, 0)
 	for i := range items {
 		item := items[i]
 		switch item.Kind {
 		case models.ProviderHLSObjectKindInit:
-			if init == nil {
-				init = &item
-			}
+			inits[providerInitKey(item.Generation, item.ObjectName, item.StorageKey)] = item
 		case models.ProviderHLSObjectKindSegment:
 			segments = append(segments, item)
 		}
 	}
-	if init == nil || len(segments) == 0 {
+	if len(inits) == 0 || len(segments) == 0 {
 		return nil, fmt.Errorf("provider HLS init and segment metadata not found")
 	}
 	sort.SliceStable(segments, func(i, j int) bool {
 		return *segments[i].MediaSequence < *segments[j].MediaSequence
 	})
+	// A sequence is monotonic across encoder generations. Keep a compact live
+	// window while retaining enough history to derive the discontinuity sequence.
+	windowStart := 0
+	if len(segments) > providerPlaylistSegmentCount {
+		windowStart = len(segments) - providerPlaylistSegmentCount
+	}
+	discontinuitySequence := int64(0)
+	for i := 1; i <= windowStart; i++ {
+		if segments[i].Generation != segments[i-1].Generation {
+			discontinuitySequence++
+		}
+	}
+	segments = segments[windowStart:]
 
 	targetDuration := 1
 	for _, segment := range segments {
@@ -172,15 +149,27 @@ func (s *ProviderPlaybackService) RenderMediaPlaylist(req ProviderPlaylistReques
 	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
 	b.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", targetDuration))
 	b.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", mediaSequence))
-	b.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", providerMediaURL(req.StreamID, req.RenditionName, req.Generation, init.ObjectName)))
-	for _, segment := range segments {
+	b.WriteString(fmt.Sprintf("#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", discontinuitySequence))
+	var previousGeneration int64
+	for i, segment := range segments {
+		if i == 0 || segment.Generation != previousGeneration {
+			if i > 0 {
+				b.WriteString("#EXT-X-DISCONTINUITY\n")
+			}
+			init, ok := inits[providerInitKey(segment.Generation, segment.InitSegmentName, segment.InitStorageKey)]
+			if !ok {
+				return nil, fmt.Errorf("provider HLS init metadata not found for generation %d", segment.Generation)
+			}
+			b.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", providerMediaURL(req.StreamID, req.RenditionName, segment.Generation, init.ObjectName)))
+			previousGeneration = segment.Generation
+		}
 		if segment.ProgramDateTime != nil {
 			b.WriteString("#EXT-X-PROGRAM-DATE-TIME:")
 			b.WriteString(segment.ProgramDateTime.UTC().Format("2006-01-02T15:04:05.000Z"))
 			b.WriteString("\n")
 		}
 		b.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", float64(segment.DurationMS)/1000.0))
-		b.WriteString(providerMediaURL(req.StreamID, req.RenditionName, req.Generation, segment.ObjectName))
+		b.WriteString(providerMediaURL(req.StreamID, req.RenditionName, segment.Generation, segment.ObjectName))
 		b.WriteString("\n")
 	}
 	return []byte(b.String()), nil
@@ -217,9 +206,6 @@ func (s *ProviderPlaybackService) list(streamID string, renditionName string, ge
 	}
 	if streamID == "" {
 		return nil, fmt.Errorf("stream_id is required")
-	}
-	if generation == 0 {
-		return nil, fmt.Errorf("generation is required")
 	}
 	return s.Repository.ListWindow(models.ProviderHLSMetadataWindowQuery{
 		StreamID:      streamID,
@@ -261,6 +247,30 @@ func providerRenditions(items []models.ProviderHLSMetadata) []providerRendition 
 		return out[i].Bandwidth > out[j].Bandwidth
 	})
 	return out
+}
+
+func latestProviderGeneration(items []models.ProviderHLSMetadata) int64 {
+	var latest int64
+	for _, item := range items {
+		if item.Generation > latest {
+			latest = item.Generation
+		}
+	}
+	return latest
+}
+
+func providerRenditionsForGeneration(items []models.ProviderHLSMetadata, generation int64) []providerRendition {
+	filtered := make([]models.ProviderHLSMetadata, 0, len(items))
+	for _, item := range items {
+		if item.Generation == generation {
+			filtered = append(filtered, item)
+		}
+	}
+	return providerRenditions(filtered)
+}
+
+func providerInitKey(generation int64, objectName string, storageKey string) string {
+	return fmt.Sprintf("%d\x00%s\x00%s", generation, objectName, storageKey)
 }
 
 func providerMediaURL(streamID string, renditionName string, generation int64, objectName string) string {

@@ -200,13 +200,17 @@ func (s *httpServer) handleAuthError(ctx *gin.Context, err error) bool {
 	return false
 }
 
-func (s *httpServer) providerGeneration(ctx *gin.Context) (int64, bool) {
+func (s *httpServer) providerGeneration(ctx *gin.Context, required bool) (int64, bool) {
 	generationRaw := ctx.Request.URL.Query().Get("generation")
 	if generationRaw == "" {
-		return 1, true
+		if required {
+			s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation query parameter is required"))
+			return 0, false
+		}
+		return 0, true
 	}
 	generation, err := strconv.ParseInt(generationRaw, 10, 64)
-	if err != nil || generation == 0 {
+	if err != nil || generation <= 0 {
 		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation query parameter is invalid"))
 		return 0, false
 	}
@@ -214,14 +218,25 @@ func (s *httpServer) providerGeneration(ctx *gin.Context) (int64, bool) {
 }
 
 func (s *httpServer) onProviderHLSPlaylistRequest(ctx *gin.Context, dir string, indexPlaylist bool) bool {
-	generation, ok := s.providerGeneration(ctx)
+	generation, ok := s.providerGeneration(ctx, false)
 	if !ok {
 		return true
 	}
 
 	var playlist []byte
 	var err error
-	if indexPlaylist && strings.Contains(dir, "/") {
+	if indexPlaylist {
+		// Try the full normalized MediaMTX path first. This avoids interpreting
+		// the final component of a nested stream path as a rendition.
+		playlist, err = s.providerPlayback.RenderMasterPlaylist(ProviderPlaylistRequest{
+			StreamID: dir, Generation: generation,
+		})
+	}
+	if indexPlaylist && err != nil && strings.Contains(dir, "/") {
+		if generation == 0 {
+			s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation query parameter is required"))
+			return true
+		}
 		base, rendition := path.Split(dir)
 		streamID := strings.TrimSuffix(base, "/")
 		_, _, err = s.findPathConf(ctx, streamID)
@@ -237,7 +252,7 @@ func (s *httpServer) onProviderHLSPlaylistRequest(ctx *gin.Context, dir string, 
 			RenditionName: rendition,
 			Generation:    generation,
 		})
-	} else if indexPlaylist {
+	} else if indexPlaylist && playlist == nil {
 		_, _, err = s.findPathConf(ctx, dir)
 		if err != nil {
 			if s.handleAuthError(ctx, err) {
@@ -250,7 +265,7 @@ func (s *httpServer) onProviderHLSPlaylistRequest(ctx *gin.Context, dir string, 
 			StreamID:   dir,
 			Generation: generation,
 		})
-	} else {
+	} else if !indexPlaylist {
 		s.writeErrorNoLog(ctx, http.StatusNotFound, fmt.Errorf("provider HLS playlist not found"))
 		return true
 	}
@@ -289,8 +304,13 @@ func (s *httpServer) onHybridHLSPlaylistRequest(ctx *gin.Context, dir string, fn
 	basePath := dir
 	childName := ""
 	if strings.Contains(dir, "/") {
-		basePath = abrBasePath(dir)
-		childName = strings.TrimPrefix(dir[len(basePath):], "/")
+		// Metadata is authoritative when a nested stream's final path component
+		// happens to look like a rendition name (for example, "org/720").
+		_, fullPathErr := s.providerPlayback.RenderMasterPlaylist(ProviderPlaylistRequest{StreamID: dir})
+		if fullPathErr != nil {
+			basePath = abrBasePath(dir)
+			childName = strings.TrimPrefix(dir[len(basePath):], "/")
+		}
 	}
 
 	pathConf, mode, ok := s.hlsPlaybackMode(ctx, basePath)
@@ -327,7 +347,7 @@ func (s *httpServer) onHybridHLSPlaylistRequest(ctx *gin.Context, dir string, fn
 		return true
 	}
 	if childName != "" {
-		generation, ok := s.providerGeneration(ctx)
+		generation, ok := s.providerGeneration(ctx, true)
 		if !ok {
 			return true
 		}
@@ -345,7 +365,7 @@ func (s *httpServer) onHybridHLSPlaylistRequest(ctx *gin.Context, dir string, fn
 		return true
 	}
 
-	generation, ok := s.providerGeneration(ctx)
+	generation, ok := s.providerGeneration(ctx, false)
 	if !ok {
 		return true
 	}
@@ -478,7 +498,7 @@ func (s *httpServer) onProviderHLSMediaRequest(ctx *gin.Context, mediaPath strin
 		return
 	}
 	generation, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil || generation == 0 {
+	if err != nil || generation <= 0 {
 		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation is invalid"))
 		return
 	}
@@ -786,7 +806,8 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			ctx.Writer.Write(renderABRMasterPlaylist(
 				s.liveABRRenditions(dir, mux, masterPlaylistRenditions(pathConf, mi)),
 				codecStringForTranscodedOutput(pathConf),
-				hasAudio))
+				hasAudio,
+				sourceInfoFromMuxerInstance(mi, codecStringForTranscodedOutput(pathConf))))
 			return
 		}
 

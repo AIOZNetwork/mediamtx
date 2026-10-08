@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1082,6 +1083,9 @@ func (pa *path) startRecording() {
 		OnSegmentCreate: func(segmentPath string) {
 			if pa.conf.RunOnRecordSegmentCreate != "" {
 				env := pa.ExternalCmdEnv()
+				if abs, err := filepath.Abs(segmentPath); err == nil {
+					segmentPath = abs
+				}
 				env["MTX_SEGMENT_PATH"] = segmentPath
 
 				pa.Log(logger.Info, "runOnRecordSegmentCreate command launched")
@@ -1097,6 +1101,9 @@ func (pa *path) startRecording() {
 		OnSegmentComplete: func(segmentPath string, segmentDuration time.Duration) {
 			if pa.conf.RunOnRecordSegmentComplete != "" {
 				env := pa.ExternalCmdEnv()
+				if abs, err := filepath.Abs(segmentPath); err == nil {
+					segmentPath = abs
+				}
 				env["MTX_SEGMENT_PATH"] = segmentPath
 				env["MTX_SEGMENT_DURATION"] = strconv.FormatFloat(segmentDuration.Seconds(), 'f', -1, 64)
 

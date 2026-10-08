@@ -22,10 +22,9 @@ func TestRenderABRMasterPlaylistSharedAudioNestedRenditions(t *testing.T) {
 	}
 
 	for _, expected := range []string{
-		"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n",
-		"original/index.m3u8",
 		`RESOLUTION=1920x1080`,
 		`CODECS="avc1.640028,mp4a.40.2"`,
+		`CODECS="avc1.4d401f,mp4a.40.2"`,
 		"1080/index.m3u8",
 		"720/index.m3u8",
 		"480/index.m3u8",
@@ -33,6 +32,9 @@ func TestRenderABRMasterPlaylistSharedAudioNestedRenditions(t *testing.T) {
 		if !strings.Contains(playlist, expected) {
 			t.Fatalf("master playlist missing %q:\n%s", expected, playlist)
 		}
+	}
+	if strings.Contains(playlist, "original/index.m3u8") {
+		t.Fatalf("master must not mix original and transcoded timelines:\n%s", playlist)
 	}
 
 	lines := strings.Split(playlist, "\n")
@@ -42,29 +44,62 @@ func TestRenderABRMasterPlaylistSharedAudioNestedRenditions(t *testing.T) {
 			continue
 		}
 		streamInfCount++
-		if !strings.Contains(line, `CODECS="avc1.640028,mp4a.40.2"`) {
-			t.Fatalf("STREAM-INF should advertise video and audio CODECS:\n%s", playlist)
-		}
 		if strings.Contains(line, `NAME=`) {
 			t.Fatalf("STREAM-INF should not contain NAME attribute:\n%s", playlist)
 		}
 	}
-	if streamInfCount != 4 {
-		t.Fatalf("expected 4 STREAM-INF entries, got %d:\n%s", streamInfCount, playlist)
+	if streamInfCount != 3 {
+		t.Fatalf("expected 3 STREAM-INF entries, got %d:\n%s", streamInfCount, playlist)
 	}
+}
 
-	for i, line := range lines {
-		if i+1 < len(lines) && lines[i+1] == "original/index.m3u8" {
-			if !strings.Contains(line, `CODECS="avc1.640028,mp4a.40.2"`) {
-				t.Fatalf("original stream should advertise video and audio CODECS:\n%s", playlist)
-			}
-			if strings.Contains(line, `NAME=`) {
-				t.Fatalf("STREAM-INF should not contain NAME attribute:\n%s", playlist)
-			}
-			return
+func TestRenderABRMasterOriginalOnlyUsesSourceInfo(t *testing.T) {
+	playlist := string(renderABRMasterPlaylist(nil, defaultMasterCodecString, abrMasterSourceInfo{
+		codecString: "avc1.4d401f,mp4a.40.2", width: 1280, height: 720,
+	}))
+	for _, expected := range []string{"original/index.m3u8", `RESOLUTION=1280x720`, `CODECS="avc1.4d401f,mp4a.40.2"`} {
+		if !strings.Contains(playlist, expected) {
+			t.Fatalf("missing %q:\n%s", expected, playlist)
 		}
 	}
-	t.Fatalf("missing original stream info:\n%s", playlist)
+
+	unknown := string(renderABRMasterPlaylist(nil, defaultMasterCodecString,
+		abrMasterSourceInfo{codecString: "avc1.640028,mp4a.40.2"}))
+	if strings.Contains(unknown, "RESOLUTION=") {
+		t.Fatalf("unknown source must omit resolution:\n%s", unknown)
+	}
+}
+
+func TestRenderABRMasterPlaylistPerRenditionCodecs(t *testing.T) {
+	playlist := string(renderABRMasterPlaylist([]conf.HLSTranscodingRendition{
+		{Name: "1080", Width: 1920, Height: 1080, VideoBitrate: "6000k"},
+		{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+		{Name: "480", Width: 854, Height: 480, VideoBitrate: "1200k"},
+		{Name: "360", Width: 640, Height: 360, VideoBitrate: "800k"},
+	}, ""))
+
+	expectedByURI := map[string]string{
+		"1080/index.m3u8": `CODECS="avc1.640028,mp4a.40.2"`,
+		"720/index.m3u8":  `CODECS="avc1.4d401f,mp4a.40.2"`,
+		"480/index.m3u8":  `CODECS="avc1.4d401f,mp4a.40.2"`,
+		"360/index.m3u8":  `CODECS="avc1.4d401e,mp4a.40.2"`,
+	}
+	lines := strings.Split(playlist, "\n")
+	for uri, expectedCodec := range expectedByURI {
+		found := false
+		for i := 0; i+1 < len(lines); i++ {
+			if lines[i+1] != uri {
+				continue
+			}
+			found = true
+			if !strings.Contains(lines[i], expectedCodec) {
+				t.Fatalf("%s should advertise %s:\n%s", uri, expectedCodec, playlist)
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s:\n%s", uri, playlist)
+		}
+	}
 }
 
 func TestHLSPlaceholderPlaylist(t *testing.T) {
@@ -100,7 +135,6 @@ func TestRenderABRMasterPlaylistUsesEffectiveRenditions(t *testing.T) {
 	playlist := string(renderABRMasterPlaylist(masterPlaylistRenditions(pathConf, mi), ""))
 
 	for _, expected := range []string{
-		"original/index.m3u8",
 		"720/index.m3u8",
 		"480/index.m3u8",
 	} {
@@ -201,6 +235,9 @@ func TestCodecStringFromInfoAVCAndFallback(t *testing.T) {
 	if got := codecStringFromInfo("libx264", "High", "4.0", "aac"); got != "avc1.640028,mp4a.40.2" {
 		t.Fatalf("unexpected high 4.0 codec string %q", got)
 	}
+	if got := codecStringFromInfo("libx264", "Main", "3.1", "aac"); got != "avc1.4d401f,mp4a.40.2" {
+		t.Fatalf("unexpected main 3.1 codec string %q", got)
+	}
 	if got := codecStringFromInfo("", "", "", ""); got != "avc1.640028,mp4a.40.2" {
 		t.Fatalf("unexpected default codec string %q", got)
 	}
@@ -298,16 +335,18 @@ func TestRenderABRMasterPlaylistWithAudio(t *testing.T) {
 
 	for _, expected := range []string{
 		"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n",
-		`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="audio",LANGUAGE="und",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2",URI="original/audio2_stream.m3u8"`,
-		`AUDIO="audio"`,
 		`CODECS="avc1.640028,mp4a.40.2"`,
-		"original/index.m3u8",
 		"1080/index.m3u8",
 		"720/index.m3u8",
 		"480/index.m3u8",
 	} {
 		if !strings.Contains(playlist, expected) {
 			t.Fatalf("master playlist missing %q:\n%s", expected, playlist)
+		}
+	}
+	for _, unexpected := range []string{"#EXT-X-MEDIA:TYPE=AUDIO", `AUDIO="audio"`, "original/"} {
+		if strings.Contains(playlist, unexpected) {
+			t.Fatalf("master playlist unexpectedly mixes original output %q:\n%s", unexpected, playlist)
 		}
 	}
 

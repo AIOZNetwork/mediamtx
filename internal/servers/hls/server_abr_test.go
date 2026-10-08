@@ -171,7 +171,7 @@ func TestServerABRChildWithoutSession(t *testing.T) {
 	abrRenditionWarmup = 0
 	code, body = get("live/index.m3u8")
 	require.Equal(t, http.StatusOK, code)
-	require.Contains(t, body, "original/index.m3u8")
+	require.NotContains(t, body, "original/index.m3u8")
 	require.Contains(t, body, "720/index.m3u8")
 	require.NotContains(t, body, "480/index.m3u8")
 

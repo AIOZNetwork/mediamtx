@@ -102,7 +102,7 @@ ENV APP_ENV=app
 ARG APP_UID=10001
 RUN groupadd --system --gid "${APP_UID}" app && \
     useradd --system --uid "${APP_UID}" --gid app --home-dir /app --no-create-home app && \
-    mkdir -p /app/streamId /app/input-live && \
+    mkdir -p /app/streamId /app/input-live /app/recordings && \
     chown -R app:app /app
 
 WORKDIR /app
