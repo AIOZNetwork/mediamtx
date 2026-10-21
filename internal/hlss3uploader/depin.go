@@ -7,11 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
 
 	uplinksdk "gitlab.internal/aioz-depin/go-sdk"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -43,6 +46,45 @@ type DePINStorageProvider struct {
 	// contractID is the mandatory storage contract for this stream.
 	// Created once per stream during initialization, shared across all segment uploads of the stream.
 	contractID string
+
+	// contractKey is the depinContractCache key of contractID.
+	contractKey string
+}
+
+// depinContracts caches one storage contract per stream key so a muxer
+// restart or reconnect reuses it instead of creating a new contract. An entry
+// is cleared only when the contract is deleted (remote cleanup).
+type depinContracts struct {
+	mu  sync.Mutex
+	ids map[string]string
+}
+
+var depinContractCache = &depinContracts{ids: map[string]string{}}
+
+func depinCacheKey(streamName string) string {
+	return strings.Trim(streamName, "/")
+}
+
+// getOrCreate returns the cached contract for key or runs create (under the
+// lock, so concurrent muxer starts cannot create two contracts).
+func (c *depinContracts) getOrCreate(key string, create func() (string, error)) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if id, ok := c.ids[key]; ok {
+		return id, nil
+	}
+	id, err := create()
+	if err != nil {
+		return "", err
+	}
+	c.ids[key] = id
+	return id, nil
+}
+
+func (c *depinContracts) clear(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.ids, key)
 }
 
 func (p *DePINStorageProvider) Name() string {
@@ -174,6 +216,8 @@ func (p *DePINStorageProvider) GetObject(ctx context.Context, key string) (io.Re
 	return pr, contentType, -1, nil
 }
 
+// DeleteFolder deletes the whole storage contract (prefix is not used: DePIN
+// stores one contract per stream). A contract that is already gone counts as success.
 func (p *DePINStorageProvider) DeleteFolder(ctx context.Context, prefix string) error {
 	if p.contractID == "" {
 		return nil
@@ -183,10 +227,18 @@ func (p *DePINStorageProvider) DeleteFolder(ctx context.Context, prefix string) 
 		return fmt.Errorf("depin: parse contract id: %w", err)
 	}
 	_, err = p.client.DeleteContract(ctx, contractUUID, true)
-	if err != nil {
+	if err != nil && !isDePINNotFound(err) {
 		return fmt.Errorf("depin: delete contract: %w", err)
 	}
+	depinContractCache.clear(p.contractKey)
 	return nil
+}
+
+func isDePINNotFound(err error) bool {
+	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "not found")
 }
 
 func (p *DePINStorageProvider) Close() error {
@@ -196,29 +248,62 @@ func (p *DePINStorageProvider) Close() error {
 	return nil
 }
 
+func newDePINClient(ctx context.Context, cfg StorageConfig) (*uplinksdk.Client, error) {
+	identityDir := getResolvedValue(cfg.DePINIdentityDir, "")
+	coordPeerURL := getResolvedValue(cfg.DePINCoordPeerURL, "")
+	pieceKeyPath := getResolvedValue(cfg.DePINPieceKeyPath, "")
+
+	if identityDir == "" || coordPeerURL == "" {
+		return nil, fmt.Errorf("depin: identity_dir and coord_peer_url are required")
+	}
+
+	opts := []uplinksdk.ClientOption{
+		uplinksdk.WithIdentityDir(identityDir),
+		uplinksdk.WithCoordPeerURL(coordPeerURL),
+		uplinksdk.WithLogger(slog.Default()),
+	}
+	if pieceKeyPath != "" {
+		opts = append(opts, uplinksdk.WithPieceKey(pieceKeyPath))
+	}
+
+	client, err := uplinksdk.New(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("depin: init client: %w", err)
+	}
+	return client, nil
+}
+
+// newDePINDeleteProvider builds a provider that can only delete contractID. It
+// never lists placements or creates a contract.
+func newDePINDeleteProvider(ctx context.Context, cfg StorageConfig, contractID string) (StorageProvider, error) {
+	client, err := newDePINClient(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &DePINStorageProvider{
+		client:      client,
+		contractID:  contractID,
+		contractKey: depinCacheKey(cfg.StreamName),
+	}, nil
+}
+
+// remoteFolderPrefixFor is the remote prefix of a stream, the same value the
+// uploader uses as its folder prefix and cleanup row key.
+func remoteFolderPrefixFor(prefix, streamName string) string {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		prefix = defaultStoragePrefix
+	}
+	return path.Join(prefix, strings.Trim(streamName, "/"))
+}
+
 func init() {
 	RegisterProvider(ProviderDePIN, func(ctx context.Context, cfg StorageConfig) (StorageProvider, error) {
-		identityDir := getResolvedValue(cfg.DePINIdentityDir, "")
-		coordPeerURL := getResolvedValue(cfg.DePINCoordPeerURL, "")
-		pieceKeyPath := getResolvedValue(cfg.DePINPieceKeyPath, "")
 		linkEndpoint := getResolvedValue(cfg.DePINLinkEndpoint, "")
 
-		if identityDir == "" || coordPeerURL == "" {
-			return nil, fmt.Errorf("depin: identity_dir and coord_peer_url are required")
-		}
-
-		opts := []uplinksdk.ClientOption{
-			uplinksdk.WithIdentityDir(identityDir),
-			uplinksdk.WithCoordPeerURL(coordPeerURL),
-			uplinksdk.WithLogger(slog.Default()),
-		}
-		if pieceKeyPath != "" {
-			opts = append(opts, uplinksdk.WithPieceKey(pieceKeyPath))
-		}
-
-		client, err := uplinksdk.New(ctx, opts...)
+		client, err := newDePINClient(ctx, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("depin: init client: %w", err)
+			return nil, err
 		}
 
 		region := defaultDePINRegion
@@ -226,48 +311,66 @@ func init() {
 			region = strings.TrimSpace(cfg.Region)
 		}
 
-		placements, err := client.ListPlacements(ctx)
+		cacheKey := depinCacheKey(cfg.StreamName)
+		repo := defaultCleanupRepository()
+		contractID, err := depinContractCache.getOrCreate(cacheKey, func() (string, error) {
+			// A contract persisted before a restart is reused, never recreated.
+			if repo != nil && cacheKey != "" {
+				if id, err := repo.GetContract(string(ProviderDePIN), cacheKey); err != nil {
+					slog.Warn("depin: load persisted contract failed", slog.Any("err", err))
+				} else if id != "" {
+					return id, nil
+				}
+			}
+
+			placements, err := client.ListPlacements(ctx)
+			if err != nil {
+				return "", fmt.Errorf("list placements: %w", err)
+			}
+			if len(placements) == 0 {
+				return "", fmt.Errorf("coordinator returned no placements")
+			}
+			chosenPlacement := placements[0].PlacementId
+			tags := map[string]string{
+				"service": "mediamtx-hls",
+				"type":    "livestream",
+			}
+			if cfg.StreamName != "" {
+				tags["stream_name"] = cfg.StreamName
+			} else {
+				tags["role"] = "dvr"
+			}
+
+			// Ensure client identity is registered with the coordinator if not already present
+			if _, err := client.GetAccount(ctx); err != nil {
+				email := fmt.Sprintf("mediamtx+%s@aioz.network", client.Identity().ID.String())
+				_, _ = client.RegisterAccount(ctx, email)
+			}
+
+			cID, err := client.CreateContractWithPlacement(ctx, region, chosenPlacement, tags)
+			if err != nil {
+				return "", fmt.Errorf("create contract (placement %d): %w", chosenPlacement, err)
+			}
+			id := cID.String()
+			// Persist right away: a crash before the uploader starts must not orphan it.
+			if repo != nil && cacheKey != "" {
+				if err := repo.UpsertActive(string(ProviderDePIN), cacheKey,
+					remoteFolderPrefixFor(cfg.Prefix, cfg.StreamName), id); err != nil {
+					slog.Warn("depin: persist contract failed", slog.Any("err", err))
+				}
+			}
+			return id, nil
+		})
 		if err != nil {
 			_ = client.Close()
-			return nil, fmt.Errorf("depin: list placements: %w", err)
-		}
-		if len(placements) == 0 {
-			_ = client.Close()
-			return nil, fmt.Errorf("depin: coordinator returned no placements")
-		}
-
-		chosenPlacement := placements[0].PlacementId
-		tags := map[string]string{
-			"service": "mediamtx-hls",
-			"type":    "livestream",
-		}
-		if cfg.StreamName != "" {
-			tags["stream_name"] = cfg.StreamName
-		} else {
-			tags["role"] = "dvr"
-		}
-
-		// Ensure client identity is registered with the coordinator if not already present
-		if _, err := client.GetAccount(ctx); err != nil {
-			email := fmt.Sprintf("mediamtx+%s@aioz.network", client.Identity().ID.String())
-			_, _ = client.RegisterAccount(ctx, email)
-		}
-
-		cID, err := client.CreateContractWithPlacement(
-			ctx,
-			region,
-			chosenPlacement,
-			tags,
-		)
-		if err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("depin: create contract for stream %q (placement %d): %w", cfg.StreamName, chosenPlacement, err)
+			return nil, fmt.Errorf("depin: contract for stream %q: %w", cfg.StreamName, err)
 		}
 
 		return &DePINStorageProvider{
 			client:       client,
 			linkEndpoint: linkEndpoint,
-			contractID:   cID.String(),
+			contractID:   contractID,
+			contractKey:  cacheKey,
 		}, nil
 	})
 }

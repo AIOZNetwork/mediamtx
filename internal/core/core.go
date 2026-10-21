@@ -887,22 +887,26 @@ func (p *Core) createResources(initial bool) error {
 			DVREnabled:      currentConf.HLSDVREnabled,
 			UploadConfig: &hls.MuxerUploadConfig{
 				Storage: hlss3uploader.StorageConfig{
-					Provider:               currentConf.StorageProvider,
-					Prefix:                 currentConf.S3Prefix,
-					Endpoint:               currentConf.S3Endpoint,
-					Bucket:                 currentConf.S3Bucket,
-					Region:                 currentConf.S3Region,
-					AccessKeyID:            currentConf.S3AccessKeyID,
-					SecretAccessKey:        currentConf.S3SecretAccessKey,
-					DePINIdentityDir:       currentConf.DePINIdentityDir,
-					DePINCoordPeerURL:      currentConf.DePINCoordPeerURL,
-					DePINPieceKeyPath:      currentConf.DePINPieceKeyPath,
-					DePINLinkEndpoint:      currentConf.DePINLinkEndpoint,
-					CDNEndpoint:            currentConf.CDNEndpoint,
-					CDNHubURL:              currentConf.CDNHubURL,
-					CDNBusinessAddress:     currentConf.CDNBusinessAddress,
-					DeleteLocalAfterUpload: true,
-					Workers:                4,
+					Provider:           currentConf.StorageProvider,
+					Prefix:             currentConf.S3Prefix,
+					Endpoint:           currentConf.S3Endpoint,
+					Bucket:             currentConf.S3Bucket,
+					Region:             currentConf.S3Region,
+					AccessKeyID:        currentConf.S3AccessKeyID,
+					SecretAccessKey:    currentConf.S3SecretAccessKey,
+					DePINIdentityDir:   currentConf.DePINIdentityDir,
+					DePINCoordPeerURL:  currentConf.DePINCoordPeerURL,
+					DePINPieceKeyPath:  currentConf.DePINPieceKeyPath,
+					DePINLinkEndpoint:  currentConf.DePINLinkEndpoint,
+					CDNEndpoint:        currentConf.CDNEndpoint,
+					CDNHubURL:          currentConf.CDNHubURL,
+					CDNBusinessAddress: currentConf.CDNBusinessAddress,
+					Cleanup: hlss3uploader.CleanupConfig{
+						Enabled:     &currentConf.StorageCleanupEnabled,
+						Interval:    time.Duration(currentConf.StorageCleanupInterval),
+						GracePeriod: time.Duration(currentConf.StorageCleanupGracePeriod),
+					},
+					Workers: 4,
 				},
 			},
 			CDNSecret:       currentConf.HLSCDNSecret,
@@ -919,6 +923,13 @@ func (p *Core) createResources(initial bool) error {
 			return err
 		}
 		p.hlsServer = i
+		if database.DB != nil {
+			if err := database.EnsureLiveHLSCleanupTable(database.DB); err != nil {
+				p.Log(logger.Warn, "%v", err)
+			}
+		}
+		hlss3uploader.SetCleanupRepository(repository.NewLiveHLSCleanupRepository(database.DB))
+		hlss3uploader.StartCleanupChore(i.UploadConfig.Storage)
 	}
 
 	if currentConf.WebRTC &&
@@ -1385,6 +1396,7 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 
 	if closeHLSServer && p.hlsServer != nil {
 		p.hlsServer.Close()
+		hlss3uploader.StopCleanupChores()
 		p.hlsServer = nil
 	}
 

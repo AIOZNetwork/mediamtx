@@ -3,11 +3,13 @@ package hlss3uploader
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,44 +67,76 @@ func (m *mockProvider) Close() error {
 	return nil
 }
 
-func TestHLSS3UploaderFlushAndCloseDeletesRemoteFolder(t *testing.T) {
-	provider := &mockProvider{}
-	uploader := &HLSS3Uploader{
-		Config: StorageConfig{
-			Directory:  filepath.Join(t.TempDir(), "stream1"),
-			Prefix:     "live-hls",
-			StreamName: "stream1/720",
-		},
+func newClosedUploader(cfg StorageConfig, provider StorageProvider, repo *fakeCleanupRepo) *HLSS3Uploader {
+	u := &HLSS3Uploader{
+		Config:   cfg,
 		provider: provider,
 		done:     make(chan struct{}),
 		taskChan: make(chan string),
 	}
-	close(uploader.done)
+	if repo != nil {
+		u.cleanupRepo = repo
+	}
+	close(u.done)
+	return u
+}
 
-	uploader.FlushAndClose()
+func TestHLSS3UploaderFlushAndCloseSchedulesRemoteFolderCleanup(t *testing.T) {
+	provider := &mockProvider{}
+	repo := newFakeCleanupRepo()
+	cfg := StorageConfig{
+		Directory:  filepath.Join(t.TempDir(), "stream1"),
+		Prefix:     "live-hls",
+		StreamName: "stream1/720",
+		Provider:   "mock",
+		Cleanup:    CleanupConfig{GracePeriod: time.Hour},
+	}
+	newClosedUploader(cfg, provider, repo).FlushAndClose()
 
-	if provider.deletePrefix != "live-hls/stream1/720" {
-		t.Fatalf("expected DeleteFolder prefix live-hls/stream1/720, got %q", provider.deletePrefix)
+	if provider.deletePrefix != "" {
+		t.Fatalf("remote folder must not be deleted immediately, got %q", provider.deletePrefix)
+	}
+	row := repo.get("mock", "live-hls/stream1/720")
+	if row == nil || row.Status != models.LiveHLSCleanupStatusPendingDelete {
+		t.Fatalf("unexpected row: %+v", row)
+	}
+	if !row.DeleteAfter.After(time.Now().Add(50 * time.Minute)) {
+		t.Fatalf("delete_after too early: %v", row.DeleteAfter)
 	}
 }
 
-func TestHLSS3UploaderFlushAndCloseUploadsFinalFilesAfterClosed(t *testing.T) {
+func TestHLSS3UploaderFlushAndCloseCleanupDisabledKeepsRemote(t *testing.T) {
+	off := false
+	repo := newFakeCleanupRepo()
+	cfg := StorageConfig{Directory: t.TempDir(), Prefix: "live-hls", StreamName: "s", Provider: "mock", Cleanup: CleanupConfig{Enabled: &off}}
+	newClosedUploader(cfg, &mockProvider{}, repo).FlushAndClose()
+	if row := repo.get("mock", "live-hls/s"); row != nil {
+		t.Fatalf("disabled cleanup must not schedule: %+v", row)
+	}
+}
+
+func TestHLSS3UploaderFlushAndCloseNoDatabaseSkipsCleanup(t *testing.T) {
+	provider := &mockProvider{}
+	cfg := StorageConfig{Directory: t.TempDir(), Prefix: "live-hls", StreamName: "s", Provider: "mock"}
+	newClosedUploader(cfg, provider, nil).FlushAndClose()
+	if provider.deletePrefix != "" {
+		t.Fatalf("no DB: nothing may be deleted, got %q", provider.deletePrefix)
+	}
+}
+
+func TestHLSS3UploaderFlushAndCloseSkipsPlaylistUpload(t *testing.T) {
 	tmpDir := t.TempDir()
-	playlistPath := filepath.Join(tmpDir, "video0_stream.m3u8")
-	if err := os.WriteFile(playlistPath, []byte("#EXTM3U\n#EXT-X-ENDLIST\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "video0_stream.m3u8"), []byte("#EXTM3U\n#EXT-X-ENDLIST\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
+	if err := os.WriteFile(filepath.Join(tmpDir, "seg0.m4s"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	provider := &mockProvider{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	uploader := &HLSS3Uploader{
-		Config: StorageConfig{
-			Directory:  tmpDir,
-			Prefix:     "live-hls",
-			StreamName: "stream1/720",
-			Workers:    1,
-		},
+		Config:    StorageConfig{Directory: tmpDir, Prefix: "live-hls", StreamName: "s", Provider: "mock", Workers: 1},
 		provider:  provider,
 		ctx:       ctx,
 		ctxCancel: cancel,
@@ -115,8 +149,8 @@ func TestHLSS3UploaderFlushAndCloseUploadsFinalFilesAfterClosed(t *testing.T) {
 
 	uploader.FlushAndClose()
 
-	if got := atomic.LoadInt32(&provider.uploadCount); got == 0 {
-		t.Fatal("expected final scan to upload playlist even after uploader is marked closed")
+	if got := atomic.LoadInt32(&provider.uploadCount); got != 1 {
+		t.Fatalf("expected only the segment to upload (playlist skipped), got %d uploads", got)
 	}
 }
 
@@ -494,5 +528,103 @@ func TestIngestFMP4PlaylistEstimatesStartedAtFromModTimeWhenPDTMissing(t *testin
 	window, err := repo.ListFMP4Window("cam/video/720", expected.Add(-time.Second))
 	if err != nil || len(window) != 1 {
 		t.Fatalf("expected segment inside fMP4 window, len=%d err=%v", len(window), err)
+	}
+}
+
+func TestScanDirectorySkipsStaleInitAndPlaylists(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, n := range []string{"old_video1_init.mp4", "old_video1_stream.m3u8", "index.m3u8", "old_video1_seg0.mp4"} {
+		if err := os.WriteFile(filepath.Join(tmpDir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uploader := &HLSS3Uploader{
+		Config:     StorageConfig{Directory: tmpDir},
+		Repository: &mockSegmentRepo{},
+		taskChan:   make(chan string, 10),
+	}
+	uploader.scanDirectory(tmpDir)
+	close(uploader.taskChan)
+	var got []string
+	for p := range uploader.taskChan {
+		got = append(got, filepath.Base(p))
+	}
+	if len(got) != 1 || got[0] != "old_video1_seg0.mp4" {
+		t.Fatalf("expected only the segment queued, got %v", got)
+	}
+}
+
+type uploadedInitRepo struct {
+	mockSegmentRepo
+}
+
+func (r *uploadedInitRepo) GetByStorageKey(string) (*models.LiveHLSSegment, error) {
+	return &models.LiveHLSSegment{Status: models.LiveHLSSegmentStatusUploadedS3}, nil
+}
+
+func TestProcessFileSkipsInitAlreadyUploadedInDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	initPath := filepath.Join(tmpDir, "abcd_video1_init.mp4")
+	if err := os.WriteFile(initPath, []byte("init"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &mockProvider{}
+	uploader := &HLSS3Uploader{
+		Config:     StorageConfig{Directory: tmpDir, Prefix: "p"},
+		provider:   provider,
+		ctx:        context.Background(),
+		Repository: &uploadedInitRepo{},
+	}
+	uploader.processFile(initPath)
+	if got := atomic.LoadInt32(&provider.uploadCount); got != 0 {
+		t.Fatalf("init already uploaded per DB must not be re-uploaded, got %d", got)
+	}
+}
+
+func TestProcessFileInitUploadedOnceWithoutDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	initPath := filepath.Join(tmpDir, "abcd_video1_init.mp4")
+	if err := os.WriteFile(initPath, []byte("init"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &mockProvider{}
+	uploader := &HLSS3Uploader{Config: StorageConfig{Directory: tmpDir, Prefix: "p"}, provider: provider, ctx: context.Background()}
+	uploader.processFile(initPath)
+	if got := atomic.LoadInt32(&provider.uploadCount); got != 1 {
+		t.Fatalf("expected 1 upload of init file, got %d", got)
+	}
+}
+
+func TestProcessFileDoesNotUploadPlaylists(t *testing.T) {
+	tmpDir := t.TempDir()
+	pl := filepath.Join(tmpDir, "index.m3u8")
+	if err := os.WriteFile(pl, []byte("#EXTM3U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &mockProvider{}
+	uploader := &HLSS3Uploader{Config: StorageConfig{Directory: tmpDir, Prefix: "p"}, provider: provider, ctx: context.Background()}
+	uploader.processFile(pl)
+	if got := atomic.LoadInt32(&provider.uploadCount); got != 0 {
+		t.Fatalf("playlist must not upload, got %d", got)
+	}
+}
+
+func TestSendToTaskChanFullQueueDropsOldestWithoutGoroutines(t *testing.T) {
+	u := &HLSS3Uploader{taskChan: make(chan string, 3)}
+	before := runtime.NumGoroutine()
+	for i := 0; i < 200; i++ {
+		u.sendToTaskChan(fmt.Sprintf("f%d.m4s", i))
+	}
+	if after := runtime.NumGoroutine(); after > before+2 {
+		t.Fatalf("goroutines grew from %d to %d", before, after)
+	}
+	if len(u.taskChan) != 3 {
+		t.Fatalf("queue len = %d, want 3", len(u.taskChan))
+	}
+	want := []string{"f197.m4s", "f198.m4s", "f199.m4s"}
+	for _, w := range want {
+		if got := <-u.taskChan; got != w {
+			t.Fatalf("got %s want %s (newest must be kept)", got, w)
+		}
 	}
 }

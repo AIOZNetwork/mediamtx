@@ -19,18 +19,20 @@ const (
 
 // StorageConfig contains settings to configure storage providers.
 type StorageConfig struct {
-	Provider               string `json:"provider" yaml:"provider"`
-	Directory              string `json:"directory" yaml:"directory"`
-	StreamName             string `json:"stream_name" yaml:"stream_name"`
-	StreamKey              string `json:"stream_key" yaml:"stream_key"`
-	Prefix                 string `json:"prefix" yaml:"prefix"`
-	Endpoint               string `json:"endpoint" yaml:"endpoint"`
-	Bucket                 string `json:"bucket" yaml:"bucket"`
-	Region                 string `json:"region" yaml:"region"`
-	AccessKeyID            string `json:"access_key_id" yaml:"access_key_id"`
-	SecretAccessKey        string `json:"secret_access_key" yaml:"secret_access_key"`
-	DeleteLocalAfterUpload bool   `json:"delete_local_after_upload" yaml:"delete_local_after_upload"`
-	Workers                int    `json:"workers" yaml:"workers"`
+	Provider        string `json:"provider" yaml:"provider"`
+	Directory       string `json:"directory" yaml:"directory"`
+	StreamName      string `json:"stream_name" yaml:"stream_name"`
+	StreamKey       string `json:"stream_key" yaml:"stream_key"`
+	Prefix          string `json:"prefix" yaml:"prefix"`
+	Endpoint        string `json:"endpoint" yaml:"endpoint"`
+	Bucket          string `json:"bucket" yaml:"bucket"`
+	Region          string `json:"region" yaml:"region"`
+	AccessKeyID     string `json:"access_key_id" yaml:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key" yaml:"secret_access_key"`
+	Workers         int    `json:"workers" yaml:"workers"`
+
+	// Cleanup configures the delayed remote cleanup chore (see cleanup.go).
+	Cleanup CleanupConfig `json:"cleanup" yaml:"cleanup"`
 
 	// DePIN go-sdk storage settings
 	DePINIdentityDir  string `json:"depin_identity_dir" yaml:"depin_identity_dir"`
