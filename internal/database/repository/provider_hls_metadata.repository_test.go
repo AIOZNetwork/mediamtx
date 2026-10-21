@@ -191,3 +191,23 @@ func TestProviderHLSMetadataValidation(t *testing.T) {
 	_, err = repo.UpsertByIdempotencyKey(seg)
 	require.Error(t, err)
 }
+
+func TestProviderHLSMetadataDeleteByStreamID(t *testing.T) {
+	repo := newProviderHLSTestRepo(t)
+	_, err := repo.UpsertByIdempotencyKey(validProviderHLSInit("init"))
+	require.NoError(t, err)
+	_, err = repo.UpsertByIdempotencyKey(validProviderHLSSegment("seg-1", 1, "seg-1.m4s"))
+	require.NoError(t, err)
+
+	n, err := repo.DeleteByStreamID("other")
+	require.NoError(t, err)
+	require.Equal(t, int64(0), n)
+
+	n, err = repo.DeleteByStreamID("stream-1")
+	require.NoError(t, err)
+	require.Equal(t, int64(2), n)
+
+	// hard delete: same stream can be re-ingested
+	_, err = repo.UpsertByIdempotencyKey(validProviderHLSInit("init-again"))
+	require.NoError(t, err)
+}

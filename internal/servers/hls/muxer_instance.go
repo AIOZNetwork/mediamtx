@@ -49,6 +49,22 @@ func absolutePathInside(base string, candidate string) (string, error) {
 	return candidateAbs, nil
 }
 
+// removeMuxerLeftovers deletes the init files and playlists gohlslib writes
+// into the muxer directory and never removes. Each muxer uses a new random
+// prefix, so without this they pile up on every reconnect and the directory
+// is never empty for os.Remove. Segments are pruned by gohlslib itself.
+func removeMuxerLeftovers(dir string) {
+	for _, pattern := range []string{"*_init.mp4", "*.m3u8"} {
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			continue
+		}
+		for _, m := range matches {
+			os.Remove(m)
+		}
+	}
+}
+
 type instanceParent interface {
 	logger.Writer
 	closeInstance(*muxerInstance, error)
@@ -178,6 +194,7 @@ func (mi *muxerInstance) run() {
 	mi.hmuxer.Close()
 
 	if mi.hmuxer.Directory != "" {
+		removeMuxerLeftovers(mi.hmuxer.Directory)
 		os.Remove(mi.hmuxer.Directory)
 	}
 

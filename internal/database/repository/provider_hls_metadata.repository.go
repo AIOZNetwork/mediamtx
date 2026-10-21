@@ -136,6 +136,15 @@ func ensureProviderHLSInsertAllowed(tx *gorm.DB, metadata models.ProviderHLSMeta
 	return nil
 }
 
+// DeleteByStreamID hard-deletes all rows of a stream so unique indexes do not block a later re-ingest.
+func (r *ProviderHLSMetadataRepository) DeleteByStreamID(streamID string) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, gorm.ErrRecordNotFound
+	}
+	res := r.db.Unscoped().Where("stream_id = ?", streamID).Delete(&models.ProviderHLSMetadata{})
+	return res.RowsAffected, res.Error
+}
+
 func (r *ProviderHLSMetadataRepository) ListWindow(query models.ProviderHLSMetadataWindowQuery) ([]models.ProviderHLSMetadata, error) {
 	if r == nil || r.db == nil {
 		return nil, nil

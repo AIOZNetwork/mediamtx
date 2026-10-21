@@ -177,5 +177,6 @@ type ProviderHLSMetadataWindowQuery struct {
 
 type ProviderHLSMetadataRepository interface {
 	UpsertByIdempotencyKey(metadata ProviderHLSMetadata) (*ProviderHLSMetadata, error)
+	DeleteByStreamID(streamID string) (int64, error)
 	ListWindow(query ProviderHLSMetadataWindowQuery) ([]ProviderHLSMetadata, error)
 }

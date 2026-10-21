@@ -88,6 +88,7 @@ type API struct {
 	SRTServer                     defs.APISRTServer
 	MoQServer                     defs.APIMoQServer
 	ProviderHLSMetadataRepository models.ProviderHLSMetadataRepository
+	LiveSegments                  models.LiveHLSSegmentRepository
 	Parent                        apiParent
 
 	httpServer *httpp.Server
@@ -103,7 +104,9 @@ func (a *API) Initialize() error {
 	group := router.Group("/v3")
 
 	group.GET("/info", a.onInfo)
+	group.POST("/internal/live-segments", a.onInternalLiveSegments)
 	group.POST("/internal/provider-hls/metadata", a.onProviderHLSMetadataIngest)
+	group.DELETE("/internal/provider-hls/metadata", a.onProviderHLSMetadataDelete)
 
 	group.POST("/auth/jwks/refresh", a.onAuthJwksRefresh)
 

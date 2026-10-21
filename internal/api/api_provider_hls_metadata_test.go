@@ -16,6 +16,13 @@ import (
 type providerHLSTestRepo struct {
 	metadata models.ProviderHLSMetadata
 	err      error
+	deleted  int64
+	delID    string
+}
+
+func (r *providerHLSTestRepo) DeleteByStreamID(streamID string) (int64, error) {
+	r.delID = streamID
+	return r.deleted, r.err
 }
 
 func (r *providerHLSTestRepo) UpsertByIdempotencyKey(metadata models.ProviderHLSMetadata) (*models.ProviderHLSMetadata, error) {
@@ -108,4 +115,39 @@ func TestProviderHLSMetadataAPIRequiresIdempotencyHeader(t *testing.T) {
 
 	a.onProviderHLSMetadataIngest(ctx)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func doProviderHLSDelete(a *API, target string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodDelete, target, nil)
+	a.onProviderHLSMetadataDelete(ctx)
+	return rec
+}
+
+func TestProviderHLSMetadataDeleteOK(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &providerHLSTestRepo{deleted: 3}
+	a := &API{ProviderHLSMetadataRepository: repo, Parent: &testParent{}}
+	rec := doProviderHLSDelete(a, "/v3/internal/provider-hls/metadata?stream_id=live/stream-1")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "live/stream-1", repo.delID)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Equal(t, "success", out["status"])
+	require.Equal(t, float64(3), out["deleted"])
+}
+
+func TestProviderHLSMetadataDeleteRequiresStreamID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := &API{ProviderHLSMetadataRepository: &providerHLSTestRepo{}, Parent: &testParent{}}
+	rec := doProviderHLSDelete(a, "/v3/internal/provider-hls/metadata")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestProviderHLSMetadataDeleteNilRepo(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := &API{Parent: &testParent{}}
+	rec := doProviderHLSDelete(a, "/v3/internal/provider-hls/metadata?stream_id=x")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }

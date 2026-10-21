@@ -1027,6 +1027,7 @@ func (p *Core) createResources(initial bool) error {
 			SRTServer:                     p.srtServer,
 			MoQServer:                     p.moqServer,
 			ProviderHLSMetadataRepository: repository.NewProviderHLSMetadataRepository(database.DB),
+			LiveSegments:                  repository.NewLiveHLSSegmentRepository(database.DB),
 			Parent:                        p,
 		}
 		err = i.Initialize()

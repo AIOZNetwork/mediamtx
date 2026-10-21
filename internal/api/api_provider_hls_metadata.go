@@ -127,3 +127,24 @@ func (a *API) onProviderHLSMetadataIngest(ctx *gin.Context) {
 
 	ctx.JSON(http.StatusOK, stored)
 }
+
+func (a *API) onProviderHLSMetadataDelete(ctx *gin.Context) {
+	if a.ProviderHLSMetadataRepository == nil {
+		a.writeError(ctx, http.StatusServiceUnavailable, fmt.Errorf("provider HLS metadata repository is not configured"))
+		return
+	}
+
+	streamID := normalizeProviderHLSPath(ctx.Query("stream_id"))
+	if streamID == "" {
+		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("stream_id query parameter is required"))
+		return
+	}
+
+	deleted, err := a.ProviderHLSMetadataRepository.DeleteByStreamID(streamID)
+	if err != nil {
+		a.writeError(ctx, http.StatusInternalServerError, err)
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"status": "success", "deleted": deleted})
+}

@@ -28,6 +28,10 @@ func (r *providerPlaybackRepo) UpsertByIdempotencyKey(metadata models.ProviderHL
 	return &metadata, nil
 }
 
+func (r *providerPlaybackRepo) DeleteByStreamID(string) (int64, error) {
+	return 0, nil
+}
+
 func (r *providerPlaybackRepo) ListWindow(query models.ProviderHLSMetadataWindowQuery) ([]models.ProviderHLSMetadata, error) {
 	r.calls = append(r.calls, query)
 	out := make([]models.ProviderHLSMetadata, 0)
