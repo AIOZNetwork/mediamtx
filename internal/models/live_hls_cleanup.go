@@ -13,14 +13,17 @@ const (
 	// LiveHLSCleanupStatusPendingDelete: muxer closed, delete once DeleteAfter passes.
 	LiveHLSCleanupStatusPendingDelete = "pending_delete"
 	// LiveHLSCleanupStatusCleaning: claimed by a chore instance, delete in flight.
+	// A row left here (instance died mid-delete) is never re-checked or requeued.
 	LiveHLSCleanupStatusCleaning = "cleaning"
-	// LiveHLSCleanupStatusDeleted: remote data removed.
+	// LiveHLSCleanupStatusDeleted: the provider DeleteFolder was called once. This is
+	// set whatever the result; a failed call leaves its error text in LastError.
 	LiveHLSCleanupStatusDeleted = "deleted"
 )
 
 // LiveHLSCleanup tracks one remote HLS folder (or DePIN contract) through its
 // lifecycle so deletion survives restarts and works across instances.
-// It never holds credentials.
+// It never holds credentials. The table is created by the aioz-stream migration
+// 000055_live_hls_cleanups; mediamtx only reads and writes it.
 type LiveHLSCleanup struct {
 	ID         uuid.UUID `json:"id" gorm:"primaryKey;type:uuid"`
 	Provider   string    `json:"provider" gorm:"not null;uniqueIndex:idx_live_hls_cleanup_provider_prefix"`
@@ -52,13 +55,9 @@ type LiveHLSCleanupRepository interface {
 	MarkPendingDelete(provider, streamName, prefix string, endedAt, deleteAfter time.Time) error
 	// ClaimDue atomically moves up to limit due pending_delete rows to cleaning and returns them.
 	ClaimDue(now time.Time, limit int) ([]LiveHLSCleanup, error)
-	// RequeueStale returns rows stuck in cleaning since before to pending_delete.
-	RequeueStale(before time.Time) (int64, error)
-	// MarkDeleted finishes a claimed row.
-	MarkDeleted(provider, prefix string) error
-	// MarkFailed records a failure of a claimed row (attempts++) and returns it to
-	// pending_delete, due again at retryAt. Rows are never given up on.
-	MarkFailed(provider, prefix, lastError string, retryAt time.Time) error
+	// MarkDeleted finishes a claimed row after its single DeleteFolder call.
+	// lastError is the call's error text ("" on success).
+	MarkDeleted(provider, prefix, lastError string) error
 	// GetContract returns the live (not deleted) DePIN contract id of a stream, or "".
 	GetContract(provider, streamName string) (string, error)
 }

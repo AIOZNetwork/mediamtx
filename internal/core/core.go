@@ -923,11 +923,6 @@ func (p *Core) createResources(initial bool) error {
 			return err
 		}
 		p.hlsServer = i
-		if database.DB != nil {
-			if err := database.EnsureLiveHLSCleanupTable(database.DB); err != nil {
-				p.Log(logger.Warn, "%v", err)
-			}
-		}
 		hlss3uploader.SetCleanupRepository(repository.NewLiveHLSCleanupRepository(database.DB))
 		hlss3uploader.StartCleanupChore(i.UploadConfig.Storage)
 	}

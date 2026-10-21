@@ -97,35 +97,13 @@ RETURNING *`,
 	return rows, err
 }
 
-func (r *LiveHLSCleanupRepository) RequeueStale(before time.Time) (int64, error) {
-	res := r.db.Model(&models.LiveHLSCleanup{}).
-		Where("status = ? AND updated_at < ?", models.LiveHLSCleanupStatusCleaning, before).
-		Updates(map[string]interface{}{
-			"status":     models.LiveHLSCleanupStatusPendingDelete,
-			"updated_at": time.Now(),
-		})
-	return res.RowsAffected, res.Error
-}
-
-func (r *LiveHLSCleanupRepository) MarkDeleted(provider, prefix string) error {
+func (r *LiveHLSCleanupRepository) MarkDeleted(provider, prefix, lastError string) error {
 	return r.db.Model(&models.LiveHLSCleanup{}).
 		Where("provider = ? AND prefix = ? AND status = ?", provider, prefix, models.LiveHLSCleanupStatusCleaning).
 		Updates(map[string]interface{}{
 			"status":     models.LiveHLSCleanupStatusDeleted,
-			"last_error": "",
+			"last_error": lastError,
 			"updated_at": time.Now(),
-		}).Error
-}
-
-func (r *LiveHLSCleanupRepository) MarkFailed(provider, prefix, lastError string, retryAt time.Time) error {
-	return r.db.Model(&models.LiveHLSCleanup{}).
-		Where("provider = ? AND prefix = ? AND status = ?", provider, prefix, models.LiveHLSCleanupStatusCleaning).
-		Updates(map[string]interface{}{
-			"status":       models.LiveHLSCleanupStatusPendingDelete,
-			"attempts":     gorm.Expr("attempts + 1"),
-			"last_error":   lastError,
-			"delete_after": retryAt,
-			"updated_at":   time.Now(),
 		}).Error
 }
 

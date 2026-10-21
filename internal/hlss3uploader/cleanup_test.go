@@ -3,6 +3,7 @@ package hlss3uploader
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -87,36 +88,12 @@ func (f *fakeCleanupRepo) ClaimDue(now time.Time, limit int) ([]models.LiveHLSCl
 	return out, nil
 }
 
-func (f *fakeCleanupRepo) RequeueStale(before time.Time) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var n int64
-	for _, r := range f.rows {
-		if r.Status == models.LiveHLSCleanupStatusCleaning && r.UpdatedAt.Before(before) {
-			r.Status = models.LiveHLSCleanupStatusPendingDelete
-			n++
-		}
-	}
-	return n, nil
-}
-
-func (f *fakeCleanupRepo) MarkDeleted(provider, prefix string) error {
+func (f *fakeCleanupRepo) MarkDeleted(provider, prefix, lastError string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if r := f.rows[fkey(provider, prefix)]; r != nil && r.Status == models.LiveHLSCleanupStatusCleaning {
 		r.Status = models.LiveHLSCleanupStatusDeleted
-	}
-	return nil
-}
-
-func (f *fakeCleanupRepo) MarkFailed(provider, prefix, lastError string, retryAt time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if r := f.rows[fkey(provider, prefix)]; r != nil && r.Status == models.LiveHLSCleanupStatusCleaning {
-		r.Status = models.LiveHLSCleanupStatusPendingDelete
-		r.Attempts++
 		r.LastError = lastError
-		r.DeleteAfter = &retryAt
 	}
 	return nil
 }
@@ -138,6 +115,7 @@ type cleanupMock struct {
 	mu      sync.Mutex
 	name    string
 	deleted []string
+	calls   int
 	failN   int
 }
 
@@ -151,6 +129,7 @@ func (m *cleanupMock) Name() string {
 func (m *cleanupMock) DeleteFolder(_ context.Context, prefix string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.calls++
 	if m.failN > 0 {
 		m.failN--
 		return errors.New("boom")
@@ -215,27 +194,52 @@ func TestCleanupChoreReconnectCancels(t *testing.T) {
 	require.Nil(t, row.DeleteAfter)
 }
 
-func TestCleanupChoreFailureKeepsRetrying(t *testing.T) {
+func TestCleanupChoreSuccessHasEmptyLastError(t *testing.T) {
+	repo := newFakeCleanupRepo()
+	prov := &cleanupMock{}
+	p := newChorePair(t, repo, prov)
+	require.NoError(t, repo.MarkPendingDelete("mock", "s", "live-hls/s", *p.now, *p.now))
+
+	p.chore.runPass(context.Background())
+	row := repo.get("mock", "live-hls/s")
+	require.Equal(t, models.LiveHLSCleanupStatusDeleted, row.Status)
+	require.Empty(t, row.LastError)
+	require.Equal(t, 1, prov.calls)
+}
+
+func TestCleanupChoreErrorStillEndsDeletedWithLastError(t *testing.T) {
 	repo := newFakeCleanupRepo()
 	prov := &cleanupMock{failN: 20}
 	p := newChorePair(t, repo, prov)
 	require.NoError(t, repo.MarkPendingDelete("mock", "s", "live-hls/s", *p.now, *p.now))
 
-	for i := 0; i < 12; i++ {
-		*p.now = p.now.Add(time.Hour)
+	for i := 0; i < 5; i++ {
 		p.chore.runPass(context.Background())
+		*p.now = p.now.Add(time.Hour)
 	}
 	row := repo.get("mock", "live-hls/s")
-	require.Equal(t, models.LiveHLSCleanupStatusPendingDelete, row.Status, "never dropped")
-	require.Equal(t, 12, row.Attempts)
+	require.Equal(t, models.LiveHLSCleanupStatusDeleted, row.Status)
 	require.Equal(t, "boom", row.LastError)
+	require.Equal(t, 1, prov.calls, "exactly one call, no retry")
+}
 
-	prov.mu.Lock()
-	prov.failN = 0
-	prov.mu.Unlock()
-	*p.now = p.now.Add(time.Hour)
+func TestCleanupChoreProviderMismatchEndsDeletedWithError(t *testing.T) {
+	repo := newFakeCleanupRepo()
+	prov := &cleanupMock{name: "s3"}
+	p := newChorePair(t, repo, prov)
+	require.NoError(t, repo.MarkPendingDelete("depin", "s", "live-hls/s", *p.now, *p.now))
+
 	p.chore.runPass(context.Background())
-	require.Equal(t, models.LiveHLSCleanupStatusDeleted, repo.get("mock", "live-hls/s").Status)
+	row := repo.get("depin", "live-hls/s")
+	require.Equal(t, models.LiveHLSCleanupStatusDeleted, row.Status)
+	require.NotEmpty(t, row.LastError)
+	require.Zero(t, prov.calls)
+}
+
+func TestCleanupErrorTruncated(t *testing.T) {
+	long := strings.Repeat("x", cleanupMaxErrorLen+500)
+	require.Len(t, truncateError(long), cleanupMaxErrorLen)
+	require.Equal(t, "short", truncateError("short"))
 }
 
 func TestCleanupChoreDePINUsesStoredContractID(t *testing.T) {
@@ -269,16 +273,17 @@ func TestCleanupChoreRestartDeletesOverdue(t *testing.T) {
 	require.Eventually(t, func() bool { return len(prov.deletedCopy()) == 1 }, 2*time.Second, 10*time.Millisecond)
 }
 
-func TestCleanupChoreRequeuesStaleCleaning(t *testing.T) {
+func TestCleanupChoreNeverReclaimsCleaningRows(t *testing.T) {
 	repo := newFakeCleanupRepo()
 	p := newChorePair(t, repo, &cleanupMock{})
 	require.NoError(t, repo.MarkPendingDelete("mock", "s", "live-hls/s", *p.now, *p.now))
 	_, err := repo.ClaimDue(*p.now, 10) // claimed, then the instance "died"
 	require.NoError(t, err)
 
-	*p.now = p.now.Add(staleCleaningAfter + time.Minute)
+	*p.now = p.now.Add(24 * time.Hour)
 	p.chore.runPass(context.Background())
-	require.Equal(t, []string{"live-hls/s"}, p.prov.deletedCopy())
+	require.Zero(t, p.prov.calls)
+	require.Equal(t, models.LiveHLSCleanupStatusCleaning, repo.get("mock", "live-hls/s").Status)
 }
 
 func TestCleanupChoreClaimIsExclusive(t *testing.T) {

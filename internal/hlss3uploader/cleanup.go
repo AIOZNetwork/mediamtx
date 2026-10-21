@@ -13,18 +13,22 @@ import (
 // Remote cleanup of closed HLS folders (S3 / CDN prefixes, DePIN contracts).
 //
 // Design mirrors aioz-stream-core's cleanup chore, but state lives in the
-// live_hls_cleanups table (models.LiveHLSCleanup) instead of a JSON file:
+// live_hls_cleanups table (models.LiveHLSCleanup, created by the aioz-stream
+// migration 000055_live_hls_cleanups) instead of a JSON file:
 //
 //	active -> pending_delete (muxer closed, delete_after = now + gracePeriod)
 //	pending_delete -> cleaning (claimed atomically by one instance)
-//	cleaning -> deleted | pending_delete (failure: attempts++, retried with backoff, never dropped)
-//	pending_delete/deleted -> active (same prefix reopened before it is deleted)
+//	cleaning -> deleted (DeleteFolder called ONCE, whatever the result)
+//	pending_delete/deleted -> active (same prefix reopened)
 //
-// A single background loop claims due rows every Interval. One pass also runs
-// at startup, so rows that came due while mediamtx was down are deleted right
-// away; DePIN contract ids are stored in the row, so they are deleted after a
-// restart too. Rows stuck in "cleaning" (instance died mid-delete) go back to
-// pending_delete after staleCleaningAfter.
+// DeleteFolder is called once per row; the provider handles everything after
+// the call. There is no retry. If the call returned an error the row is still
+// deleted and the error text (truncated) is kept in last_error; DePIN
+// not-found counts as success. A single background loop claims due
+// pending_delete rows every Interval. One pass also runs at startup, so rows
+// that came due while mediamtx was down are deleted right away; DePIN contract
+// ids are stored in the row, so they are deleted after a restart too. A row
+// left in "cleaning" (instance died mid-delete) is never re-checked.
 //
 // Configuration (mediamtx yml, StorageConfig.Cleanup):
 //
@@ -39,9 +43,7 @@ const (
 
 	cleanupBatchSize     = 10
 	cleanupDeleteTimeout = 30 * time.Second
-	staleCleaningAfter   = 10 * time.Minute
-	cleanupBaseBackoff   = 30 * time.Second
-	cleanupMaxBackoff    = 10 * time.Minute
+	cleanupMaxErrorLen   = 2000
 )
 
 // CleanupConfig configures the cleanup chore. Zero values mean default.
@@ -126,61 +128,47 @@ func newDeleteProvider(ctx context.Context, cfg StorageConfig, row models.LiveHL
 	return NewProviderSelector().Select(ctx, cfg)
 }
 
-func cleanupBackoff(attempts int) time.Duration {
-	if attempts > 5 {
-		return cleanupMaxBackoff
-	}
-	d := cleanupBaseBackoff << uint(attempts)
-	if d > cleanupMaxBackoff {
-		d = cleanupMaxBackoff
-	}
-	return d
-}
-
-// runPass claims due rows and deletes them. Failures stay in the table.
+// runPass claims due pending_delete rows and deletes each once.
 func (c *CleanupChore) runPass(ctx context.Context) {
-	now := c.now()
-	if n, err := c.repo.RequeueStale(now.Add(-staleCleaningAfter)); err != nil {
-		slog.Warn("hls cleanup: requeue stale failed", slog.Any("err", err))
-	} else if n > 0 {
-		slog.Info("hls cleanup: requeued rows stuck in cleaning", slog.Int64("count", n))
-	}
-
-	rows, err := c.repo.ClaimDue(now, cleanupBatchSize)
+	rows, err := c.repo.ClaimDue(c.now(), cleanupBatchSize)
 	if err != nil {
 		slog.Warn("hls cleanup: claim failed", slog.Any("err", err))
 		return
 	}
 	for _, row := range rows {
 		if ctx.Err() != nil {
-			// Leave the rest in cleaning: staleCleaningAfter returns them.
+			// The rest stay in cleaning and are not re-checked.
 			return
 		}
 		c.cleanOne(ctx, row)
 	}
 }
 
+// cleanOne calls DeleteFolder once and always ends the row as deleted. A call
+// error is logged and kept in last_error.
 func (c *CleanupChore) cleanOne(ctx context.Context, row models.LiveHLSCleanup) {
-	err := c.deleteRow(ctx, row)
-	if err != nil {
-		retry := c.now().Add(cleanupBackoff(row.Attempts))
-		slog.Warn("hls cleanup: delete failed, will retry",
-			slog.String("provider", row.Provider), slog.String("prefix", row.Prefix),
-			slog.Int("attempts", row.Attempts+1), slog.Time("retry_at", retry), slog.Any("err", err))
-		if mErr := c.repo.MarkFailed(row.Provider, row.Prefix, err.Error(), retry); mErr != nil {
-			slog.Warn("hls cleanup: mark failed error", slog.Any("err", mErr))
-		}
-		return
+	lastError := ""
+	if err := c.deleteRow(ctx, row); err != nil {
+		lastError = truncateError(err.Error())
+		slog.Warn("hls cleanup: delete failed, not retrying",
+			slog.String("provider", row.Provider), slog.String("prefix", row.Prefix), slog.Any("err", err))
+	} else {
+		slog.Info("hls cleanup: deleted remote folder",
+			slog.String("provider", row.Provider), slog.String("prefix", row.Prefix))
 	}
 	if row.Provider == string(ProviderDePIN) {
 		depinContractCache.clear(depinCacheKey(row.StreamName))
 	}
-	if mErr := c.repo.MarkDeleted(row.Provider, row.Prefix); mErr != nil {
+	if mErr := c.repo.MarkDeleted(row.Provider, row.Prefix, lastError); mErr != nil {
 		slog.Warn("hls cleanup: mark deleted error", slog.Any("err", mErr))
-		return
 	}
-	slog.Info("hls cleanup: deleted remote folder",
-		slog.String("provider", row.Provider), slog.String("prefix", row.Prefix))
+}
+
+func truncateError(msg string) string {
+	if len(msg) <= cleanupMaxErrorLen {
+		return msg
+	}
+	return strings.ToValidUTF8(msg[:cleanupMaxErrorLen], "")
 }
 
 func (c *CleanupChore) deleteRow(ctx context.Context, row models.LiveHLSCleanup) error {
@@ -193,8 +181,8 @@ func (c *CleanupChore) deleteRow(ctx context.Context, row models.LiveHLSCleanup)
 	}
 	defer provider.Close()
 	if provider.Name() != row.Provider {
-		// Storage config changed since the row was written. Keep the row and retry:
-		// deleting through another provider would not remove this data.
+		// Storage config changed since the row was written. The row ends deleted with
+		// this error in last_error: deleting through another provider would not remove this data.
 		return &providerMismatchError{row: row.Provider, current: provider.Name()}
 	}
 	return provider.DeleteFolder(delCtx, row.Prefix)

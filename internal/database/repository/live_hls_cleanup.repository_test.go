@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluenviron/mediamtx/internal/database"
 	"github.com/bluenviron/mediamtx/internal/models"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
@@ -15,6 +14,31 @@ import (
 
 // The repository uses Postgres features (RETURNING, FOR UPDATE SKIP LOCKED), so
 // tests need a real server: set MTX_TEST_POSTGRES_DSN, otherwise they skip.
+// The table comes from the aioz-stream migration 000055_live_hls_cleanups; the
+// DDL below must match it (mediamtx code never creates the table).
+const cleanupTestDDL = `
+DROP TABLE IF EXISTS live_hls_cleanups;
+CREATE TABLE live_hls_cleanups (
+	id uuid NOT NULL,
+	provider text NOT NULL,
+	prefix text NOT NULL,
+	stream_name text,
+	contract_id text,
+	status text NOT NULL,
+	ended_at timestamp with time zone,
+	delete_after timestamp with time zone,
+	attempts bigint DEFAULT 0 NOT NULL,
+	last_error text,
+	created_at timestamp with time zone,
+	updated_at timestamp with time zone,
+	CONSTRAINT live_hls_cleanups_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX idx_live_hls_cleanup_provider_prefix ON live_hls_cleanups (provider, prefix);
+CREATE INDEX idx_live_hls_cleanups_stream_name ON live_hls_cleanups (stream_name);
+CREATE INDEX idx_live_hls_cleanups_status ON live_hls_cleanups (status);
+CREATE INDEX idx_live_hls_cleanups_delete_after ON live_hls_cleanups (delete_after);
+`
+
 func cleanupTestRepo(t *testing.T) (models.LiveHLSCleanupRepository, *gorm.DB) {
 	t.Helper()
 	dsn := os.Getenv("MTX_TEST_POSTGRES_DSN")
@@ -23,9 +47,7 @@ func cleanupTestRepo(t *testing.T) (models.LiveHLSCleanupRepository, *gorm.DB) {
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.EnsureLiveHLSCleanupTable(db))
-	require.NoError(t, database.EnsureLiveHLSCleanupTable(db), "idempotent")
-	require.NoError(t, db.Exec("TRUNCATE live_hls_cleanups").Error)
+	require.NoError(t, db.Exec(cleanupTestDDL).Error)
 	return NewLiveHLSCleanupRepository(db), db
 }
 
@@ -60,16 +82,10 @@ func TestLiveHLSCleanupLifecycle(t *testing.T) {
 	rows, _ = repo.ClaimDue(now.Add(2*time.Minute), 10)
 	require.Empty(t, rows, "already claimed")
 
-	require.NoError(t, repo.MarkFailed("depin", "live-hls/s1", "boom", now))
+	require.NoError(t, repo.MarkDeleted("depin", "live-hls/s1", ""))
 	r := row(t, db, "depin", "live-hls/s1")
-	require.Equal(t, models.LiveHLSCleanupStatusPendingDelete, r.Status)
-	require.Equal(t, 1, r.Attempts)
-	require.Equal(t, "boom", r.LastError)
-
-	rows, _ = repo.ClaimDue(now.Add(time.Minute), 10)
-	require.Len(t, rows, 1)
-	require.NoError(t, repo.MarkDeleted("depin", "live-hls/s1"))
-	require.Equal(t, models.LiveHLSCleanupStatusDeleted, row(t, db, "depin", "live-hls/s1").Status)
+	require.Equal(t, models.LiveHLSCleanupStatusDeleted, r.Status)
+	require.Empty(t, r.LastError)
 	id, _ = repo.GetContract("depin", "s1")
 	require.Empty(t, id, "deleted contract not reused")
 
@@ -102,18 +118,31 @@ func TestLiveHLSCleanupMarkPendingKeepsCleaningRow(t *testing.T) {
 	require.Equal(t, models.LiveHLSCleanupStatusCleaning, row(t, db, "s3", "p").Status)
 }
 
-func TestLiveHLSCleanupRequeueStale(t *testing.T) {
+func TestLiveHLSCleanupCleaningRowIsNeverReclaimed(t *testing.T) {
+	repo, db := cleanupTestRepo(t)
+	now := time.Now()
+	require.NoError(t, repo.MarkPendingDelete("s3", "s", "p", now, now))
+	rows, _ := repo.ClaimDue(now, 10)
+	require.Len(t, rows, 1)
+	rows, err := repo.ClaimDue(now.Add(24*time.Hour), 10)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+	require.Equal(t, models.LiveHLSCleanupStatusCleaning, row(t, db, "s3", "p").Status)
+}
+
+func TestLiveHLSCleanupMarkDeletedKeepsError(t *testing.T) {
 	repo, db := cleanupTestRepo(t)
 	now := time.Now()
 	require.NoError(t, repo.MarkPendingDelete("s3", "s", "p", now, now))
 	_, _ = repo.ClaimDue(now, 10)
-	n, err := repo.RequeueStale(now.Add(-time.Hour))
-	require.NoError(t, err)
-	require.Zero(t, n, "fresh claim is not stale")
-	n, err = repo.RequeueStale(time.Now().Add(time.Hour))
-	require.NoError(t, err)
-	require.EqualValues(t, 1, n)
-	require.Equal(t, models.LiveHLSCleanupStatusPendingDelete, row(t, db, "s3", "p").Status)
+	require.NoError(t, repo.MarkDeleted("s3", "p", "boom"))
+	r := row(t, db, "s3", "p")
+	require.Equal(t, models.LiveHLSCleanupStatusDeleted, r.Status)
+	require.Equal(t, "boom", r.LastError)
+
+	// Reopen clears the error.
+	require.NoError(t, repo.UpsertActive("s3", "s", "p", ""))
+	require.Empty(t, row(t, db, "s3", "p").LastError)
 }
 
 func TestLiveHLSCleanupClaimIsExclusive(t *testing.T) {
