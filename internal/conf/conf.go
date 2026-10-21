@@ -36,8 +36,6 @@ var (
 	RedisTTLHours = 24
 	// WebhookAddress is Conf.WebhookAddress.
 	WebhookAddress string
-	// GrpcAddress is Conf.GrpcAddress.
-	GrpcAddress string
 )
 
 func sortedKeys(paths map[string]*OptionalPath) []string {
@@ -272,9 +270,6 @@ type Conf struct {
 	// did not register (and cannot bill) never goes live.
 	RTMPPublishWebhook        string   `json:"rtmpPublishWebhook"`
 	RTMPPublishWebhookTimeout Duration `json:"rtmpPublishWebhookTimeout"`
-
-	// GRPC
-	GrpcAddress string `json:"grpcAddress"`
 
 	PostgresHost     string `json:"postgresHost"`
 	PostgresPort     string `json:"postgresPort"`
@@ -676,7 +671,6 @@ func (conf *Conf) loadFromFile(fpath string, defaultConfPaths []string) (string,
 	IdentityServer = conf.IdentityServer
 	RedisTTLHours = conf.RedisTTLHours
 	WebhookAddress = conf.WebhookAddress
-	GrpcAddress = conf.GrpcAddress
 
 	return fpath, nil
 }
