@@ -77,7 +77,6 @@ func isABROutputPath(pathName string) bool {
 	return isABRChildPlaylistPath(pathName)
 }
 
-
 func abrBasePath(pathName string) string {
 	if !isABRChildPlaylistPath(pathName) {
 		return pathName
@@ -156,13 +155,10 @@ func abrChildRenditionAdvertised(pathName string, renditions []conf.HLSTranscodi
 	return false
 }
 
-
 func shouldRenderABRMaster(pathName string, pathConf *conf.Path) bool {
 	return pathConf != nil && pathConf.HLSTranscoding && len(pathConf.HLSTranscodingRenditions) > 0 &&
 		!isABROutputPath(pathName) && !isConfiguredABRChildPath(pathName, pathConf)
 }
-
-
 
 func masterPlaylistRenditions(pathConf *conf.Path, mi *muxerInstance) []conf.HLSTranscodingRendition {
 	if mi != nil && mi.hlsTranscodingRenditions != nil {
@@ -189,7 +185,6 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 		codecStr = defaultMasterCodecString
 	}
 
-
 	// Derive original bandwidth and top resolution from the highest configured rendition
 	originalBandwidth := sourceBandwidth
 	var topWidth, topHeight int
@@ -213,17 +208,15 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 	audioAttr := ""
 	if hasAudio {
 		b.WriteString(
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"original/audio2_stream.m3u8\"\n",
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",LANGUAGE=\"und\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",URI=\"original/audio2_stream.m3u8\"\n",
 		)
 		audioAttr = "AUDIO=\"audio\","
 	}
 
-	// 1. Original quality (LL-HLS, not uploaded to provider). When source codec
-	// metadata is not available here, omit CODECS rather than advertising the
-	// normalized transcoder codec.
+	// 1. Original quality (LL-HLS, not uploaded to provider).
 	b.WriteString(fmt.Sprintf(
-		"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,%s%sCLOSED-CAPTIONS=NONE,NAME=\"original\"\n",
-		originalBandwidth, originalBandwidth, resolutionAttr, audioAttr,
+		"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,%sCODECS=\"%s\",%sCLOSED-CAPTIONS=NONE\n",
+		originalBandwidth, originalBandwidth, resolutionAttr, codecStr, audioAttr,
 	))
 	b.WriteString("original/index.m3u8\n")
 
@@ -235,8 +228,8 @@ func renderABRMasterPlaylist(renditions []conf.HLSTranscodingRendition, codecStr
 			bandwidth = defaultFallbackVideoBandwidth + sharedAudioBandwidth
 		}
 		b.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CODECS=\"%s\",%sCLOSED-CAPTIONS=NONE,NAME=\"%sp\"\n",
-			bandwidth, bandwidth, r.Width, r.Height, codecStr, audioAttr, r.Name,
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CODECS=\"%s\",%sCLOSED-CAPTIONS=NONE\n",
+			bandwidth, bandwidth, r.Width, r.Height, codecStr, audioAttr,
 		))
 		b.WriteString(r.Name)
 		b.WriteString("/index.m3u8\n")

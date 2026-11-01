@@ -3,6 +3,7 @@ package transcoder
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -25,7 +26,7 @@ func TestTranscoderInit(t *testing.T) {
 	}
 
 	l := &mockLogger{t: t}
-	tr := NewTranscoder(cfg, "test_stream", l, ":1935", "127.0.0.1:8554")
+	tr := NewTranscoder(cfg, "test_stream", l, ":1935", "127.0.0.1:8554", 2*time.Second)
 
 	if tr.StreamID != "test_stream" {
 		t.Errorf("expected streamID test_stream, got %s", tr.StreamID)
@@ -45,7 +46,7 @@ func TestFFmpegBuildArgsSharedAudioNestedOutputs(t *testing.T) {
 		HLSTranscodingPreset:     "veryfast",
 	}
 
-	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554")
+	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554", 2*time.Second)
 	args := strings.Join(tr.BuildArgs(), " ")
 
 	for _, expected := range []string{
@@ -74,13 +75,34 @@ func TestFFmpegBuildArgsGOPMatchesSourceFPS(t *testing.T) {
 		},
 	}
 
-	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554")
+	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554", 2*time.Second)
 	tr.SourceInfo = &SourceInfo{FPS: 25}
 	args := strings.Join(tr.BuildArgs(), " ")
 
 	for _, expected := range []string{
 		"fps=25.00,setpts=PTS-STARTPTS",
 		"-g 50 -keyint_min 50 -sc_threshold 0 -force_key_frames expr:gte(t,n_forced*2)",
+	} {
+		if !strings.Contains(args, expected) {
+			t.Fatalf("args missing %q:\n%s", expected, args)
+		}
+	}
+}
+
+func TestFFmpegBuildArgsGOPMatchesHLSSegmentDuration(t *testing.T) {
+	cfg := &conf.Path{
+		HLSTranscoding: true,
+		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
+			{Name: "720", Width: 1280, Height: 720, VideoBitrate: "3000k"},
+		},
+	}
+
+	tr := NewFFmpegTranscoder(cfg, "cam1", &mockLogger{t: t}, ":1935", "127.0.0.1:8554", 1500*time.Millisecond)
+	tr.SourceInfo = &SourceInfo{FPS: 30}
+	args := strings.Join(tr.BuildArgs(), " ")
+
+	for _, expected := range []string{
+		"-g 45 -keyint_min 45 -sc_threshold 0 -force_key_frames expr:gte(t,n_forced*1.5)",
 	} {
 		if !strings.Contains(args, expected) {
 			t.Fatalf("args missing %q:\n%s", expected, args)

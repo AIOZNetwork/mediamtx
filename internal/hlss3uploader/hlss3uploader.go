@@ -38,14 +38,19 @@ type LinkStorageProvider interface {
 }
 
 // HLSS3Uploader watches local HLS directory (e.g. ./input-live),
-// uploads generated segment and playlist files to configured StorageProvider,
-// and deletes local segment files after successful upload.
+// and uploads generated init and media segment files to the configured StorageProvider.
+// Playlists are not uploaded (nothing reads them from the provider); _stream.m3u8
+// playlists are only ingested locally into the segment repository.
+// Local files are never deleted by the uploader: the muxer serves them for playback.
 type HLSS3Uploader struct {
 	Config     StorageConfig
 	Parent     logger.Writer
 	Repository models.LiveHLSSegmentRepository
 
 	provider StorageProvider
+
+	// cleanupRepo records the remote folder lifecycle; nil without a database.
+	cleanupRepo models.LiveHLSCleanupRepository
 
 	ctx       context.Context
 	ctxCancel func()
@@ -111,6 +116,19 @@ func (u *HLSS3Uploader) Initialize() error {
 		u.Config.Prefix = defaultStoragePrefix
 	}
 
+	// A reconnect before the delayed cleanup is due keeps the remote objects:
+	// the row goes back to active and its delete_after is cleared.
+	u.cleanupRepo = defaultCleanupRepository()
+	if u.cleanupRepo != nil {
+		contractID := ""
+		if cp, ok := u.provider.(interface{ ContractID() string }); ok {
+			contractID = cp.ContractID()
+		}
+		if err := u.cleanupRepo.UpsertActive(u.provider.Name(), u.cleanupStreamName(), u.remoteFolderPrefix(), contractID); err != nil {
+			u.Log(logger.Warn, "failed to record remote folder as active: %v", err)
+		}
+	}
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		u.Log(logger.Error, "failed to create fsnotify watcher: %v", err)
@@ -118,6 +136,12 @@ func (u *HLSS3Uploader) Initialize() error {
 		return err
 	}
 	u.watcher = watcher
+
+	// Watch before the muxer writes its first file so no event is missed.
+	_ = os.MkdirAll(u.Config.Directory, 0o755)
+	if err := u.watcher.Add(u.Config.Directory); err != nil {
+		u.Log(logger.Warn, "failed to watch directory %s: %v", u.Config.Directory, err)
+	}
 
 	u.Log(logger.Info, "HLS Storage Uploader initialized (provider: %s, bucket: %s, endpoint: %s, dir: %s)", u.provider.Name(), u.Config.Bucket, u.Config.Endpoint, u.Config.Directory)
 
@@ -150,7 +174,9 @@ func (u *HLSS3Uploader) FlushAndClose() {
 
 	// 1. Stop watching for new filesystem events
 	if u.watcher != nil {
-		u.watcher.Close()
+		if err := u.watcher.Close(); err != nil {
+			u.Log(logger.Warn, "failed to close watcher: %v", err)
+		}
 	}
 
 	// 2. Wait for watchLoop to exit
@@ -164,8 +190,10 @@ func (u *HLSS3Uploader) FlushAndClose() {
 		}
 	}
 
-	// 3. Scan directory one last time to capture the final segment and updated playlist (with #EXT-X-ENDLIST)
-	u.scanDirectory(u.Config.Directory)
+	// 3. Scan directory one last time to capture the final segment and updated playlist (with #EXT-X-ENDLIST).
+	// FlushAndClose marks the uploader as closed before this point in order to block new fsnotify events;
+	// therefore the final scan must bypass the normal isClosed guard used by sendToTaskChan().
+	u.scanDirectoryForClose(u.Config.Directory)
 
 	// 4. Safely close task channel so workers know when all work is drained
 	u.muClose.Lock()
@@ -194,9 +222,17 @@ func (u *HLSS3Uploader) FlushAndClose() {
 		u.ctxCancel()
 	}
 
-	// 7. Close storage provider
+	// 7. Schedule the remote live folder for deletion after the grace period
+	// (DB-backed chore, see cleanup.go). A reconnect before it is due cancels it.
 	if u.provider != nil {
-		u.provider.Close()
+		u.scheduleRemoteCleanup()
+	}
+
+	// 8. Close storage provider
+	if u.provider != nil {
+		if err := u.provider.Close(); err != nil {
+			u.Log(logger.Warn, "failed to close storage provider: %v", err)
+		}
 	}
 }
 
@@ -216,15 +252,7 @@ func (u *HLSS3Uploader) EnqueueSegment(filePath string, duration time.Duration) 
 func (u *HLSS3Uploader) watchLoop() {
 	defer close(u.done)
 
-	// Ensure directory exists
-	os.MkdirAll(u.Config.Directory, 0755)
-
-	// Add root directory to fsnotify for directory-create and playlist-write events.
-	if err := u.watcher.Add(u.Config.Directory); err != nil {
-		u.Log(logger.Warn, "failed to watch directory %s: %v", u.Config.Directory, err)
-	}
-
-	// Add existing subdirectories and queue existing files
+	// Queue existing segment files (init files and playlists of past sessions are skipped).
 	u.scanDirectory(u.Config.Directory)
 
 	for {
@@ -249,9 +277,9 @@ func (u *HLSS3Uploader) watchLoop() {
 				}
 			}
 
-			// Playlist file: upload to S3 on every Write/Create
-			// Segment file: enqueue for waitStable + upload
-			if (ext == ".m3u8" || isSegment) && event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+			// Segment file: enqueue for waitStable + upload.
+			// _stream.m3u8 playlist: enqueue for local ingest only (never uploaded).
+			if u.isRelevantFile(event.Name) && event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
 				u.sendToTaskChan(event.Name)
 			}
 
@@ -277,38 +305,66 @@ func (u *HLSS3Uploader) scanDirectory(dir string) {
 		if entry.IsDir() {
 			continue
 		}
-		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		isSegment := ext == ".m4s" || ext == ".ts" || ext == ".mp4" || ext == ".mp"
-		if ext == ".m3u8" || isSegment {
+		// Init files and playlists left by earlier sessions belong to other
+		// muxer prefixes; the current session's files arrive as fsnotify events.
+		if isInitSegmentFile(entry.Name()) || strings.HasSuffix(strings.ToLower(entry.Name()), extM3U8) {
+			continue
+		}
+		if u.isRelevantFile(entry.Name()) {
 			u.sendToTaskChan(filepath.Join(dir, entry.Name()))
 		}
 	}
 }
 
-// sendToTaskChan sends filePath to the upload worker queue without blocking.
-func (u *HLSS3Uploader) sendToTaskChan(filePath string) {
-	u.muClose.RLock()
-	if u.isClosed {
-		u.muClose.RUnlock()
+func (u *HLSS3Uploader) scanDirectoryForClose(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return
 	}
-	select {
-	case u.taskChan <- filePath:
-		u.muClose.RUnlock()
-	default:
-		u.muClose.RUnlock()
-		// Queue full — retry in a background goroutine.
-		go func(p string) {
-			u.muClose.RLock()
-			defer u.muClose.RUnlock()
-			if u.isClosed {
-				return
-			}
-			select {
-			case u.taskChan <- p:
-			case <-u.ctx.Done():
-			}
-		}(filePath)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if u.isRelevantFile(entry.Name()) {
+			u.taskChan <- filepath.Join(dir, entry.Name())
+		}
+	}
+}
+
+// isRelevantFile reports whether name must be handled: media segments, init
+// files and, when a repository is set, _stream.m3u8 playlists (ingest only).
+func (u *HLSS3Uploader) isRelevantFile(name string) bool {
+	base := filepath.Base(name)
+	switch strings.ToLower(filepath.Ext(base)) {
+	case extM4S, extTS, extMP4, extMP:
+		return true
+	case extM3U8:
+		return u.Repository != nil && strings.HasSuffix(base, "_stream.m3u8")
+	}
+	return false
+}
+
+// sendToTaskChan sends filePath to the upload worker queue without blocking.
+// When the queue is full the oldest queued path is dropped, so the number of
+// goroutines and queued items stays bounded. Dropped playlists are re-sent by
+// the next write; a dropped segment is retried by the final scan on close.
+func (u *HLSS3Uploader) sendToTaskChan(filePath string) {
+	u.muClose.RLock()
+	defer u.muClose.RUnlock()
+	if u.isClosed {
+		return
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case u.taskChan <- filePath:
+			return
+		default:
+		}
+		select {
+		case dropped := <-u.taskChan:
+			u.Log(logger.Warn, "upload queue full, dropping oldest entry %s", filepath.Base(dropped))
+		default:
+		}
 	}
 }
 
@@ -320,12 +376,6 @@ func (u *HLSS3Uploader) handleLocalRemove(filePath string) {
 	if filepath.Clean(filepath.Dir(filePath)) != filepath.Clean(u.Config.Directory) {
 		return
 	}
-
-	relPath, err := filepath.Rel(u.Config.Directory, filePath)
-	if err != nil {
-		relPath = filepath.Base(filePath)
-	}
-	relPath = filepath.ToSlash(relPath)
 
 	streamName := strings.Trim(strings.TrimSpace(u.Config.StreamName), "/")
 	if streamName == "" {
@@ -382,6 +432,11 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 		if _, exists := u.uploadedFiles.Load(remoteKey); exists {
 			return
 		}
+		// Init files: consult the DB too so reconnects do not re-upload.
+		if isInitSegmentFile(filepath.Base(filePath)) && u.IsUploaded(remoteKey) {
+			u.uploadedFiles.Store(remoteKey, true)
+			return
+		}
 	}
 
 	// Prevent concurrent in-flight uploads for the same remote key.
@@ -391,6 +446,15 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 	defer u.processingFiles.Delete(remoteKey)
 
 	if !u.waitStable(filePath) {
+		return
+	}
+
+	// Playlists are not uploaded: nothing reads them from the provider, the
+	// muxer serves them locally and DVR builds playlists from the DB.
+	if ext == extM3U8 {
+		if strings.HasSuffix(filepath.Base(filePath), "_stream.m3u8") && u.Repository != nil {
+			u.ingestFMP4Playlist(filePath, streamName)
+		}
 		return
 	}
 
@@ -455,11 +519,6 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 			_ = u.Repository.UpsertUploaded(segmentRecord)
 		}
 		u.uploadedFiles.Store(remoteKey, true)
-	} else {
-		if strings.HasSuffix(filepath.Base(filePath), "_stream.m3u8") && u.Repository != nil {
-			u.ingestFMP4Playlist(filePath, streamName)
-		}
-		// u.Log(logger.Info, "uploaded playlist %s via %s (key: %s, streamKey: %s)", relPath, u.provider.Name(), remoteKey, u.Config.StreamKey)
 	}
 }
 
@@ -609,6 +668,40 @@ func parseFMP4Playlist(playlistPath string) ([]fmp4PlaylistEntry, string) {
 func (u *HLSS3Uploader) remoteKeyForName(streamName, name string) string {
 	keyRelPath := path.Join(strings.Trim(streamName, "/"), name)
 	return path.Join(strings.TrimSuffix(u.Config.Prefix, "/"), keyRelPath)
+}
+
+// cleanupStreamName is the stream key of the cleanup row (the DePIN contract key).
+func (u *HLSS3Uploader) cleanupStreamName() string {
+	return depinCacheKey(u.Config.StreamName)
+}
+
+func (u *HLSS3Uploader) scheduleRemoteCleanup() {
+	if !cleanupEnabled(u.Config) {
+		u.Log(logger.Info, "remote HLS cleanup disabled, keeping %s", u.remoteFolderPrefix())
+		return
+	}
+	if u.cleanupRepo == nil {
+		u.Log(logger.Warn, "no database: remote HLS folder %s is not scheduled for cleanup", u.remoteFolderPrefix())
+		return
+	}
+	now := time.Now()
+	err := u.cleanupRepo.MarkPendingDelete(u.provider.Name(), u.cleanupStreamName(), u.remoteFolderPrefix(),
+		now, now.Add(cleanupGracePeriod(u.Config)))
+	if err != nil {
+		u.Log(logger.Warn, "failed to schedule remote HLS cleanup: %v", err)
+	}
+}
+
+func (u *HLSS3Uploader) remoteFolderPrefix() string {
+	prefix := strings.TrimSuffix(u.Config.Prefix, "/")
+	if prefix == "" {
+		prefix = defaultStoragePrefix
+	}
+	streamName := strings.Trim(u.Config.StreamName, "/")
+	if streamName == "" {
+		streamName = filepath.Base(u.Config.Directory)
+	}
+	return path.Join(prefix, streamName)
 }
 
 func populateABRMetadata(segment *models.LiveHLSSegment, fileName string) {

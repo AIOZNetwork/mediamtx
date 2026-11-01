@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -39,6 +40,7 @@ type OnConnectParams struct {
 	ExternalCmdPool     *externalcmd.Pool
 	RunOnConnect        string
 	RunOnConnectRestart bool
+	OnConnectError      func(error)
 	RunOnDisconnect     string
 	RTSPAddress         string
 	Desc                defs.APIPathReader
@@ -52,9 +54,10 @@ func OnConnect(params OnConnectParams) func() {
 	if params.RunOnConnect != "" || params.RunOnDisconnect != "" {
 		_, port, _ := net.SplitHostPort(params.RTSPAddress)
 		env = externalcmd.Environment{
-			"RTSP_PORT":     port,
-			"MTX_CONN_TYPE": string(params.Desc.Type),
-			"MTX_CONN_ID":   params.Desc.ID,
+			"RTSP_PORT":       port,
+			"MTX_CONN_TYPE":   string(params.Desc.Type),
+			"MTX_CONN_ID":     params.Desc.ID,
+			"WEBHOOK_ADDRESS": conf.WebhookAddress,
 		}
 	}
 
@@ -68,6 +71,9 @@ func OnConnect(params OnConnectParams) func() {
 			Env:     env,
 			OnExit: func(err error) {
 				params.Logger.Log(logger.Info, "runOnConnect command exited: %v", err)
+				if params.OnConnectError != nil {
+					params.OnConnectError(err)
+				}
 			},
 		}
 		onConnectCmd.Start()

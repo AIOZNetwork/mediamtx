@@ -91,6 +91,7 @@ func (c *conn) run() { //nolint:dupl
 		ExternalCmdPool:     c.externalCmdPool,
 		RunOnConnect:        c.runOnConnect,
 		RunOnConnectRestart: c.runOnConnectRestart,
+		OnConnectError:      c.handleOnConnectError,
 		RunOnDisconnect:     c.runOnDisconnect,
 		RTSPAddress:         c.rtspAddress,
 		Desc:                *c.APIReaderDescribe(),
@@ -104,6 +105,11 @@ func (c *conn) run() { //nolint:dupl
 	c.parent.closeConn(c)
 
 	c.Log(logger.Info, "closed: %v", err)
+}
+
+func (c *conn) handleOnConnectError(err error) {
+	c.Log(logger.Info, "closing RTMP connection due to runOnConnect failure: %v", err)
+	c.Close()
 }
 
 func (c *conn) runInner() error {

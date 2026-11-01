@@ -50,7 +50,7 @@ func newTestTranscoder() *FFmpegTranscoder {
 		HLSTranscodingRenditions: []conf.HLSTranscodingRendition{
 			{Name: "480", Width: 854, Height: 480},
 		},
-	}, "stream", test.NilLogger, ":1935", ":8554")
+	}, "stream", test.NilLogger, ":1935", ":8554", 2*time.Second)
 }
 
 // TestFFmpegTranscoderRestartsWhileLive: FFmpeg that exits by itself while the

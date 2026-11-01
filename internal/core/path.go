@@ -112,6 +112,7 @@ type path struct {
 	rtmpAddress              string
 	readTimeout              conf.Duration
 	writeTimeout             conf.Duration
+	hlsSegmentDuration       conf.Duration
 	writeQueueSize           int
 	udpReadBufferSize        uint
 	udpMaxPayloadSize        int
@@ -1024,7 +1025,13 @@ func (pa *path) setAvailable(
 		pa.hlsTranscodingRenditions = append([]conf.HLSTranscodingRendition(nil), effectiveConf.HLSTranscodingRenditions...)
 		pa.confMutex.Unlock()
 		pa.Log(logger.Info, "transcoder effective renditions=%d", len(effectiveConf.HLSTranscodingRenditions))
-		pa.transcoder = transcoder.NewTranscoder(effectiveConf, pa.name, pa, pa.rtmpAddress, pa.rtspAddress)
+		pa.transcoder = transcoder.NewTranscoder(
+			effectiveConf,
+			pa.name,
+			pa,
+			pa.rtmpAddress,
+			pa.rtspAddress,
+			time.Duration(pa.hlsSegmentDuration))
 		pa.transcoder.SourceInfo = sourceInfo
 
 		if startErr := pa.transcoder.Start(); startErr != nil {

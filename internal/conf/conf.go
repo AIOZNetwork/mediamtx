@@ -416,6 +416,11 @@ type Conf struct {
 	S3SecretAccessKey string `json:"s3SecretAccessKey"`
 	S3Prefix          string `json:"s3Prefix"`
 
+	// Delayed deletion of remote HLS data after a muxer closes (DB-backed chore).
+	StorageCleanupEnabled     bool     `json:"storageCleanupEnabled"`
+	StorageCleanupInterval    Duration `json:"storageCleanupInterval"`
+	StorageCleanupGracePeriod Duration `json:"storageCleanupGracePeriod"`
+
 	// DePIN go-sdk storage settings (used when storageProvider == "depin")
 	DePINIdentityDir  string `json:"depinIdentityDir"`
 	DePINCoordPeerURL string `json:"depinCoordPeerUrl"`
@@ -571,6 +576,9 @@ func (conf *Conf) setDefaults() {
 	conf.HLSSegmentMaxSize = 50 * 1024 * 1024
 	conf.HLSMuxerCloseAfter = 60 * Duration(time.Second)
 	conf.HLSDVREnabled = true
+	conf.StorageCleanupEnabled = true
+	conf.StorageCleanupInterval = 60 * Duration(time.Second)
+	conf.StorageCleanupGracePeriod = 180 * Duration(time.Second)
 
 	// WebRTC server
 	conf.WebRTC = true

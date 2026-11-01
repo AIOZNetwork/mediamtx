@@ -692,23 +692,24 @@ func (p *Core) createResources(initial bool) error {
 		rtpMaxPayloadSize := getRTPMaxPayloadSize(currentConf.UDPMaxPayloadSize, currentConf.RTSPEncryption)
 
 		p.pathManager = &pathManager{
-			logLevel:          currentConf.LogLevel,
-			dumpPackets:       currentConf.DumpPackets,
-			rtspAddress:       currentConf.RTSPAddress,
-			rtmpAddress:       currentConf.RTMPAddress,
-			readTimeout:       currentConf.ReadTimeout,
-			writeTimeout:      currentConf.WriteTimeout,
-			writeQueueSize:    currentConf.WriteQueueSize,
-			udpReadBufferSize: currentConf.UDPReadBufferSize,
-			udpMaxPayloadSize: currentConf.UDPMaxPayloadSize,
-			rtpMaxPayloadSize: rtpMaxPayloadSize,
-			supportsIPv6:      p.supportsIPv6,
-			pathConfs:         currentConf.Paths,
-			authManager:       p.authManager,
-			externalCmdPool:   p.externalCmdPool,
-			dvrService:        p.dvrService,
-			metrics:           p.metrics,
-			parent:            p,
+			logLevel:           currentConf.LogLevel,
+			dumpPackets:        currentConf.DumpPackets,
+			rtspAddress:        currentConf.RTSPAddress,
+			rtmpAddress:        currentConf.RTMPAddress,
+			readTimeout:        currentConf.ReadTimeout,
+			writeTimeout:       currentConf.WriteTimeout,
+			hlsSegmentDuration: currentConf.HLSSegmentDuration,
+			writeQueueSize:     currentConf.WriteQueueSize,
+			udpReadBufferSize:  currentConf.UDPReadBufferSize,
+			udpMaxPayloadSize:  currentConf.UDPMaxPayloadSize,
+			rtpMaxPayloadSize:  rtpMaxPayloadSize,
+			supportsIPv6:       p.supportsIPv6,
+			pathConfs:          currentConf.Paths,
+			authManager:        p.authManager,
+			externalCmdPool:    p.externalCmdPool,
+			dvrService:         p.dvrService,
+			metrics:            p.metrics,
+			parent:             p,
 		}
 		p.pathManager.initialize()
 	}
@@ -886,22 +887,26 @@ func (p *Core) createResources(initial bool) error {
 			DVREnabled:      currentConf.HLSDVREnabled,
 			UploadConfig: &hls.MuxerUploadConfig{
 				Storage: hlss3uploader.StorageConfig{
-					Provider:               currentConf.StorageProvider,
-					Prefix:                 currentConf.S3Prefix,
-					Endpoint:               currentConf.S3Endpoint,
-					Bucket:                 currentConf.S3Bucket,
-					Region:                 currentConf.S3Region,
-					AccessKeyID:            currentConf.S3AccessKeyID,
-					SecretAccessKey:        currentConf.S3SecretAccessKey,
-					DePINIdentityDir:       currentConf.DePINIdentityDir,
-					DePINCoordPeerURL:      currentConf.DePINCoordPeerURL,
-					DePINPieceKeyPath:      currentConf.DePINPieceKeyPath,
-					DePINLinkEndpoint:      currentConf.DePINLinkEndpoint,
-					CDNEndpoint:            currentConf.CDNEndpoint,
-					CDNHubURL:              currentConf.CDNHubURL,
-					CDNBusinessAddress:     currentConf.CDNBusinessAddress,
-					DeleteLocalAfterUpload: true,
-					Workers:                4,
+					Provider:           currentConf.StorageProvider,
+					Prefix:             currentConf.S3Prefix,
+					Endpoint:           currentConf.S3Endpoint,
+					Bucket:             currentConf.S3Bucket,
+					Region:             currentConf.S3Region,
+					AccessKeyID:        currentConf.S3AccessKeyID,
+					SecretAccessKey:    currentConf.S3SecretAccessKey,
+					DePINIdentityDir:   currentConf.DePINIdentityDir,
+					DePINCoordPeerURL:  currentConf.DePINCoordPeerURL,
+					DePINPieceKeyPath:  currentConf.DePINPieceKeyPath,
+					DePINLinkEndpoint:  currentConf.DePINLinkEndpoint,
+					CDNEndpoint:        currentConf.CDNEndpoint,
+					CDNHubURL:          currentConf.CDNHubURL,
+					CDNBusinessAddress: currentConf.CDNBusinessAddress,
+					Cleanup: hlss3uploader.CleanupConfig{
+						Enabled:     &currentConf.StorageCleanupEnabled,
+						Interval:    time.Duration(currentConf.StorageCleanupInterval),
+						GracePeriod: time.Duration(currentConf.StorageCleanupGracePeriod),
+					},
+					Workers: 4,
 				},
 			},
 			CDNSecret:       currentConf.HLSCDNSecret,
@@ -918,6 +923,8 @@ func (p *Core) createResources(initial bool) error {
 			return err
 		}
 		p.hlsServer = i
+		hlss3uploader.SetCleanupRepository(repository.NewLiveHLSCleanupRepository(database.DB))
+		hlss3uploader.StartCleanupChore(i.UploadConfig.Storage)
 	}
 
 	if currentConf.WebRTC &&
@@ -1384,6 +1391,7 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 
 	if closeHLSServer && p.hlsServer != nil {
 		p.hlsServer.Close()
+		hlss3uploader.StopCleanupChores()
 		p.hlsServer = nil
 	}
 

@@ -23,11 +23,7 @@ func TestRenderABRMasterPlaylistSharedAudioNestedRenditions(t *testing.T) {
 
 	for _, expected := range []string{
 		"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n",
-		`NAME="original"`,
 		"original/index.m3u8",
-		`NAME="1080p"`,
-		`NAME="720p"`,
-		`NAME="480p"`,
 		`RESOLUTION=1920x1080`,
 		`CODECS="avc1.640028,mp4a.40.2"`,
 		"1080/index.m3u8",
@@ -40,13 +36,30 @@ func TestRenderABRMasterPlaylistSharedAudioNestedRenditions(t *testing.T) {
 	}
 
 	lines := strings.Split(playlist, "\n")
+	streamInfCount := 0
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
+			continue
+		}
+		streamInfCount++
+		if !strings.Contains(line, `CODECS="avc1.640028,mp4a.40.2"`) {
+			t.Fatalf("STREAM-INF should advertise video and audio CODECS:\n%s", playlist)
+		}
+		if strings.Contains(line, `NAME=`) {
+			t.Fatalf("STREAM-INF should not contain NAME attribute:\n%s", playlist)
+		}
+	}
+	if streamInfCount != 4 {
+		t.Fatalf("expected 4 STREAM-INF entries, got %d:\n%s", streamInfCount, playlist)
+	}
+
 	for i, line := range lines {
-		if strings.Contains(line, `NAME="original"`) {
-			if strings.Contains(line, `CODECS=`) {
-				t.Fatalf("original stream should not advertise transcoder CODECS:\n%s", playlist)
+		if i+1 < len(lines) && lines[i+1] == "original/index.m3u8" {
+			if !strings.Contains(line, `CODECS="avc1.640028,mp4a.40.2"`) {
+				t.Fatalf("original stream should advertise video and audio CODECS:\n%s", playlist)
 			}
-			if i+1 >= len(lines) || lines[i+1] != "original/index.m3u8" {
-				t.Fatalf("original STREAM-INF not followed by original URI:\n%s", playlist)
+			if strings.Contains(line, `NAME=`) {
+				t.Fatalf("STREAM-INF should not contain NAME attribute:\n%s", playlist)
 			}
 			return
 		}
@@ -87,11 +100,8 @@ func TestRenderABRMasterPlaylistUsesEffectiveRenditions(t *testing.T) {
 	playlist := string(renderABRMasterPlaylist(masterPlaylistRenditions(pathConf, mi), ""))
 
 	for _, expected := range []string{
-		`NAME="original"`,
 		"original/index.m3u8",
-		`NAME="720p"`,
 		"720/index.m3u8",
-		`NAME="480p"`,
 		"480/index.m3u8",
 	} {
 		if !strings.Contains(playlist, expected) {
@@ -99,7 +109,6 @@ func TestRenderABRMasterPlaylistUsesEffectiveRenditions(t *testing.T) {
 		}
 	}
 	for _, unexpected := range []string{
-		`NAME="1080p"`,
 		"1080/index.m3u8",
 		`RESOLUTION=1920x1080`,
 	} {
@@ -328,8 +337,9 @@ func TestRenderABRMasterPlaylistWithAudio(t *testing.T) {
 
 	for _, expected := range []string{
 		"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n",
-		`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="audio",DEFAULT=YES,AUTOSELECT=YES,URI="original/audio2_stream.m3u8"`,
+		`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="audio",LANGUAGE="und",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2",URI="original/audio2_stream.m3u8"`,
 		`AUDIO="audio"`,
+		`CODECS="avc1.640028,mp4a.40.2"`,
 		"original/index.m3u8",
 		"1080/index.m3u8",
 		"720/index.m3u8",
@@ -337,6 +347,12 @@ func TestRenderABRMasterPlaylistWithAudio(t *testing.T) {
 	} {
 		if !strings.Contains(playlist, expected) {
 			t.Fatalf("master playlist missing %q:\n%s", expected, playlist)
+		}
+	}
+
+	for _, line := range strings.Split(playlist, "\n") {
+		if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") && strings.Contains(line, `NAME=`) {
+			t.Fatalf("STREAM-INF should not contain NAME attribute:\n%s", playlist)
 		}
 	}
 }
