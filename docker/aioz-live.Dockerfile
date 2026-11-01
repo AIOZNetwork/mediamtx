@@ -41,9 +41,10 @@ WORKDIR /src/mediamtx
 
 # Modules first, so a source change does not refetch them. git over ssh is
 # used only when an agent is forwarded; otherwise https with the netrc.
+# The modules stay in this layer, not a cache mount: BuildKit can empty a mount
+# while the layer stays cached, and the build below has no credential to refetch.
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=secret,id=netrc,target=/root/.netrc \
+RUN --mount=type=secret,id=netrc,target=/root/.netrc \
     --mount=type=ssh \
     set -eu; \
     if [ -S "${SSH_AUTH_SOCK:-}" ]; then \
@@ -62,8 +63,7 @@ COPY . ./
 # versiongetter reads it from .git (kept in the context by .dockerignore) and
 # falls back to v0.0.0 when there is none.
 ARG RELEASE=
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,target=/root/.cache/go-build \
     set -eu; \
     if [ -n "${RELEASE}" ]; then \
         printf '%s' "${RELEASE}" > internal/core/VERSION; \
