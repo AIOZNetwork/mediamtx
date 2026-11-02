@@ -59,8 +59,7 @@ func (s *ProviderPlaybackService) RenderMasterPlaylist(req ProviderPlaylistReque
 			r.Bandwidth, r.Bandwidth, r.Width, r.Height, r.Codecs,
 		))
 		b.WriteString(escapePathSegment(r.Name))
-		b.WriteString(fmt.Sprintf("/index.m3u8?generation=%d", latestGeneration))
-		b.WriteString("\n")
+		b.WriteString("/index.m3u8\n")
 	}
 	return []byte(b.String()), nil
 }
@@ -86,8 +85,7 @@ func (s *ProviderPlaybackService) RenderHybridMasterPlaylist(req ProviderPlaylis
 			r.Bandwidth, r.Bandwidth, r.Width, r.Height, r.Codecs,
 		))
 		b.WriteString(escapePathSegment(r.Name))
-		b.WriteString(fmt.Sprintf("/index.m3u8?generation=%d", latestGeneration))
-		b.WriteString("\n")
+		b.WriteString("/index.m3u8\n")
 	}
 	return []byte(b.String()), nil
 }

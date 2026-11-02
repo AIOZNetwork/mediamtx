@@ -233,10 +233,6 @@ func (s *httpServer) onProviderHLSPlaylistRequest(ctx *gin.Context, dir string, 
 		})
 	}
 	if indexPlaylist && err != nil && strings.Contains(dir, "/") {
-		if generation == 0 {
-			s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("generation query parameter is required"))
-			return true
-		}
 		base, rendition := path.Split(dir)
 		streamID := strings.TrimSuffix(base, "/")
 		_, _, err = s.findPathConf(ctx, streamID)
@@ -347,7 +343,7 @@ func (s *httpServer) onHybridHLSPlaylistRequest(ctx *gin.Context, dir string, fn
 		return true
 	}
 	if childName != "" {
-		generation, ok := s.providerGeneration(ctx, true)
+		generation, ok := s.providerGeneration(ctx, false)
 		if !ok {
 			return true
 		}

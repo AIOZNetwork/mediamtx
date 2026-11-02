@@ -146,7 +146,7 @@ func TestProviderPlaybackMasterPlaylistFromMetadata(t *testing.T) {
 	body := string(pl)
 	require.Contains(t, body, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n")
 	require.Contains(t, body, "#EXT-X-STREAM-INF:BANDWIDTH=2500000,AVERAGE-BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS=\"avc1.64001f,mp4a.40.2\",CLOSED-CAPTIONS=NONE")
-	require.Contains(t, body, "main/index.m3u8?generation=3")
+	require.Contains(t, body, "main/index.m3u8")
 	require.Len(t, repo.calls, 1)
 	require.Empty(t, repo.calls[0].RenditionName)
 }
@@ -199,10 +199,10 @@ func TestProviderPlaybackHTTPRoutesBypassPathManager(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/camera-one/index.m3u8?generation=3", nil)
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), "main/index.m3u8?generation=3")
+	require.Contains(t, rec.Body.String(), "main/index.m3u8")
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/camera-one/main/index.m3u8?generation=3", nil)
+	req = httptest.NewRequest(http.MethodGet, "/camera-one/main/index.m3u8", nil)
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "#EXT-X-MAP")
@@ -224,9 +224,9 @@ func TestHybridPlaybackMasterContainsOnlyProviderRenditions(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	body := rec.Body.String()
 	require.NotContains(t, body, "original/index.m3u8")
-	require.Contains(t, body, "1080p/index.m3u8?generation=3")
-	require.Contains(t, body, "720p/index.m3u8?generation=3")
-	require.Contains(t, body, "480p/index.m3u8?generation=3")
+	require.Contains(t, body, "1080p/index.m3u8")
+	require.Contains(t, body, "720p/index.m3u8")
+	require.Contains(t, body, "480p/index.m3u8")
 }
 
 func TestProviderPlaybackLatestMasterAndNestedPath(t *testing.T) {
@@ -243,7 +243,7 @@ func TestProviderPlaybackLatestMasterAndNestedPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/camera/one/index.m3u8", nil)
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), "main/index.m3u8?generation=4")
+	require.Contains(t, rec.Body.String(), "main/index.m3u8")
 	require.Equal(t, "camera/one", repo.calls[0].StreamID)
 }
 
@@ -353,25 +353,13 @@ func TestHybridPlaybackProviderChildUsesMetadata(t *testing.T) {
 	server := newHybridHTTPServer(repo)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/camera-one/720p/index.m3u8?generation=3", nil)
+	req := httptest.NewRequest(http.MethodGet, "/camera-one/720p/index.m3u8", nil)
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "#EXT-X-MAP")
 	require.Len(t, repo.calls, 2)
 	require.Equal(t, "camera-one/720p", repo.calls[0].StreamID)
 	require.Equal(t, "720p", repo.calls[1].RenditionName)
-}
-
-func TestHybridPlaybackProviderChildRequiresGenerationNoFallback(t *testing.T) {
-	repo := &providerPlaybackRepo{items: hybridProviderFixtures()}
-	server := newHybridHTTPServer(repo)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/camera-one/720p/index.m3u8", nil)
-	server.onRequest(newGinContext(rec, req))
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.Len(t, repo.calls, 1)
-	require.Equal(t, "camera-one/720p", repo.calls[0].StreamID)
 }
 
 func TestProviderPlaybackInternalE2EFromPersistedMetadata(t *testing.T) {
@@ -408,10 +396,10 @@ func TestProviderPlaybackInternalE2EFromPersistedMetadata(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/camera-one/index.m3u8?generation=7", nil)
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), "main/index.m3u8?generation=7")
+	require.Contains(t, rec.Body.String(), "main/index.m3u8")
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/camera-one/main/index.m3u8?generation=7", nil)
+	req = httptest.NewRequest(http.MethodGet, "/camera-one/main/index.m3u8", nil)
 	server.onRequest(newGinContext(rec, req))
 	require.Equal(t, http.StatusOK, rec.Code)
 	body := rec.Body.String()
