@@ -99,7 +99,7 @@ ENV APP_ENV=app
 
 # The same fixed, unprivileged uid as aioz-stream's images: they share
 # ./input, ./input-live and ./output as bind mounts.
-ARG APP_UID=10001
+ARG APP_UID=65532
 RUN groupadd --system --gid "${APP_UID}" app && \
     useradd --system --uid "${APP_UID}" --gid app --home-dir /app --no-create-home app && \
     mkdir -p /app/streamId /app/input-live && \
