@@ -45,3 +45,53 @@ func TestRemoveMuxerLeftoversNeverRecurses(t *testing.T) {
 		}
 	}
 }
+
+// An ABR stream has a base muxer in <root>/<id> and rendition muxers in
+// <root>/<id>/<rendition>. The base muxer has no uploader and closes first,
+// while a rendition muxer is still flushing uploads, so its directory is not
+// empty yet. The last muxer to close must remove the then-empty <root>/<id>.
+func TestRemoveMuxerDirectoryRemovesEmptyParentAfterLastChild(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, "4c1a7fda")
+	child := filepath.Join(base, "240")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(base, "a_video1_init.mp4"),
+		filepath.Join(child, "b_video1_init.mp4"),
+		filepath.Join(child, "b_video1_seg0.mp4"),
+	} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeMuxerDirectory(root, base)
+	if _, err := os.Stat(child); err != nil {
+		t.Fatalf("rendition dir must survive the base muxer close: %v", err)
+	}
+
+	removeMuxerDirectory(root, child)
+	if _, err := os.Stat(base); !os.IsNotExist(err) {
+		t.Fatalf("empty stream dir must be removed after the last muxer closes, stat err: %v", err)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("hlsDirectory root must never be removed: %v", err)
+	}
+}
+
+func TestRemoveMuxerDirectoryKeepsNonEmptyParent(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, "4c1a7fda")
+	for _, name := range []string{"240", "480"} {
+		if err := os.MkdirAll(filepath.Join(base, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeMuxerDirectory(root, filepath.Join(base, "240"))
+	if _, err := os.Stat(filepath.Join(base, "480")); err != nil {
+		t.Fatalf("sibling rendition dir must stay: %v", err)
+	}
+}

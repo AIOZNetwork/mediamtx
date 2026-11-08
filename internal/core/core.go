@@ -924,6 +924,9 @@ func (p *Core) createResources(initial bool) error {
 		}
 		p.hlsServer = i
 		hlss3uploader.SetCleanupRepository(repository.NewLiveHLSCleanupRepository(database.DB))
+		if segments := repository.NewLiveHLSSegmentRepository(database.DB); segments != nil {
+			hlss3uploader.SetCleanupStoredObjects(segments)
+		}
 		hlss3uploader.StartCleanupChore(i.UploadConfig.Storage)
 	}
 

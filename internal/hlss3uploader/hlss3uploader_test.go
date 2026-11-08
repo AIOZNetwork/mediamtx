@@ -222,6 +222,9 @@ func (r *mockSegmentRepo) ListFMP4Window(streamID string, since time.Time) ([]mo
 	return out, nil
 }
 func (r *mockSegmentRepo) MaxSequence(streamID string) (int64, bool, error) { return 0, false, nil }
+func (r *mockSegmentRepo) ListUploadedObjects(_, _, _ string) ([]models.LiveHLSSegment, error) {
+	return nil, nil
+}
 
 func TestHLSS3Uploader_InFlightAndCompletedExclusion(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "uploader-test-*")

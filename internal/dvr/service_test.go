@@ -48,6 +48,9 @@ func (r *fakeRepo) GetByStreamAndSegment(streamID, segmentName string) (*models.
 	return nil, nil
 }
 func (r *fakeRepo) MaxSequence(streamID string) (int64, bool, error) { return 0, false, nil }
+func (r *fakeRepo) ListUploadedObjects(_, _, _ string) ([]models.LiveHLSSegment, error) {
+	return nil, nil
+}
 func (r *fakeRepo) ListWindow(streamID, sessionID string, since time.Time) ([]models.LiveHLSSegment, error) {
 	var out []models.LiveHLSSegment
 	for _, seg := range r.segments {
@@ -601,4 +604,3 @@ func TestServeMediaRedirectsWithCDNStorageProvider(t *testing.T) {
 		t.Fatalf("unexpected Location header %q, expected %q", got, expectedLink)
 	}
 }
-

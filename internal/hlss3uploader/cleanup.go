@@ -2,6 +2,7 @@ package hlss3uploader
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -77,6 +78,7 @@ func cleanupGracePeriod(cfg StorageConfig) time.Duration {
 var (
 	cleanupRepoMu sync.RWMutex
 	cleanupRepo   models.LiveHLSCleanupRepository
+	cleanupStored storedObjectLister
 )
 
 // SetCleanupRepository sets the process-wide cleanup repository (nil: no DB).
@@ -86,16 +88,45 @@ func SetCleanupRepository(repo models.LiveHLSCleanupRepository) {
 	cleanupRepoMu.Unlock()
 }
 
+// SetCleanupStoredObjects sets the process-wide lister of uploaded objects
+// (live_hls_segments) the chore uses for CDN deletes (nil: no DB).
+func SetCleanupStoredObjects(stored storedObjectLister) {
+	cleanupRepoMu.Lock()
+	cleanupStored = stored
+	cleanupRepoMu.Unlock()
+}
+
+func defaultCleanupStoredObjects() storedObjectLister {
+	cleanupRepoMu.RLock()
+	defer cleanupRepoMu.RUnlock()
+	return cleanupStored
+}
+
 func defaultCleanupRepository() models.LiveHLSCleanupRepository {
 	cleanupRepoMu.RLock()
 	defer cleanupRepoMu.RUnlock()
 	return cleanupRepo
 }
 
+// storedObjectLister lists the uploaded live_hls_segments rows under a remote prefix.
+type storedObjectLister interface {
+	ListUploadedObjects(backend, streamID, prefix string) ([]models.LiveHLSSegment, error)
+}
+
+// storedKeyRegistrar is a provider that deletes by object id and only knows
+// the ids it uploaded itself (CDN). The chore's provider is new, so it must be
+// told which objects exist under the prefix before DeleteFolder.
+type storedKeyRegistrar interface {
+	RegisterKeyETag(key, etag string)
+}
+
 // CleanupChore deletes remote folders / contracts whose grace period passed.
 type CleanupChore struct {
 	repo models.LiveHLSCleanupRepository
 	cfg  StorageConfig
+	// stored lists the uploaded objects of a prefix (live_hls_segments). Providers
+	// that delete by object id (CDN) need it; nil when there is no database.
+	stored storedObjectLister
 
 	// newProvider builds a delete-only provider for a claimed row; replaced in tests.
 	newProvider func(ctx context.Context, cfg StorageConfig, row models.LiveHLSCleanup) (StorageProvider, error)
@@ -109,6 +140,7 @@ func newCleanupChore(repo models.LiveHLSCleanupRepository, cfg StorageConfig) *C
 	return &CleanupChore{
 		repo:        repo,
 		cfg:         cfg,
+		stored:      defaultCleanupStoredObjects(),
 		newProvider: newDeleteProvider,
 		now:         time.Now,
 	}
@@ -179,13 +211,41 @@ func (c *CleanupChore) deleteRow(ctx context.Context, row models.LiveHLSCleanup)
 	if err != nil {
 		return err
 	}
-	defer provider.Close()
+	defer func() {
+		if cErr := provider.Close(); cErr != nil {
+			slog.Warn("hls cleanup: close provider", slog.String("provider", row.Provider), slog.Any("err", cErr))
+		}
+	}()
 	if provider.Name() != row.Provider {
 		// Storage config changed since the row was written. The row ends deleted with
 		// this error in last_error: deleting through another provider would not remove this data.
 		return &providerMismatchError{row: row.Provider, current: provider.Name()}
 	}
+	if regErr := c.registerStoredObjects(provider, row); regErr != nil {
+		return regErr
+	}
 	return provider.DeleteFolder(delCtx, row.Prefix)
+}
+
+// registerStoredObjects hands a delete-by-id provider (CDN) the objects that
+// live_hls_segments recorded under the row's prefix. Other providers delete
+// by prefix (S3) or by stored contract id (DePIN) and are left alone.
+func (c *CleanupChore) registerStoredObjects(provider StorageProvider, row models.LiveHLSCleanup) error {
+	reg, ok := provider.(storedKeyRegistrar)
+	if !ok {
+		return nil
+	}
+	if c.stored == nil {
+		return fmt.Errorf("no segment repository: cannot list uploaded objects under %s", row.Prefix)
+	}
+	objects, err := c.stored.ListUploadedObjects(row.Provider, row.StreamName, row.Prefix)
+	if err != nil {
+		return fmt.Errorf("list uploaded objects under %s: %w", row.Prefix, err)
+	}
+	for _, o := range objects {
+		reg.RegisterKeyETag(o.StorageKey, o.StorageETag)
+	}
+	return nil
 }
 
 type providerMismatchError struct{ row, current string }
@@ -197,9 +257,7 @@ func (e *providerMismatchError) Error() string {
 func (c *CleanupChore) start(interval time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
+	c.wg.Go(func() {
 		// Immediately: rows that came due while mediamtx was down.
 		c.runPass(ctx)
 		ticker := time.NewTicker(interval)
@@ -212,7 +270,7 @@ func (c *CleanupChore) start(interval time.Duration) {
 				c.runPass(ctx)
 			}
 		}
-	}()
+	})
 }
 
 func (c *CleanupChore) stop() {

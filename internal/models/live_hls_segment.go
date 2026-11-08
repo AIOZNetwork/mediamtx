@@ -59,4 +59,8 @@ type LiveHLSSegmentRepository interface {
 	ListWindow(streamID, sessionID string, since time.Time) ([]LiveHLSSegment, error)
 	ListFMP4Window(streamID string, since time.Time) ([]LiveHLSSegment, error)
 	MaxSequence(streamID string) (int64, bool, error)
+	// ListUploadedObjects returns the rows of streamID uploaded to backend under
+	// prefix (storage_key = prefix/...) with their storage_e_tag, soft-deleted
+	// rows included: the remote object exists until the provider deletes it.
+	ListUploadedObjects(backend, streamID, prefix string) ([]LiveHLSSegment, error)
 }

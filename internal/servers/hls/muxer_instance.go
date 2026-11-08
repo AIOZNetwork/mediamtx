@@ -76,6 +76,37 @@ func removeMuxerLeftovers(dir string) {
 	}
 }
 
+// removeMuxerDirectory deletes the muxer's leftover files and its directory,
+// then every parent directory that is now empty, up to but excluding root
+// (hlsDirectory). An ABR stream keeps renditions in <root>/<id>/<rendition>;
+// the base muxer in <root>/<id> usually closes first, while rendition muxers
+// are still flushing uploads, so its own os.Remove fails on a non-empty
+// directory. The last muxer to finish removes <root>/<id>. os.Remove never
+// deletes a non-empty directory, so a parent still in use is left alone.
+func removeMuxerDirectory(root string, dir string) {
+	removeMuxerLeftovers(dir)
+
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return
+	}
+	cur, err := filepath.Abs(dir)
+	if err != nil {
+		return
+	}
+
+	for {
+		rel, relErr := filepath.Rel(rootAbs, cur)
+		if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return
+		}
+		if os.Remove(cur) != nil {
+			return
+		}
+		cur = filepath.Dir(cur)
+	}
+}
+
 type instanceParent interface {
 	logger.Writer
 	closeInstance(*muxerInstance, error)
@@ -236,8 +267,7 @@ func (mi *muxerInstance) run() {
 	}
 
 	if mi.hmuxer.Directory != "" {
-		removeMuxerLeftovers(mi.hmuxer.Directory)
-		os.Remove(mi.hmuxer.Directory)
+		removeMuxerDirectory(mi.directory, mi.hmuxer.Directory)
 	}
 
 	mi.Log(logger.Debug, "instance destroyed: %v", err)
