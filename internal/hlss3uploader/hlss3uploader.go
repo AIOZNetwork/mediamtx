@@ -37,6 +37,11 @@ type LinkStorageProvider interface {
 	GetLink(ctx context.Context, key string) (string, error)
 }
 
+// ReadinessWaiter is the interface for storage backends that can wait until an uploaded file is ready/servable.
+type ReadinessWaiter interface {
+	WaitReady(ctx context.Context, fileID string) error
+}
+
 // HLSS3Uploader watches local HLS directory (e.g. ./input-live),
 // and uploads generated init and media segment files to the configured StorageProvider.
 // Playlists are not uploaded (nothing reads them from the provider); _stream.m3u8
@@ -65,6 +70,15 @@ type HLSS3Uploader struct {
 
 	processingFiles sync.Map
 	uploadedFiles   sync.Map
+
+	MaxReadinessPollers int
+	ShutdownTimeout     time.Duration
+	pollersMu           sync.Mutex
+	pollersSem          chan struct{}
+	pollersWg           sync.WaitGroup
+	pollersClosed       bool
+	pollersCtx          context.Context
+	pollersCancel       context.CancelFunc
 }
 
 const (
@@ -75,6 +89,7 @@ const (
 	defaultSegmentDurationMS     = 2000
 	defaultUploadTimeout         = 2 * time.Minute
 	defaultPresignExpires        = 15 * time.Minute
+	defaultMaxReadinessPollers   = 32
 	cacheControlNoCache          = "no-cache"
 	cacheControlImmutableSegment = "public, max-age=31536000, immutable"
 
@@ -94,6 +109,13 @@ const (
 // Initialize initializes and starts the HLSS3Uploader background service using supplied Config.
 func (u *HLSS3Uploader) Initialize() error {
 	u.ctx, u.ctxCancel = context.WithCancel(context.Background())
+	u.pollersCtx, u.pollersCancel = context.WithCancel(u.ctx)
+	maxPollers := u.MaxReadinessPollers
+	if maxPollers <= 0 {
+		maxPollers = defaultMaxReadinessPollers
+	}
+	u.pollersSem = make(chan struct{}, maxPollers)
+
 	u.done = make(chan struct{})
 	u.taskChan = make(chan string, defaultTaskQueueSize)
 	if u.Config.Workers <= 0 {
@@ -197,18 +219,25 @@ func (u *HLSS3Uploader) FlushAndClose() {
 
 	// 4. Safely close task channel so workers know when all work is drained
 	u.muClose.Lock()
-	close(u.taskChan)
+	if u.taskChan != nil {
+		close(u.taskChan)
+	}
 	u.muClose.Unlock()
 
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), u.getShutdownTimeout())
+	defer shutdownCancel()
+
 	// 5. Wait for upload workers to finish all remaining queued uploads
-	waitDone := make(chan struct{})
+	workersDone := make(chan struct{})
 	go func() {
 		u.wg.Wait()
-		close(waitDone)
+		close(workersDone)
 	}()
+	workersTimedOut := false
 	select {
-	case <-waitDone:
-	case <-time.After(15 * time.Second):
+	case <-workersDone:
+	case <-shutdownCtx.Done():
+		workersTimedOut = true
 		if u.Parent != nil {
 			u.Parent.Log(logger.Warn, "[HLS Uploader Close] workers did not exit in time")
 		}
@@ -217,9 +246,16 @@ func (u *HLSS3Uploader) FlushAndClose() {
 		}
 	}
 
-	// 6. Cancel context to release any lingering resources
-	if u.ctxCancel != nil {
-		u.ctxCancel()
+	// 6. Stop readiness pollers and wait for them to finish before closing provider
+	pollersDone := u.stopPollers()
+	pollersTimedOut := false
+	select {
+	case <-pollersDone:
+	case <-shutdownCtx.Done():
+		pollersTimedOut = true
+		if u.Parent != nil {
+			u.Parent.Log(logger.Warn, "[HLS Uploader Close] readiness pollers did not exit in time")
+		}
 	}
 
 	// 7. Schedule the remote live folder for deletion after the grace period
@@ -228,12 +264,51 @@ func (u *HLSS3Uploader) FlushAndClose() {
 		u.scheduleRemoteCleanup()
 	}
 
-	// 8. Close storage provider
+	// 8. Close storage provider: never close while workers or pollers are still running.
+	// If either timed out, defer close until they actually finish to prevent use-after-close.
 	if u.provider != nil {
-		if err := u.provider.Close(); err != nil {
-			u.Log(logger.Warn, "failed to close storage provider: %v", err)
+		provider := u.provider
+		if workersTimedOut || pollersTimedOut {
+			u.Log(logger.Warn, "deferring storage provider close until in-flight workers and pollers exit")
+			go func() {
+				<-workersDone
+				<-pollersDone
+				if err := provider.Close(); err != nil {
+					u.Log(logger.Warn, "failed to close storage provider: %v", err)
+				}
+			}()
+		} else {
+			if err := provider.Close(); err != nil {
+				u.Log(logger.Warn, "failed to close storage provider: %v", err)
+			}
 		}
 	}
+}
+
+func (u *HLSS3Uploader) getShutdownTimeout() time.Duration {
+	if u.ShutdownTimeout > 0 {
+		return u.ShutdownTimeout
+	}
+	return 15 * time.Second
+}
+
+func (u *HLSS3Uploader) stopPollers() <-chan struct{} {
+	u.pollersMu.Lock()
+	u.pollersClosed = true
+	if u.pollersCancel != nil {
+		u.pollersCancel()
+	}
+	if u.ctxCancel != nil {
+		u.ctxCancel()
+	}
+	u.pollersMu.Unlock()
+
+	pollersDone := make(chan struct{})
+	go func() {
+		u.pollersWg.Wait()
+		close(pollersDone)
+	}()
+	return pollersDone
 }
 
 // Log implements logger.Writer.
@@ -317,6 +392,9 @@ func (u *HLSS3Uploader) scanDirectory(dir string) {
 }
 
 func (u *HLSS3Uploader) scanDirectoryForClose(dir string) {
+	if u.taskChan == nil {
+		return
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -500,6 +578,7 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 	}
 
 	uploadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	start := time.Now()
 	etag, err := u.provider.UploadFile(uploadCtx, filePath, remoteKey, contentType)
 	cancel()
 
@@ -519,8 +598,67 @@ func (u *HLSS3Uploader) processFile(filePath string) {
 			_ = u.Repository.UpsertUploaded(segmentRecord)
 		}
 		u.uploadedFiles.Store(remoteKey, true)
+
+		if waiter, ok := u.provider.(ReadinessWaiter); ok && u.Repository != nil {
+			u.startReadinessPoller(waiter, segmentRecord.StreamID, segmentRecord.SegmentName, etag, start)
+		}
 	}
 }
+
+func (u *HLSS3Uploader) startReadinessPoller(waiter ReadinessWaiter, streamID, segmentName, etag string, start time.Time) {
+	u.pollersMu.Lock()
+	if u.pollersClosed {
+		u.pollersMu.Unlock()
+		return
+	}
+	if u.pollersSem == nil {
+		maxPollers := u.MaxReadinessPollers
+		if maxPollers <= 0 {
+			maxPollers = defaultMaxReadinessPollers
+		}
+		u.pollersSem = make(chan struct{}, maxPollers)
+	}
+	select {
+	case u.pollersSem <- struct{}{}:
+	default:
+		u.pollersMu.Unlock()
+		u.Log(logger.Warn, "readiness poller saturated, dropping measurement for %s/%s", streamID, segmentName)
+		return
+	}
+	if u.pollersCtx == nil {
+		baseCtx := u.ctx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		u.pollersCtx, u.pollersCancel = context.WithCancel(baseCtx)
+	}
+	pollerCtx := u.pollersCtx
+	u.pollersWg.Add(1)
+	u.pollersMu.Unlock()
+
+	go func() {
+		defer func() {
+			<-u.pollersSem
+			u.pollersWg.Done()
+			if r := recover(); r != nil {
+				u.Log(logger.Warn, "readiness poller panic for %s/%s: %v", streamID, segmentName, r)
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(pollerCtx, 2*time.Minute)
+		defer cancel()
+
+		if err := waiter.WaitReady(ctx, etag); err != nil {
+			u.Log(logger.Warn, "readiness poller failed for %s/%s (etag: %s): %v", streamID, segmentName, etag, err)
+			return
+		}
+		elapsedMS := time.Since(start).Milliseconds()
+		if err := u.Repository.SetReadyMS(ctx, streamID, segmentName, elapsedMS); err != nil {
+			u.Log(logger.Warn, "failed to record ready_ms for %s/%s: %v", streamID, segmentName, err)
+		}
+	}()
+}
+
 
 func getContentType(ext string) string {
 	switch ext {
@@ -856,9 +994,14 @@ func (u *HLSS3Uploader) waitStable(filePath string) bool {
 	defer ticker.Stop()
 	timeout := time.After(5 * time.Second)
 
+	var ctxDone <-chan struct{}
+	if u.ctx != nil {
+		ctxDone = u.ctx.Done()
+	}
+
 	for {
 		select {
-		case <-u.ctx.Done():
+		case <-ctxDone:
 			return false
 		case <-timeout:
 			// Ensure worker never deadlocks on 0-byte or stalled files

@@ -347,3 +347,64 @@ func TestCdnHelper_DirectMethodsMatch(t *testing.T) {
 	err = helper.Delete(context.Background(), &Object{Id: "test-delete-id"})
 	require.NoError(t, err)
 }
+
+func TestCDNStorageProvider_WaitReady_Success(t *testing.T) {
+	callCount := int32(0)
+	expectedFileID := "file-ready-test"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/getFileRecord/") {
+			id := strings.TrimPrefix(r.URL.Path, "/getFileRecord/")
+			require.Equal(t, expectedFileID, id)
+			cnt := atomic.AddInt32(&callCount, 1)
+			status := 1 // pending
+			if cnt >= 2 {
+				status = FileRecordReadyStatus // ready
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(GetFileRecordResponse{
+				Id:     id,
+				Status: status,
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	p, err := NewCDNStorageProvider(server.URL, "https://hub.aioz.network", "")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Pass etag format fileID:offset:size
+	etag := fmt.Sprintf("%s:0:1024", expectedFileID)
+	err = p.WaitReady(ctx, etag)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&callCount), int32(2))
+}
+
+func TestCDNStorageProvider_WaitReady_Timeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/getFileRecord/") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(GetFileRecordResponse{
+				Id:     "never-ready",
+				Status: 1, // pending forever
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	p, err := NewCDNStorageProvider(server.URL, "https://hub.aioz.network", "")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err = p.WaitReady(ctx, "never-ready")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}

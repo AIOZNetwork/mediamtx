@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,6 +38,11 @@ type LiveHLSSegment struct {
 	Sequence        *int64         `json:"sequence"`
 	MediaSequence   *int64         `json:"media_sequence" gorm:"index"`
 	ContentType     string         `json:"content_type"`
+	ReadyMS         *int64         `json:"ready_ms,omitempty" gorm:"column:ready_ms"`
+	LocalCount      int64          `json:"local_count" gorm:"column:local_count;default:0"`
+	RedirectCount   int64          `json:"redirect_count" gorm:"column:redirect_count;default:0"`
+	ProxyCount      int64          `json:"proxy_count" gorm:"column:proxy_count;default:0"`
+	MissCount       int64          `json:"miss_count" gorm:"column:miss_count;default:0"`
 	UploadedAt      *time.Time     `json:"uploaded_at"`
 	LocalDeletedAt  *time.Time     `json:"local_deleted_at"`
 	CreatedAt       time.Time      `json:"created_at"`
@@ -63,4 +69,10 @@ type LiveHLSSegmentRepository interface {
 	// prefix (storage_key = prefix/...) with their storage_e_tag, soft-deleted
 	// rows included: the remote object exists until the provider deletes it.
 	ListUploadedObjects(backend, streamID, prefix string) ([]LiveHLSSegment, error)
+	SetReadyMS(ctx context.Context, streamID, segmentName string, ms int64) error
+}
+
+// LiveHLSSegmentServeCounter applies all pending outcome deltas in one update.
+type LiveHLSSegmentServeCounter interface {
+	AddServeCounts(ctx context.Context, streamID, segmentName string, local, redirect, proxy, miss int64) error
 }

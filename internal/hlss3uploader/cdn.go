@@ -1243,6 +1243,39 @@ func (p *CDNStorageProvider) UploadFile(ctx context.Context, localPath, remoteKe
 	return etag, nil
 }
 
+// WaitReady implements ReadinessWaiter. It polls helper.GetFileRecord on a 500ms ticker
+// until Status == FileRecordReadyStatus or ctx is canceled / times out.
+func (p *CDNStorageProvider) WaitReady(ctx context.Context, fileID string) error {
+	if p.helper == nil {
+		return fmt.Errorf("cdn: helper is nil")
+	}
+
+	id := fileID
+	if obj, ok := p.getObject(fileID); ok && obj != nil && obj.Id != "" {
+		id = obj.Id
+	} else if parts := strings.Split(fileID, ":"); len(parts) > 0 && parts[0] != "" {
+		id = parts[0]
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		resp, err := p.helper.GetFileRecord(ctx, id)
+		if err == nil && resp != nil && resp.Status == FileRecordReadyStatus {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+var _ ReadinessWaiter = (*CDNStorageProvider)(nil)
+
 func (p *CDNStorageProvider) GetLink(ctx context.Context, key string) (string, error) {
 	obj, ok := p.getObject(key)
 	if !ok {

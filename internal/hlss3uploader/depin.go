@@ -193,6 +193,13 @@ func (p *DePINStorageProvider) UploadFile(ctx context.Context, localPath, remote
 	return uuidStr, nil
 }
 
+// WaitReady implements ReadinessWaiter; SDK UploadFile calls CommitFile synchronously so file is READY on return.
+func (p *DePINStorageProvider) WaitReady(ctx context.Context, fileID string) error {
+	return nil
+}
+
+var _ ReadinessWaiter = (*DePINStorageProvider)(nil)
+
 func (p *DePINStorageProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, string, int64, error) {
 	uuidStr, ok := p.keyToUUID.Load(key)
 	if !ok {

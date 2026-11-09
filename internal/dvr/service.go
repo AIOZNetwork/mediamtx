@@ -26,6 +26,11 @@ const (
 	defaultStoragePrefix         = "live-hls"
 	defaultTargetDurationSec     = 1
 	defaultSegmentDurationSec    = 2.0
+	serveCountFlushInterval      = 5 * time.Second
+	serveOutcomeLocal            = "local"
+	serveOutcomeRedirect         = "redirect"
+	serveOutcomeProxy            = "proxy"
+	serveOutcomeMiss             = "miss"
 	cacheControlNoCache          = "no-cache"
 	cacheControlImmutableSegment = "public, max-age=31536000, immutable"
 	mediaTypePlaylistM3U8        = ".m3u8"
@@ -47,11 +52,25 @@ type Service struct {
 	mu       sync.Mutex
 	sessions map[string]string
 	active   map[string]bool
+
+	counts      map[serveCountKey]serveCounts
+	flushMu     sync.Mutex
+	stopFlush   chan struct{}
+	flushDone   chan struct{}
+	stopFlushIO context.CancelFunc
+	closeDone   chan struct{}
+	closed      bool
+	serving     int
+	serveDone   *sync.Cond
 }
+
+type serveCountKey struct{ streamID, segmentName string }
+type serveCounts struct{ local, redirect, proxy, miss int64 }
 
 func (s *Service) Initialize() {
 	s.sessions = make(map[string]string)
 	s.active = make(map[string]bool)
+	s.startServeCountFlush(serveCountFlushInterval)
 	if s.Config.Prefix == "" {
 		s.Config.Prefix = defaultStoragePrefix
 	}
@@ -65,6 +84,47 @@ func (s *Service) Initialize() {
 }
 
 func (s *Service) Close() {
+	s.mu.Lock()
+	if s.closed {
+		done := s.closeDone
+		s.mu.Unlock()
+		<-done
+		return
+	}
+	s.closed = true
+	s.closeDone = make(chan struct{})
+	if s.serveDone == nil {
+		s.serveDone = sync.NewCond(&s.mu)
+	}
+	for s.serving != 0 {
+		s.serveDone.Wait()
+	}
+	stop, done, stopIO := s.stopFlush, s.flushDone, s.stopFlushIO
+	s.mu.Unlock()
+	defer close(s.closeDone)
+	if stopIO != nil {
+		stopIO()
+	}
+	if stop != nil {
+		close(stop)
+		<-done
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.flushServeCountsWithContext(ctx, "")
+	s.mu.Lock()
+	retry := len(s.counts) != 0
+	s.mu.Unlock()
+	if retry {
+		s.flushServeCountsWithContext(ctx, "") // retry once within the same shutdown budget
+	}
+	s.mu.Lock()
+	remaining := len(s.counts)
+	s.mu.Unlock()
+	if remaining != 0 {
+		// No durable queue exists; shutdown cannot preserve counts after a prolonged outage.
+		s.log(logger.Warn, "DVR shutdown with %d unflushed segment count keys", remaining)
+	}
 	if s.provider != nil {
 		_ = s.provider.Close()
 	}
@@ -85,11 +145,12 @@ func (s *Service) StartSession(streamID string) {
 
 func (s *Service) EndSession(streamID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.active == nil {
 		s.active = make(map[string]bool)
 	}
 	s.active[streamID] = false
+	s.mu.Unlock()
+	s.flushServeCounts(streamID)
 }
 
 func (s *Service) IsActive(streamID string) bool {
@@ -269,6 +330,22 @@ func (s *Service) ServeMedia(w http.ResponseWriter, r *http.Request, streamID, s
 	if s == nil {
 		return false
 	}
+	s.startServeCountFlush(serveCountFlushInterval) // zero-value services also flush periodically
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	s.serving++
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.serving--
+		if s.serving == 0 && s.serveDone != nil {
+			s.serveDone.Broadcast()
+		}
+		s.mu.Unlock()
+	}()
 
 	var segment *models.LiveHLSSegment
 	if s.Repository != nil {
@@ -296,6 +373,7 @@ func (s *Service) ServeMedia(w http.ResponseWriter, r *http.Request, streamID, s
 			}
 			w.Header().Set("Content-Type", ct)
 			http.ServeFile(w, r, localPath)
+			s.incServeCount(segment, streamID, segmentName, serveOutcomeLocal)
 			return true
 		}
 	}
@@ -326,16 +404,121 @@ func (s *Service) ServeMedia(w http.ResponseWriter, r *http.Request, streamID, s
 		// 1. Prioritize Direct Download / Presigned Redirect Link (HTTP 302)
 		if link, err := s.presign(r.Context(), storageKey); err == nil && link != "" {
 			http.Redirect(w, r, link, http.StatusFound)
+			s.incServeCount(segment, streamID, segmentName, serveOutcomeRedirect)
 			return true
 		}
 
 		// 2. Fallback to proxy streaming if link generation is unavailable
 		if s.proxyStorageObject(r.Context(), w, storageKey) {
+			s.incServeCount(segment, streamID, segmentName, serveOutcomeProxy)
 			return true
 		}
 	}
 
+	s.incServeCount(segment, streamID, segmentName, serveOutcomeMiss)
 	return false
+}
+
+func (s *Service) incServeCount(segment *models.LiveHLSSegment, streamID, segmentName, outcome string) {
+	if s == nil || s.Repository == nil || segment == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counts == nil {
+		// Pending counts are lost on process crash; distinct keys can grow during a DB outage.
+		s.counts = make(map[serveCountKey]serveCounts)
+	}
+	key := serveCountKey{streamID, segmentName}
+	count := s.counts[key]
+	switch outcome {
+	case serveOutcomeLocal:
+		count.local++
+	case serveOutcomeRedirect:
+		count.redirect++
+	case serveOutcomeProxy:
+		count.proxy++
+	case serveOutcomeMiss:
+		count.miss++
+	}
+	s.counts[key] = count
+}
+
+func (s *Service) startServeCountFlush(interval time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopFlush != nil || s.closed {
+		return
+	}
+	s.stopFlush = make(chan struct{})
+	s.flushDone = make(chan struct{})
+	flushCtx, stopIO := context.WithCancel(context.Background())
+	s.stopFlushIO = stopIO
+	go func() {
+		defer stopIO()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		defer close(s.flushDone)
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(flushCtx, 2*time.Second)
+				s.flushServeCountsWithContext(ctx, "")
+				cancel()
+			case <-s.stopFlush:
+				return
+			}
+		}
+	}()
+}
+
+func (s *Service) flushServeCounts(streamID string) {
+	s.flushServeCountsWithContext(context.Background(), streamID)
+}
+
+func (s *Service) flushServeCountsWithContext(ctx context.Context, streamID string) {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	batch, ok := s.Repository.(models.LiveHLSSegmentServeCounter)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	pending := make(map[serveCountKey]serveCounts)
+	for key, count := range s.counts {
+		if streamID == "" || streamID == key.streamID {
+			pending[key] = count
+			delete(s.counts, key)
+		}
+	}
+	s.mu.Unlock()
+	for key, count := range pending {
+		if ctx.Err() != nil {
+			s.mu.Lock()
+			current := s.counts[key]
+			current.local += count.local
+			current.redirect += count.redirect
+			current.proxy += count.proxy
+			current.miss += count.miss
+			s.counts[key] = current
+			s.mu.Unlock()
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := batch.AddServeCounts(callCtx, key.streamID, key.segmentName, count.local, count.redirect, count.proxy, count.miss)
+		cancel()
+		if err != nil {
+			s.mu.Lock()
+			current := s.counts[key]
+			current.local += count.local
+			current.redirect += count.redirect
+			current.proxy += count.proxy
+			current.miss += count.miss
+			s.counts[key] = current
+			s.mu.Unlock()
+			s.log(logger.Warn, "failed to flush serve counts for %s/%s: %v", key.streamID, key.segmentName, err)
+		}
+	}
 }
 
 func (s *Service) currentSessionID(streamID string) string {
