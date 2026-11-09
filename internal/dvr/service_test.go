@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,8 +19,26 @@ import (
 	"github.com/bluenviron/mediamtx/internal/models"
 )
 
+type ReadyMSCall struct {
+	StreamID    string
+	SegmentName string
+	MS          int64
+}
+
+type ServeCountCall struct {
+	StreamID    string
+	SegmentName string
+	Outcome     string
+	Counts      [4]int64
+}
+
 type fakeRepo struct {
-	segments []models.LiveHLSSegment
+	mu              sync.Mutex
+	segments        []models.LiveHLSSegment
+	ReadyMSCalls    []ReadyMSCall
+	ServeCountCalls []ServeCountCall
+	incServeErr     error
+	incServeHook    func(outcome string)
 }
 
 type readableProvider struct {
@@ -40,9 +59,12 @@ func (r *fakeRepo) GetByStorageKey(storageKey string) (*models.LiveHLSSegment, e
 	return nil, nil
 }
 func (r *fakeRepo) GetByStreamAndSegment(streamID, segmentName string) (*models.LiveHLSSegment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, seg := range r.segments {
 		if seg.StreamID == streamID && seg.SegmentName == segmentName {
-			return &seg, nil
+			cp := seg
+			return &cp, nil
 		}
 	}
 	return nil, nil
@@ -52,6 +74,8 @@ func (r *fakeRepo) ListUploadedObjects(_, _, _ string) ([]models.LiveHLSSegment,
 	return nil, nil
 }
 func (r *fakeRepo) ListWindow(streamID, sessionID string, since time.Time) ([]models.LiveHLSSegment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var out []models.LiveHLSSegment
 	for _, seg := range r.segments {
 		if seg.StreamID == streamID && (sessionID == "" || seg.SessionID == sessionID) && !seg.StartedAt.Before(since) {
@@ -62,6 +86,8 @@ func (r *fakeRepo) ListWindow(streamID, sessionID string, since time.Time) ([]mo
 }
 
 func (r *fakeRepo) ListFMP4Window(streamID string, since time.Time) ([]models.LiveHLSSegment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var out []models.LiveHLSSegment
 	for _, seg := range r.segments {
 		if seg.StreamID == streamID && !seg.StartedAt.Before(since) {
@@ -69,6 +95,101 @@ func (r *fakeRepo) ListFMP4Window(streamID string, since time.Time) ([]models.Li
 		}
 	}
 	return out, nil
+}
+
+func (r *fakeRepo) SetReadyMS(ctx context.Context, streamID, segmentName string, ms int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ReadyMSCalls = append(r.ReadyMSCalls, ReadyMSCall{
+		StreamID:    streamID,
+		SegmentName: segmentName,
+		MS:          ms,
+	})
+	for i := range r.segments {
+		if r.segments[i].StreamID == streamID && r.segments[i].SegmentName == segmentName {
+			r.segments[i].ReadyMS = &ms
+			break
+		}
+	}
+	return nil
+}
+
+func (r *fakeRepo) AddServeCounts(ctx context.Context, streamID, segmentName string, local, redirect, proxy, miss int64) error {
+	if r.incServeHook != nil {
+		r.incServeHook("batch")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	outcome := ""
+	switch {
+	case local != 0:
+		outcome = serveOutcomeLocal
+	case redirect != 0:
+		outcome = serveOutcomeRedirect
+	case proxy != 0:
+		outcome = serveOutcomeProxy
+	case miss != 0:
+		outcome = serveOutcomeMiss
+	}
+	r.ServeCountCalls = append(r.ServeCountCalls, ServeCountCall{
+		StreamID:    streamID,
+		SegmentName: segmentName,
+		Outcome:     outcome,
+		Counts:      [4]int64{local, redirect, proxy, miss},
+	})
+	if r.incServeErr != nil {
+		return r.incServeErr
+	}
+	for i := range r.segments {
+		if r.segments[i].StreamID == streamID && r.segments[i].SegmentName == segmentName {
+			r.segments[i].LocalCount += local
+			r.segments[i].RedirectCount += redirect
+			r.segments[i].ProxyCount += proxy
+			r.segments[i].MissCount += miss
+			break
+		}
+	}
+	return nil
+}
+
+func (r *fakeRepo) getServeCountCalls() []ServeCountCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := make([]ServeCountCall, len(r.ServeCountCalls))
+	copy(cp, r.ServeCountCalls)
+	return cp
+}
+
+func (r *fakeRepo) waitForServeCountCalls(expected int, timeout time.Duration) []ServeCountCall {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		if len(r.ServeCountCalls) >= expected {
+			cp := make([]ServeCountCall, len(r.ServeCountCalls))
+			copy(cp, r.ServeCountCalls)
+			r.mu.Unlock()
+			return cp
+		}
+		r.mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := make([]ServeCountCall, len(r.ServeCountCalls))
+	copy(cp, r.ServeCountCalls)
+	return cp
+}
+
+func (r *fakeRepo) getSegment(streamID, segmentName string) *models.LiveHLSSegment {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, seg := range r.segments {
+		if seg.StreamID == streamID && seg.SegmentName == segmentName {
+			cp := seg
+			return &cp
+		}
+	}
+	return nil
 }
 
 func (p *readableProvider) Name() string { return "readable" }
@@ -227,6 +348,19 @@ func TestServeMediaProxiesRemoteReadableProvider(t *testing.T) {
 	if string(body) != "ts-bytes" {
 		t.Fatalf("unexpected body %q", body)
 	}
+	svc.EndSession("cam1")
+
+	calls := repo.waitForServeCountCalls(1, time.Second)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ServeCountCall, got %d", len(calls))
+	}
+	if call := calls[0]; call.StreamID != "cam1" || call.SegmentName != "seg10.ts" || call.Outcome != "proxy" {
+		t.Fatalf("unexpected ServeCountCall: %+v", call)
+	}
+	seg := repo.getSegment("cam1", "seg10.ts")
+	if seg == nil || seg.ProxyCount != 1 {
+		t.Fatalf("expected ProxyCount 1, got %v", seg)
+	}
 }
 
 type mockLinkProvider struct {
@@ -245,6 +379,34 @@ func (p *mockLinkProvider) GetLink(ctx context.Context, key string) (string, err
 		return "", p.err
 	}
 	return p.link, nil
+}
+
+type fallbackMockProvider struct {
+	link          string
+	linkErr       error
+	body          string
+	contentType   string
+	contentLength int64
+	readErr       error
+}
+
+func (p *fallbackMockProvider) Name() string { return "fallback-provider" }
+func (p *fallbackMockProvider) UploadFile(ctx context.Context, localPath, remoteKey, contentType string) (string, error) {
+	return "", nil
+}
+func (p *fallbackMockProvider) DeleteFolder(ctx context.Context, prefix string) error { return nil }
+func (p *fallbackMockProvider) Close() error                                          { return nil }
+func (p *fallbackMockProvider) GetLink(ctx context.Context, key string) (string, error) {
+	if p.linkErr != nil {
+		return "", p.linkErr
+	}
+	return p.link, nil
+}
+func (p *fallbackMockProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, string, int64, error) {
+	if p.readErr != nil {
+		return nil, "", -1, p.readErr
+	}
+	return io.NopCloser(strings.NewReader(p.body)), p.contentType, p.contentLength, nil
 }
 
 func TestServeMediaRedirectsWhenLinkProviderPresent(t *testing.T) {
@@ -279,6 +441,427 @@ func TestServeMediaRedirectsWhenLinkProviderPresent(t *testing.T) {
 	}
 	if got := res.Header.Get("Location"); got != expectedLink {
 		t.Fatalf("unexpected Location header %q, expected %q", got, expectedLink)
+	}
+	svc.EndSession("cam1")
+
+	calls := repo.waitForServeCountCalls(1, time.Second)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ServeCountCall, got %d", len(calls))
+	}
+	if call := calls[0]; call.StreamID != "cam1" || call.SegmentName != "seg10.ts" || call.Outcome != "redirect" {
+		t.Fatalf("unexpected ServeCountCall: %+v", call)
+	}
+	seg := repo.getSegment("cam1", "seg10.ts")
+	if seg == nil || seg.RedirectCount != 1 {
+		t.Fatalf("expected RedirectCount 1, got %v", seg)
+	}
+}
+
+func TestServeMediaLocal(t *testing.T) {
+	tmpDir := t.TempDir()
+	localFile := filepath.Join(tmpDir, "seg10.ts")
+	if err := os.WriteFile(localFile, []byte("ts-local-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{
+		{
+			StreamID:    "cam1",
+			SegmentName: "seg10.ts",
+			LocalPath:   localFile,
+		},
+	}}
+	svc := &Service{Repository: repo}
+	req := httptest.NewRequest(http.MethodGet, "/media/cam1/seg10.ts", nil)
+	w := httptest.NewRecorder()
+
+	if !svc.ServeMedia(w, req, "cam1", "seg10.ts") {
+		t.Fatalf("expected ServeMedia to serve local file")
+	}
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status %d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if string(body) != "ts-local-bytes" {
+		t.Fatalf("unexpected body %q", body)
+	}
+	svc.EndSession("cam1")
+	calls := repo.waitForServeCountCalls(1, time.Second)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ServeCountCall, got %d", len(calls))
+	}
+	if call := calls[0]; call.StreamID != "cam1" || call.SegmentName != "seg10.ts" || call.Outcome != "local" {
+		t.Fatalf("unexpected ServeCountCall: %+v", call)
+	}
+	seg := repo.getSegment("cam1", "seg10.ts")
+	if seg == nil || seg.LocalCount != 1 {
+		t.Fatalf("expected LocalCount 1, got %v", seg)
+	}
+}
+
+func TestServeMediaMiss(t *testing.T) {
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{
+		{
+			StreamID:    "cam1",
+			SegmentName: "missing.ts",
+			StorageKey:  "live-hls/cam1/missing.ts",
+		},
+	}}
+	svc := &Service{Repository: repo}
+	req := httptest.NewRequest(http.MethodGet, "/media/cam1/missing.ts", nil)
+	w := httptest.NewRecorder()
+
+	if svc.ServeMedia(w, req, "cam1", "missing.ts") {
+		t.Fatalf("expected ServeMedia to return false on miss")
+	}
+	svc.EndSession("cam1")
+	calls := repo.waitForServeCountCalls(1, time.Second)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ServeCountCall, got %d", len(calls))
+	}
+	if call := calls[0]; call.StreamID != "cam1" || call.SegmentName != "missing.ts" || call.Outcome != "miss" {
+		t.Fatalf("unexpected ServeCountCall: %+v", call)
+	}
+	seg := repo.getSegment("cam1", "missing.ts")
+	if seg == nil || seg.MissCount != 1 {
+		t.Fatalf("expected MissCount 1, got %v", seg)
+	}
+}
+
+func TestServeMediaNilSegmentSkipsCounting(t *testing.T) {
+	repo := &fakeRepo{}
+	svc := &Service{Repository: repo}
+	req := httptest.NewRequest(http.MethodGet, "/media/cam1/unknown.ts", nil)
+	w := httptest.NewRecorder()
+
+	if svc.ServeMedia(w, req, "cam1", "unknown.ts") {
+		t.Fatalf("expected ServeMedia to return false on unknown segment")
+	}
+	time.Sleep(20 * time.Millisecond)
+	calls := repo.getServeCountCalls()
+	if len(calls) != 0 {
+		t.Fatalf("expected 0 ServeCountCalls for nil segment, got %d", len(calls))
+	}
+}
+
+func TestServeMediaRepoErrorResultUnchanged(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	repo := &fakeRepo{
+		incServeErr: fmt.Errorf("db failure"),
+		segments: []models.LiveHLSSegment{
+			{
+				StreamID:    "cam1",
+				SegmentName: "seg10.ts",
+				StorageKey:  "live-hls/cam1/seg10.ts",
+				StartedAt:   now,
+			},
+		},
+	}
+	expectedLink := "https://edge.aioz.network/download/seg10.ts"
+	svc := &Service{
+		Repository: repo,
+		provider: &mockLinkProvider{
+			link: expectedLink,
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/media/cam1/seg10.ts", nil)
+	w := httptest.NewRecorder()
+
+	if !svc.ServeMedia(w, req, "cam1", "seg10.ts") {
+		t.Fatalf("expected ServeMedia to succeed despite repo error")
+	}
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("unexpected status %d, expected 302 StatusFound", res.StatusCode)
+	}
+	if got := res.Header.Get("Location"); got != expectedLink {
+		t.Fatalf("unexpected Location %q, expected %q", got, expectedLink)
+	}
+	svc.EndSession("cam1")
+	calls := repo.waitForServeCountCalls(1, time.Second)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ServeCountCall attempt even if repo errored, got %d", len(calls))
+	}
+}
+
+func TestServeMediaBlockedRepoDoesNotDelayResponse(t *testing.T) {
+	localFile := filepath.Join(t.TempDir(), "seg.ts")
+	if err := os.WriteFile(localFile, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{{StreamID: "cam1", SegmentName: "seg.ts", LocalPath: localFile}}, incServeHook: func(string) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+	}}
+	svc := &Service{Repository: repo}
+	serve := func() {
+		if !svc.ServeMedia(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), "cam1", "seg.ts") {
+			t.Error("serve failed")
+		}
+	}
+	serve()
+	done := make(chan struct{})
+	go func() { svc.flushServeCounts(""); close(done) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("flush did not start")
+	}
+	returned := make(chan struct{})
+	go func() { serve(); close(returned) }()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("request blocked on DB flush")
+	}
+	close(release)
+	<-done
+	svc.Close()
+	if got := repo.getSegment("cam1", "seg.ts").LocalCount; got != 2 {
+		t.Fatalf("lost concurrent increment: %d", got)
+	}
+}
+
+func TestServeCountsPeriodicFlush(t *testing.T) {
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{{StreamID: "cam1", SegmentName: "missing.ts"}}}
+	svc := &Service{Repository: repo}
+	svc.startServeCountFlush(10 * time.Millisecond)
+	defer svc.Close()
+	svc.ServeMedia(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), "cam1", "missing.ts")
+	calls := repo.waitForServeCountCalls(1, time.Second)
+	if len(calls) != 1 || calls[0].Counts != [4]int64{0, 0, 0, 1} {
+		t.Fatalf("periodic flush: %+v", calls)
+	}
+}
+
+func TestServeCountsRetryAndClose(t *testing.T) {
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{{StreamID: "cam1", SegmentName: "a.ts"}}, incServeErr: fmt.Errorf("db failure")}
+	svc := &Service{Repository: repo}
+	svc.incServeCount(&repo.segments[0], "cam1", "a.ts", "local")
+	svc.EndSession("cam1")
+	svc.incServeCount(&repo.segments[0], "cam1", "a.ts", "proxy")
+	repo.mu.Lock()
+	repo.incServeErr = nil
+	repo.mu.Unlock()
+	svc.Close()
+	seg := repo.getSegment("cam1", "a.ts")
+	if seg.LocalCount != 1 || seg.ProxyCount != 1 {
+		t.Fatalf("lost retry or close flush: %+v", seg)
+	}
+}
+
+func TestServeCountsConcurrentAggregation(t *testing.T) {
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{{StreamID: "cam1", SegmentName: "a.ts"}}}
+	svc := &Service{Repository: repo}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.incServeCount(&repo.segments[0], "cam1", "a.ts", "local")
+		}()
+	}
+	wg.Wait()
+	if len(repo.getServeCountCalls()) != 0 {
+		t.Fatal("request path wrote to database")
+	}
+	svc.EndSession("cam1")
+	calls := repo.getServeCountCalls()
+	if len(calls) != 1 || calls[0].Counts != [4]int64{100, 0, 0, 0} {
+		t.Fatalf("expected one aggregated update: %+v", calls)
+	}
+}
+
+func TestCloseWaitsForServingRequest(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	repo := &blockingServeRepo{
+		fakeRepo: fakeRepo{segments: []models.LiveHLSSegment{{StreamID: "cam1", SegmentName: "missing.ts"}}},
+		entered:  entered, release: release,
+	}
+	svc := &Service{Repository: repo}
+	served := make(chan struct{})
+	go func() {
+		svc.ServeMedia(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), "cam1", "missing.ts")
+		close(served)
+	}()
+	<-entered
+	closed := make(chan struct{})
+	go func() { svc.Close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned before request finished")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-served
+	<-closed
+	if got := repo.getSegment("cam1", "missing.ts").MissCount; got != 1 {
+		t.Fatalf("missing in-flight outcome: %d", got)
+	}
+}
+
+func TestServeMediaAfterClose(t *testing.T) {
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{{StreamID: "cam1", SegmentName: "missing.ts"}}}
+	svc := &Service{Repository: repo}
+	svc.Close()
+	if svc.ServeMedia(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), "cam1", "missing.ts") {
+		t.Fatal("closed service accepted request")
+	}
+	if len(repo.getServeCountCalls()) != 0 {
+		t.Fatal("closed service wrote counts")
+	}
+}
+
+func TestZeroValueServiceStartsPeriodicFlush(t *testing.T) {
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{{StreamID: "cam1", SegmentName: "missing.ts"}}}
+	svc := &Service{Repository: repo}
+	svc.ServeMedia(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), "cam1", "missing.ts")
+	svc.mu.Lock()
+	started := svc.stopFlush != nil
+	svc.mu.Unlock()
+	if !started {
+		t.Fatal("zero-value service did not start flush ticker")
+	}
+	svc.Close()
+}
+
+func TestCloseBoundsFailedBatchAcrossKeys(t *testing.T) {
+	repo := &deadlineServeRepo{}
+	svc := &Service{Repository: repo}
+	segment := &models.LiveHLSSegment{}
+	for i := 0; i < 10; i++ {
+		svc.incServeCount(segment, "cam1", fmt.Sprintf("segment-%d.ts", i), "miss")
+	}
+	start := time.Now()
+	svc.Close()
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("close waited per key: %v", elapsed)
+	}
+	svc.mu.Lock()
+	remaining := len(svc.counts)
+	svc.mu.Unlock()
+	if remaining != 10 {
+		t.Fatalf("lost failed deltas: %d keys", remaining)
+	}
+}
+
+type deadlineServeRepo struct{ fakeRepo }
+
+func (*deadlineServeRepo) AddServeCounts(ctx context.Context, _ string, _ string, _, _, _, _ int64) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type blockingServeRepo struct {
+	fakeRepo
+	entered, release chan struct{}
+}
+
+func (r *blockingServeRepo) GetByStreamAndSegment(streamID, segmentName string) (*models.LiveHLSSegment, error) {
+	close(r.entered)
+	<-r.release
+	return r.fakeRepo.GetByStreamAndSegment(streamID, segmentName)
+}
+
+func TestServeMediaPresignEmptyOrFailedFallbackToProxySuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		link    string
+		linkErr error
+	}{
+		{name: "presign_failed_err", link: "", linkErr: fmt.Errorf("presign failed")},
+		{name: "presign_empty_link", link: "", linkErr: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeRepo{segments: []models.LiveHLSSegment{
+				{
+					StreamID:    "cam1",
+					SegmentName: "seg10.ts",
+					StorageKey:  "live-hls/cam1/seg10.ts",
+				},
+			}}
+			svc := &Service{
+				Repository: repo,
+				provider: &fallbackMockProvider{
+					link:          tc.link,
+					linkErr:       tc.linkErr,
+					body:          "proxied-content",
+					contentType:   "video/mp2t",
+					contentLength: int64(len("proxied-content")),
+				},
+			}
+			req := httptest.NewRequest(http.MethodGet, "/media/cam1/seg10.ts", nil)
+			w := httptest.NewRecorder()
+
+			if !svc.ServeMedia(w, req, "cam1", "seg10.ts") {
+				t.Fatalf("expected ServeMedia to succeed via proxy fallback")
+			}
+			res := w.Result()
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", res.StatusCode)
+			}
+			body, _ := io.ReadAll(res.Body)
+			if string(body) != "proxied-content" {
+				t.Fatalf("unexpected body %q", string(body))
+			}
+			svc.EndSession("cam1")
+
+			calls := repo.waitForServeCountCalls(1, time.Second)
+			if len(calls) != 1 {
+				t.Fatalf("expected 1 ServeCountCall, got %d", len(calls))
+			}
+			if call := calls[0]; call.StreamID != "cam1" || call.SegmentName != "seg10.ts" || call.Outcome != "proxy" {
+				t.Fatalf("unexpected ServeCountCall: %+v", call)
+			}
+			seg := repo.getSegment("cam1", "seg10.ts")
+			if seg == nil || seg.ProxyCount != 1 {
+				t.Fatalf("expected ProxyCount 1, got %v", seg)
+			}
+		})
+	}
+}
+
+func TestServeMediaPresignFailureAndProxyFailureIncrementsMiss(t *testing.T) {
+	repo := &fakeRepo{segments: []models.LiveHLSSegment{
+		{
+			StreamID:    "cam1",
+			SegmentName: "seg10.ts",
+			StorageKey:  "live-hls/cam1/seg10.ts",
+		},
+	}}
+	svc := &Service{
+		Repository: repo,
+		provider: &fallbackMockProvider{
+			link:    "",
+			linkErr: fmt.Errorf("link generation error"),
+			readErr: fmt.Errorf("proxy read error"),
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/media/cam1/seg10.ts", nil)
+	w := httptest.NewRecorder()
+
+	if svc.ServeMedia(w, req, "cam1", "seg10.ts") {
+		t.Fatalf("expected ServeMedia to return false when both presign and proxy fail")
+	}
+	svc.EndSession("cam1")
+
+	calls := repo.waitForServeCountCalls(1, time.Second)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ServeCountCall for miss, got %d", len(calls))
+	}
+	if call := calls[0]; call.StreamID != "cam1" || call.SegmentName != "seg10.ts" || call.Outcome != "miss" {
+		t.Fatalf("unexpected ServeCountCall: %+v", call)
+	}
+	seg := repo.getSegment("cam1", "seg10.ts")
+	if seg == nil || seg.MissCount != 1 {
+		t.Fatalf("expected MissCount 1, got %v", seg)
 	}
 }
 

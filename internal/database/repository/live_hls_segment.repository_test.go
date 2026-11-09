@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"os"
 	"sort"
 	"testing"
@@ -25,9 +26,7 @@ func segmentTestRepo(t *testing.T) (models.LiveHLSSegmentRepository, *gorm.DB) {
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
-	if !db.Migrator().HasTable(&models.LiveHLSSegment{}) {
-		require.NoError(t, db.AutoMigrate(&models.LiveHLSSegment{}))
-	}
+	require.NoError(t, db.AutoMigrate(&models.LiveHLSSegment{}))
 	return NewLiveHLSSegmentRepository(db), db
 }
 
@@ -75,4 +74,51 @@ func TestListUploadedObjects(t *testing.T) {
 
 	_, err = repo.ListUploadedObjects("cdn", stream, "")
 	require.Error(t, err)
+}
+
+func TestSetReadyMS(t *testing.T) {
+	t.Run("nil repo returns nil", func(t *testing.T) {
+		var repo *LiveHLSSegmentRepository
+		err := repo.SetReadyMS(context.Background(), "s1", "seg1.mp4", 1500)
+		require.NoError(t, err)
+	})
+
+	t.Run("updates ready_ms on existing segment", func(t *testing.T) {
+		repo, db := segmentTestRepo(t)
+		streamID := "lt_" + uuid.NewString() + "/240"
+		segName := "seg_ready.mp4"
+		t.Cleanup(func() {
+			db.Unscoped().Where("stream_id = ?", streamID).Delete(&models.LiveHLSSegment{})
+		})
+
+		seg := models.LiveHLSSegment{
+			StreamID:    streamID,
+			SegmentName: segName,
+			LocalPath:   "/tmp/" + segName,
+		}
+		require.NoError(t, repo.UpsertUploaded(seg))
+
+		ctx := context.Background()
+		require.NoError(t, repo.SetReadyMS(ctx, streamID, segName, 1500))
+
+		reloaded, err := repo.GetByStreamAndSegment(streamID, segName)
+		require.NoError(t, err)
+		require.NotNil(t, reloaded.ReadyMS)
+		require.Equal(t, int64(1500), *reloaded.ReadyMS)
+	})
+}
+
+func TestAddServeCounts(t *testing.T) {
+	repo, db := segmentTestRepo(t)
+	streamID := "lt_" + uuid.NewString()
+	t.Cleanup(func() { db.Unscoped().Where("stream_id = ?", streamID).Delete(&models.LiveHLSSegment{}) })
+	require.NoError(t, repo.UpsertLocal(models.LiveHLSSegment{StreamID: streamID, SegmentName: "a.ts"}))
+	batch := repo.(models.LiveHLSSegmentServeCounter)
+	require.ErrorContains(t, batch.AddServeCounts(context.Background(), streamID, "absent.ts", 1, 0, 0, 0), "no matching segment")
+	for i := 0; i < 2; i++ {
+		require.NoError(t, batch.AddServeCounts(context.Background(), streamID, "a.ts", 2, 3, 4, 5))
+	}
+	segment, err := repo.GetByStreamAndSegment(streamID, "a.ts")
+	require.NoError(t, err)
+	require.Equal(t, []int64{4, 6, 8, 10}, []int64{segment.LocalCount, segment.RedirectCount, segment.ProxyCount, segment.MissCount})
 }

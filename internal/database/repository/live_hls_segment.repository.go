@@ -1,7 +1,9 @@
 package repository
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -298,4 +300,46 @@ func (r *LiveHLSSegmentRepository) ListUploadedObjects(
 // escapeLike escapes the LIKE wildcards of s for an ESCAPE '\' pattern.
 func escapeLike(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+func (r *LiveHLSSegmentRepository) SetReadyMS(
+	ctx context.Context,
+	streamID, segmentName string,
+	ms int64,
+) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	db := r.db
+	if ctx != nil {
+		db = db.WithContext(ctx)
+	}
+	return db.Model(&models.LiveHLSSegment{}).
+		Where("stream_id = ? AND segment_name = ?", streamID, segmentName).
+		Update("ready_ms", ms).Error
+}
+
+func (r *LiveHLSSegmentRepository) AddServeCounts(ctx context.Context, streamID, segmentName string, local, redirect, proxy, miss int64) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	db := r.db
+	if ctx != nil {
+		db = db.WithContext(ctx)
+	}
+	result := db.Model(&models.LiveHLSSegment{}).
+		Where("stream_id = ? AND segment_name = ?", streamID, segmentName).
+		Updates(map[string]interface{}{
+			"local_count":    gorm.Expr("local_count + ?", local),
+			"redirect_count": gorm.Expr("redirect_count + ?", redirect),
+			"proxy_count":    gorm.Expr("proxy_count + ?", proxy),
+			"miss_count":     gorm.Expr("miss_count + ?", miss),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("no matching segment %s/%s", streamID, segmentName)
+	}
+	return nil
 }

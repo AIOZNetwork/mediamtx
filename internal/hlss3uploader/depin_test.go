@@ -142,3 +142,11 @@ func TestDePINStorageProvider_GetLink_InvalidUUID(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "parse uuid")
 }
+
+func TestDePINStorageProvider_WaitReady(t *testing.T) {
+	provider := &DePINStorageProvider{
+		contractID: "00000000-0000-0000-0000-000000000001",
+	}
+	err := provider.WaitReady(context.Background(), "00000000-0000-0000-0000-000000000002")
+	require.NoError(t, err)
+}

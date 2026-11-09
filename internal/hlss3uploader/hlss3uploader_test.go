@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/mediamtx/internal/models"
+	"github.com/stretchr/testify/require"
 )
 
 type mockProvider struct {
@@ -167,14 +168,31 @@ func (m *readableMockProvider) GetObject(ctx context.Context, key string) (io.Re
 	return io.NopCloser(strings.NewReader(m.body)), m.contentType, m.contentLength, nil
 }
 
+type ReadyMSCall struct {
+	StreamID    string
+	SegmentName string
+	MS          int64
+}
+
+type ServeCountCall struct {
+	StreamID    string
+	SegmentName string
+	Outcome     string
+}
+
 type mockSegmentRepo struct {
-	segments map[string]models.LiveHLSSegment
+	mu              sync.Mutex
+	segments        map[string]models.LiveHLSSegment
+	ReadyMSCalls    []ReadyMSCall
+	ServeCountCalls []ServeCountCall
 }
 
 func (r *mockSegmentRepo) key(streamID, segmentName string) string {
 	return streamID + "/" + segmentName
 }
 func (r *mockSegmentRepo) UpsertLocal(segment models.LiveHLSSegment) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.segments == nil {
 		r.segments = make(map[string]models.LiveHLSSegment)
 	}
@@ -186,6 +204,8 @@ func (r *mockSegmentRepo) UpsertUploading(segment models.LiveHLSSegment) error {
 	return r.UpsertLocal(segment)
 }
 func (r *mockSegmentRepo) UpsertUploaded(segment models.LiveHLSSegment) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.segments == nil {
 		r.segments = make(map[string]models.LiveHLSSegment)
 	}
@@ -203,16 +223,24 @@ func (r *mockSegmentRepo) GetByStorageKey(storageKey string) (*models.LiveHLSSeg
 	return nil, errors.New("not found")
 }
 func (r *mockSegmentRepo) GetByStreamAndSegment(streamID, segmentName string) (*models.LiveHLSSegment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.segments == nil {
+		return nil, errors.New("not found")
+	}
 	seg, ok := r.segments[r.key(streamID, segmentName)]
 	if !ok {
 		return nil, errors.New("not found")
 	}
-	return &seg, nil
+	cp := seg
+	return &cp, nil
 }
 func (r *mockSegmentRepo) ListWindow(streamID, sessionID string, since time.Time) ([]models.LiveHLSSegment, error) {
 	return nil, nil
 }
 func (r *mockSegmentRepo) ListFMP4Window(streamID string, since time.Time) ([]models.LiveHLSSegment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var out []models.LiveHLSSegment
 	for _, seg := range r.segments {
 		if seg.StreamID == streamID && !seg.StartedAt.Before(since) {
@@ -224,6 +252,64 @@ func (r *mockSegmentRepo) ListFMP4Window(streamID string, since time.Time) ([]mo
 func (r *mockSegmentRepo) MaxSequence(streamID string) (int64, bool, error) { return 0, false, nil }
 func (r *mockSegmentRepo) ListUploadedObjects(_, _, _ string) ([]models.LiveHLSSegment, error) {
 	return nil, nil
+}
+
+func (r *mockSegmentRepo) SetReadyMS(ctx context.Context, streamID, segmentName string, ms int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ReadyMSCalls = append(r.ReadyMSCalls, ReadyMSCall{
+		StreamID:    streamID,
+		SegmentName: segmentName,
+		MS:          ms,
+	})
+	if r.segments != nil {
+		k := r.key(streamID, segmentName)
+		if seg, ok := r.segments[k]; ok {
+			seg.ReadyMS = &ms
+			r.segments[k] = seg
+		}
+	}
+	return nil
+}
+
+func (r *mockSegmentRepo) getReadyMSCalls() []ReadyMSCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := make([]ReadyMSCall, len(r.ReadyMSCalls))
+	copy(cp, r.ReadyMSCalls)
+	return cp
+}
+
+func (r *mockSegmentRepo) IncServeCount(ctx context.Context, streamID, segmentName, outcome string) error {
+	switch outcome {
+	case "local", "redirect", "proxy", "miss":
+	default:
+		return fmt.Errorf("unknown serve outcome: %s", outcome)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ServeCountCalls = append(r.ServeCountCalls, ServeCountCall{
+		StreamID:    streamID,
+		SegmentName: segmentName,
+		Outcome:     outcome,
+	})
+	if r.segments != nil {
+		k := r.key(streamID, segmentName)
+		if seg, ok := r.segments[k]; ok {
+			switch outcome {
+			case "local":
+				seg.LocalCount++
+			case "redirect":
+				seg.RedirectCount++
+			case "proxy":
+				seg.ProxyCount++
+			case "miss":
+				seg.MissCount++
+			}
+			r.segments[k] = seg
+		}
+	}
+	return nil
 }
 
 func TestHLSS3Uploader_InFlightAndCompletedExclusion(t *testing.T) {
@@ -630,4 +716,566 @@ func TestSendToTaskChanFullQueueDropsOldestWithoutGoroutines(t *testing.T) {
 			t.Fatalf("got %s want %s (newest must be kept)", got, w)
 		}
 	}
+}
+
+type waiterMockProvider struct {
+	mockProvider
+	waitErr   error
+	waitDelay time.Duration
+	waitCalls int32
+}
+
+func (m *waiterMockProvider) WaitReady(ctx context.Context, fileID string) error {
+	atomic.AddInt32(&m.waitCalls, 1)
+	if m.waitDelay > 0 {
+		select {
+		case <-time.After(m.waitDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return m.waitErr
+}
+
+func TestHLSS3Uploader_ReadinessPoller_Success(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "uploader-ready-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	filePath := filepath.Join(tmpDir, "segment_001.mp4")
+	require.NoError(t, os.WriteFile(filePath, []byte("fake video data"), 0644))
+
+	repo := &mockSegmentRepo{}
+	waitDelay := 30 * time.Millisecond
+	provider := &waiterMockProvider{
+		waitDelay: waitDelay,
+	}
+
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "test-prefix",
+			StreamName: "stream123",
+		},
+		provider:   provider,
+		Repository: repo,
+		ctx:        context.Background(),
+	}
+
+	beforeUpload := time.Now()
+	uploader.processFile(filePath)
+
+	require.Eventually(t, func() bool {
+		calls := repo.getReadyMSCalls()
+		return len(calls) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	calls := repo.getReadyMSCalls()
+	require.Len(t, calls, 1)
+	require.Equal(t, "stream123", calls[0].StreamID)
+	require.Equal(t, "segment_001.mp4", calls[0].SegmentName)
+	elapsed := time.Since(beforeUpload).Milliseconds()
+	require.GreaterOrEqual(t, calls[0].MS, waitDelay.Milliseconds())
+	require.LessOrEqual(t, calls[0].MS, elapsed)
+}
+
+func TestHLSS3Uploader_ReadinessPoller_WaitError(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "uploader-ready-err-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	filePath := filepath.Join(tmpDir, "segment_002.mp4")
+	require.NoError(t, os.WriteFile(filePath, []byte("fake video data"), 0644))
+
+	repo := &mockSegmentRepo{}
+	provider := &waiterMockProvider{
+		waitErr: errors.New("readiness wait failed"),
+	}
+
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "test-prefix",
+			StreamName: "stream123",
+		},
+		provider:   provider,
+		Repository: repo,
+		ctx:        context.Background(),
+	}
+
+	uploader.processFile(filePath)
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&provider.waitCalls) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	require.Never(t, func() bool {
+		return len(repo.getReadyMSCalls()) > 0
+	}, 200*time.Millisecond, 20*time.Millisecond)
+
+	// Upload itself succeeded without error
+	expectedKey := "test-prefix/stream123/segment_002.mp4"
+	_, loaded := uploader.uploadedFiles.Load(expectedKey)
+	require.True(t, loaded)
+}
+
+func TestHLSS3Uploader_ReadinessPoller_ProviderWithoutWaiter(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "uploader-no-waiter-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	filePath := filepath.Join(tmpDir, "segment_003.mp4")
+	require.NoError(t, os.WriteFile(filePath, []byte("fake video data"), 0644))
+
+	repo := &mockSegmentRepo{}
+	provider := &mockProvider{} // does not implement ReadinessWaiter
+
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "test-prefix",
+			StreamName: "stream123",
+		},
+		provider:   provider,
+		Repository: repo,
+		ctx:        context.Background(),
+	}
+
+	uploader.processFile(filePath)
+
+	expectedKey := "test-prefix/stream123/segment_003.mp4"
+	_, loaded := uploader.uploadedFiles.Load(expectedKey)
+	require.True(t, loaded)
+
+	require.Never(t, func() bool {
+		return len(repo.getReadyMSCalls()) > 0
+	}, 200*time.Millisecond, 20*time.Millisecond)
+}
+
+func TestHLSS3Uploader_ReadinessPoller_ShutdownCancellation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "uploader-shutdown-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	filePath := filepath.Join(tmpDir, "segment_004.mp4")
+	require.NoError(t, os.WriteFile(filePath, []byte("fake video data"), 0644))
+
+	repo := &mockSegmentRepo{}
+	ctx, cancel := context.WithCancel(context.Background())
+	provider := &waiterMockProvider{
+		waitDelay: 10 * time.Second,
+	}
+
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "test-prefix",
+			StreamName: "stream123",
+		},
+		provider:   provider,
+		Repository: repo,
+		ctx:        ctx,
+	}
+
+	uploader.processFile(filePath)
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&provider.waitCalls) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	cancel()
+
+	require.Never(t, func() bool {
+		return len(repo.getReadyMSCalls()) > 0
+	}, 200*time.Millisecond, 20*time.Millisecond)
+}
+
+type blockingWaiterProvider struct {
+	mockProvider
+	unblock   chan struct{}
+	waitCalls int32
+}
+
+func (m *blockingWaiterProvider) WaitReady(ctx context.Context, fileID string) error {
+	atomic.AddInt32(&m.waitCalls, 1)
+	select {
+	case <-m.unblock:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestHLSS3Uploader_ReadinessPoller_SaturationDrops(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "uploader-saturation-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	file1 := filepath.Join(tmpDir, "segment_001.mp4")
+	file2 := filepath.Join(tmpDir, "segment_002.mp4")
+	file3 := filepath.Join(tmpDir, "segment_003.mp4")
+	require.NoError(t, os.WriteFile(file1, []byte("fake video 1"), 0644))
+	require.NoError(t, os.WriteFile(file2, []byte("fake video 2"), 0644))
+	require.NoError(t, os.WriteFile(file3, []byte("fake video 3"), 0644))
+
+	repo := &mockSegmentRepo{}
+	unblock := make(chan struct{})
+	provider := &blockingWaiterProvider{
+		unblock: unblock,
+	}
+
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "test-prefix",
+			StreamName: "stream123",
+		},
+		provider:            provider,
+		Repository:          repo,
+		MaxReadinessPollers: 2,
+		ctx:                 context.Background(),
+	}
+
+	// Process first 2 files: both should acquire the 2 semaphore slots and wait
+	uploader.processFile(file1)
+	uploader.processFile(file2)
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&provider.waitCalls) == 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Process 3rd file: semaphore is saturated (capacity 2). Measurement must be dropped immediately.
+	// Upload should still succeed with zero delay.
+	uploader.processFile(file3)
+
+	expectedKey3 := "test-prefix/stream123/segment_003.mp4"
+	_, loaded := uploader.uploadedFiles.Load(expectedKey3)
+	require.True(t, loaded, "file3 upload must succeed despite saturation")
+
+	// waitCalls must remain 2 (file3 poller was dropped)
+	require.Never(t, func() bool {
+		return atomic.LoadInt32(&provider.waitCalls) > 2
+	}, 200*time.Millisecond, 20*time.Millisecond)
+
+	// Unblock waiters
+	close(unblock)
+
+	// Repo should receive ready_ms for file1 and file2 only
+	require.Eventually(t, func() bool {
+		return len(repo.getReadyMSCalls()) == 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	calls := repo.getReadyMSCalls()
+	segNames := []string{calls[0].SegmentName, calls[1].SegmentName}
+	require.Contains(t, segNames, "segment_001.mp4")
+	require.Contains(t, segNames, "segment_002.mp4")
+	require.NotContains(t, segNames, "segment_003.mp4")
+}
+
+type trackingClosedProvider struct {
+	mockProvider
+	mu             sync.Mutex
+	closed         bool
+	usedAfterClose bool
+	waitStarted    chan struct{}
+}
+
+func (m *trackingClosedProvider) Close() error {
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *trackingClosedProvider) checkClosed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		m.usedAfterClose = true
+	}
+}
+
+func (m *trackingClosedProvider) UploadFile(ctx context.Context, localPath, remoteKey, contentType string) (string, error) {
+	m.checkClosed()
+	return m.mockProvider.UploadFile(ctx, localPath, remoteKey, contentType)
+}
+
+func (m *trackingClosedProvider) WaitReady(ctx context.Context, fileID string) error {
+	m.checkClosed()
+	select {
+	case m.waitStarted <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	m.checkClosed()
+	return ctx.Err()
+}
+
+func TestHLSS3Uploader_ReadinessPoller_CloseWithBlockedWaiter(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "uploader-close-blocked-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	filePath := filepath.Join(tmpDir, "segment_close.mp4")
+	require.NoError(t, os.WriteFile(filePath, []byte("fake video"), 0644))
+
+	repo := &mockSegmentRepo{}
+	provider := &trackingClosedProvider{
+		waitStarted: make(chan struct{}, 1),
+	}
+
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "test-prefix",
+			StreamName: "stream123",
+		},
+		provider:   provider,
+		Repository: repo,
+	}
+
+	// Run upload, which starts readiness poller
+	uploader.processFile(filePath)
+
+	// Wait for poller to enter WaitReady and block on ctx.Done()
+	select {
+	case <-provider.waitStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("poller did not enter WaitReady in time")
+	}
+
+	// Close uploader while waiter is blocked
+	uploader.Close()
+
+	provider.mu.Lock()
+	closed := provider.closed
+	usedAfterClose := provider.usedAfterClose
+	provider.mu.Unlock()
+
+	require.True(t, closed, "provider must be closed")
+	require.False(t, usedAfterClose, "no provider methods should be invoked after close")
+	require.Empty(t, repo.getReadyMSCalls(), "canceled waiter must not call SetReadyMS")
+}
+
+type rogueWaiterProvider struct {
+	mockProvider
+	mu             sync.Mutex
+	closed         bool
+	usedAfterClose bool
+	waitStarted    chan struct{}
+	waitFinish     chan struct{}
+	waitDone       chan struct{}
+}
+
+func (m *rogueWaiterProvider) Close() error {
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *rogueWaiterProvider) checkClosed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		m.usedAfterClose = true
+	}
+}
+
+func (m *rogueWaiterProvider) UploadFile(ctx context.Context, localPath, remoteKey, contentType string) (string, error) {
+	m.checkClosed()
+	return m.mockProvider.UploadFile(ctx, localPath, remoteKey, contentType)
+}
+
+func (m *rogueWaiterProvider) WaitReady(ctx context.Context, fileID string) error {
+	m.checkClosed()
+	select {
+	case m.waitStarted <- struct{}{}:
+	default:
+	}
+	// Intentionally ignores ctx.Done() and waits for waitFinish
+	<-m.waitFinish
+	m.checkClosed()
+	select {
+	case m.waitDone <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func TestHLSS3Uploader_ReadinessPoller_CloseWithRogueWaiterIgnoresCtx(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "uploader-rogue-waiter-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	filePath := filepath.Join(tmpDir, "segment_rogue.mp4")
+	require.NoError(t, os.WriteFile(filePath, []byte("fake video content"), 0644))
+
+	repo := &mockSegmentRepo{}
+	provider := &rogueWaiterProvider{
+		waitStarted: make(chan struct{}, 1),
+		waitFinish:  make(chan struct{}),
+		waitDone:    make(chan struct{}, 1),
+	}
+
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "test-prefix",
+			StreamName: "stream123",
+		},
+		provider:        provider,
+		Repository:      repo,
+		ShutdownTimeout: 50 * time.Millisecond,
+		ctx:             context.Background(),
+	}
+
+	uploader.processFile(filePath)
+
+	select {
+	case <-provider.waitStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("poller did not enter WaitReady in time")
+	}
+
+	// Close uploader: pollers timeout after 50ms, Close returns without hanging
+	beforeClose := time.Now()
+	uploader.Close()
+	closeDuration := time.Since(beforeClose)
+	require.GreaterOrEqual(t, closeDuration, 40*time.Millisecond)
+
+	// Provider must NOT be closed while rogue waiter is still in-flight
+	provider.mu.Lock()
+	closedImmediately := provider.closed
+	usedAfterClose := provider.usedAfterClose
+	provider.mu.Unlock()
+	require.False(t, closedImmediately, "provider.Close must be deferred while waiter is running")
+	require.False(t, usedAfterClose)
+
+	// Now release rogue waiter
+	close(provider.waitFinish)
+
+	select {
+	case <-provider.waitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rogue waiter did not finish")
+	}
+
+	// Now provider must be closed via deferred closer
+	require.Eventually(t, func() bool {
+		provider.mu.Lock()
+		defer provider.mu.Unlock()
+		return provider.closed
+	}, 2*time.Second, 10*time.Millisecond)
+
+	provider.mu.Lock()
+	usedAfterCloseFinal := provider.usedAfterClose
+	provider.mu.Unlock()
+	require.False(t, usedAfterCloseFinal, "provider methods must NEVER be called after close")
+}
+
+type slowUploadProvider struct {
+	mockProvider
+	mu             sync.Mutex
+	closed         bool
+	usedAfterClose bool
+	uploadStarted  chan struct{}
+	uploadFinish   chan struct{}
+}
+
+func (m *slowUploadProvider) Close() error {
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *slowUploadProvider) checkClosed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		m.usedAfterClose = true
+	}
+}
+
+func (m *slowUploadProvider) UploadFile(ctx context.Context, localPath, remoteKey, contentType string) (string, error) {
+	m.checkClosed()
+	select {
+	case m.uploadStarted <- struct{}{}:
+	default:
+	}
+	<-m.uploadFinish
+	m.checkClosed()
+	return "mock-etag", nil
+}
+
+func TestHLSS3Uploader_WorkerTimeoutDefersProviderClose(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "uploader-slow-worker-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	filePath := filepath.Join(tmpDir, "segment_worker.mp4")
+	require.NoError(t, os.WriteFile(filePath, []byte("fake video content"), 0644))
+
+	provider := &slowUploadProvider{
+		uploadStarted: make(chan struct{}, 1),
+		uploadFinish:  make(chan struct{}),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	uploader := &HLSS3Uploader{
+		Config: StorageConfig{
+			Directory:  tmpDir,
+			Prefix:     "test-prefix",
+			StreamName: "stream123",
+			Workers:    1,
+		},
+		provider:        provider,
+		ctx:             ctx,
+		ctxCancel:       cancel,
+		done:            make(chan struct{}),
+		taskChan:        make(chan string, 10),
+		ShutdownTimeout: 50 * time.Millisecond,
+	}
+	close(uploader.done)
+	uploader.wg.Add(1)
+	go uploader.workerLoop()
+
+	// Enqueue segment to worker
+	uploader.sendToTaskChan(filePath)
+
+	select {
+	case <-provider.uploadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not start upload in time")
+	}
+
+	// Close uploader while worker is still uploading
+	beforeClose := time.Now()
+	uploader.Close()
+	closeDuration := time.Since(beforeClose)
+	require.GreaterOrEqual(t, closeDuration, 40*time.Millisecond)
+
+	// Provider must NOT be closed while worker is still uploading
+	provider.mu.Lock()
+	closedImmediately := provider.closed
+	usedAfterClose := provider.usedAfterClose
+	provider.mu.Unlock()
+	require.False(t, closedImmediately, "provider.Close must be deferred while worker is uploading")
+	require.False(t, usedAfterClose)
+
+	// Finish upload
+	close(provider.uploadFinish)
+
+	// Provider must eventually be closed by deferred closer once worker exits
+	require.Eventually(t, func() bool {
+		provider.mu.Lock()
+		defer provider.mu.Unlock()
+		return provider.closed
+	}, 2*time.Second, 10*time.Millisecond)
+
+	provider.mu.Lock()
+	usedAfterCloseFinal := provider.usedAfterClose
+	provider.mu.Unlock()
+	require.False(t, usedAfterCloseFinal, "worker must not use provider after close")
 }
